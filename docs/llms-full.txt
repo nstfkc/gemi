@@ -9681,9 +9681,12 @@ model GemiAgentThread {
   summaryLockUntil BigInt? @map("summary_lock_until")
   createdAt        BigInt  @map("created_at")
   updatedAt        BigInt  @map("updated_at")
+  expiresAt        BigInt? @map("expires_at")
+  ttlMs            BigInt? @map("ttl_ms")
 
   @@index([userId, updatedAt])
   @@index([scope, userId, updatedAt])
+  @@index([expiresAt])
   @@map("gemi_agent_threads")
 }
 
@@ -9766,6 +9769,50 @@ The setting is local to the transaction, so nothing is left on the pooled connec
 ### Adding scopes to existing tables
 
 Tables created before scopes keep working for the unscoped store. To use `forScope`, add the column: with Prisma, add the `scope` fields and the index from the models above and run `prisma migrate dev`. Without Prisma, `await agentStore.addScopeColumns()` (also run by `createTable()`) adds them to tables that do not have them yet. Threads written before are in no scope: the unscoped store sees them and no scope does, until the app sets their `scope` itself.
+
+### Adding expiry to existing tables
+
+Threads expire only on a store with `ttlMs` (see below), and only that store reads the `expires_at` and `ttl_ms` columns, so tables created before them keep working until you set it. To use it, add the `expiresAt` and `ttlMs` fields and the `@@index([expiresAt])` from the model above and run `prisma migrate dev`. Without Prisma, `await agentStore.addExpiryColumns()` (also run by `createTable()`) adds them. Threads written before have no expiry.
+
+## Expiring threads
+
+Some conversations should only be kept for a short time, such as an anonymous visitor's chat that holds a photo and lasts as long as the visitor's signed token. Give the store a `ttlMs` and its threads expire:
+
+```ts
+export const visitorChats = new DatabaseAgentStore(app(DatabaseManager).connection(), {
+  ttlMs: 60 * 60_000, // an hour from creation
+});
+
+const { threadId } = await visitorChats.createThread({});
+await visitorChats.createThread({ ttlMs: 10 * 60_000 }); // this thread's own
+await visitorChats.createThread({ expiresAt: token.expiresAt }); // a fixed time: epoch ms or a Date
+await visitorChats.createThread({ ttlMs: null }); // kept until deleted
+```
+
+- **An expired thread is gone at once.** `loadThread` and `getThread` answer `null`, so the controller answers 404 and runs no turn on it. `listThreads` leaves it out, and `appendMessages` refuses it. The database's clock decides.
+- **Fixed by default.** The expiry is set when the thread is created. With `slidingTtl: true`, each append moves it to `ttlMs` from then, so the thread lasts as long as someone keeps writing to it. `expiresAt` never slides.
+- **The sweep reclaims the rows.** `sweepExpired({ limit })` deletes up to `limit` (500) expired threads with their messages and summaries, oldest first. Run it from a cron, next to [`sweepAttachments()`](./ai-controller-hooks.md#short-lived-attachments) for the files those threads held:
+
+```ts
+// app/cron/SweepVisitorChats.ts
+import { CronJob } from "gemi/services";
+
+export class SweepVisitorChats extends CronJob {
+  name = "SweepVisitorChats";
+  cron = CronJob.exp("*/10 * * * *");
+
+  async callback() {
+    await visitorChats.sweepExpired();
+    await new VisitorChatController().sweepAttachments();
+  }
+}
+```
+
+- A scoped view (`forScope`) sweeps its own scope. `getThread` and `listThreads` records carry `expiresAt` (`null` for a thread that does not expire).
+- A store without `ttlMs` expires nothing: `createThread({ ttlMs })` throws there, and `sweepExpired()` answers `{ deleted: 0 }`.
+- Expiry removes the thread, not what it led to: agent memories scoped to it and attachments are deleted by their own rules.
+
+`MemoryAgentStore` takes the same `createThread({ ttlMs, expiresAt })` and has `sweepExpired()` too, for tests. Its `ttlMs` (a day by default) slides with every read and write unless `slidingTtl: false`.
 
 ## Listing and deleting threads
 
@@ -11834,8 +11881,20 @@ export class StoreChatController extends AgentController<typeof storeAgent, Stor
 Run the sweep from a cron. It also deletes `"turn"` files whose turn never completed, for example after a restart:
 
 ```typescript
-Cron.everyFiveMinutes(() => new StoreChatController().sweepAttachments());
+// app/cron/SweepChatAttachments.ts
+import { CronJob } from "gemi/services";
+
+export class SweepChatAttachments extends CronJob {
+  name = "SweepChatAttachments";
+  cron = CronJob.exp("*/5 * * * *");
+
+  async callback() {
+    await new StoreChatController().sweepAttachments();
+  }
+}
 ```
+
+A store with [expiring threads](./ai-thread-store.md#expiring-threads) sweeps them the same way, with `store.sweepExpired()`.
 
 It answers `{ deleted, failed }`. A deletion that fails, in a turn or in the sweep, goes to `reportHookFailure`, and its record stays so the next sweep tries again. A missing `deleteFile` on the provider or `delete` on storage counts as a failure, because skipping a copy would leave it in place unnoticed.
 

@@ -141,8 +141,20 @@ export class StoreChatController extends AgentController<typeof storeAgent, Stor
 Run the sweep from a cron. It also deletes `"turn"` files whose turn never completed, for example after a restart:
 
 ```typescript
-Cron.everyFiveMinutes(() => new StoreChatController().sweepAttachments());
+// app/cron/SweepChatAttachments.ts
+import { CronJob } from "gemi/services";
+
+export class SweepChatAttachments extends CronJob {
+  name = "SweepChatAttachments";
+  cron = CronJob.exp("*/5 * * * *");
+
+  async callback() {
+    await new StoreChatController().sweepAttachments();
+  }
+}
 ```
+
+A store with [expiring threads](./ai-thread-store.md#expiring-threads) sweeps them the same way, with `store.sweepExpired()`.
 
 It answers `{ deleted, failed }`. A deletion that fails, in a turn or in the sweep, goes to `reportHookFailure`, and its record stays so the next sweep tries again. A missing `deleteFile` on the provider or `delete` on storage counts as a failure, because skipping a copy would leave it in place unnoticed.
 

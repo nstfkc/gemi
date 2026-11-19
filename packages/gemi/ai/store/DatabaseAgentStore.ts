@@ -3,7 +3,7 @@ import type { SQL, TransactionSQL } from "bun";
 import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
 import { currentConnectionName, currentTransaction, withTransaction } from "../../orm/context";
-import type { AgentStore } from "../AgentController";
+import type { AgentStore, CreateThreadParams, ThreadSweepResult } from "../AgentController";
 import { keepSummary, type ThreadSummary } from "../contextCompaction";
 import type { AgentMessage } from "../types";
 
@@ -37,6 +37,29 @@ export type DatabaseAgentStoreOptions = {
    * the app's, and the app's own setting applies; the hook is not called.
    */
   beginScope?: (tx: SQL, scope: string) => unknown;
+  /**
+   * Threads expire this long after they are created (#1312), or after their
+   * last append with `slidingTtl`. An expired thread is one the store does not
+   * have: `loadThread` and `getThread` answer `null` (so the controller
+   * answers 404 and runs no turn), `listThreads` leaves it out, and
+   * `appendMessages` refuses it. `sweepExpired()` deletes it with its messages
+   * and summaries. `createThread({ ttlMs })` sets one thread's, and `null`
+   * there keeps that thread.
+   *
+   * Setting it turns expiry on for this store: its statements read the
+   * `expires_at` and `ttl_ms` columns, which `createTable()` and
+   * `addExpiryColumns()` add (see the upgrade notes for the Prisma fields).
+   * Unset, the store never names them and nothing expires. Threads created
+   * before it was set have no expiry.
+   */
+  ttlMs?: number;
+  /**
+   * With `ttlMs`, each append moves a thread's expiry to `ttlMs` from then, so
+   * a conversation lasts as long as someone keeps writing to it. Default
+   * `false`: the expiry is fixed when the thread is created, which suits a
+   * thread that lives as long as the token that grants it.
+   */
+  slidingTtl?: boolean;
 };
 
 /** One thread, as `listThreads` and `getThread` answer it. */
@@ -50,6 +73,11 @@ export type AgentThreadRecord = {
   createdAt: number;
   /** Epoch milliseconds of the last write. */
   updatedAt: number;
+  /**
+   * Epoch milliseconds the thread expires at (#1312), or `null` for one that
+   * does not. Only on a store with `ttlMs`; absent otherwise.
+   */
+  expiresAt?: number | null;
 };
 
 type Row = Record<string, unknown>;
@@ -119,6 +147,14 @@ export class DatabaseAgentStore implements AgentStore {
     this.dialect = connection.dialect;
     this.connection = connection.name;
     this.options = options;
+    if (options.ttlMs !== undefined) {
+      positiveMs(options.ttlMs, "ttlMs");
+    }
+  }
+
+  /** Whether threads expire here: the store has a `ttlMs` (#1312). */
+  get expires(): boolean {
+    return this.options.ttlMs !== undefined;
   }
 
   /**
@@ -152,6 +188,20 @@ export class DatabaseAgentStore implements AgentStore {
     );
     for (const statement of statements) await this.sql.unsafe(statement);
     await this.addScopeColumns();
+    await this.addExpiryColumns();
+  }
+
+  /**
+   * Adds the `expires_at` and `ttl_ms` columns and the `expires_at` index
+   * (#1312) to a threads table created before them, and does nothing to one
+   * that has them. `createTable()` calls it; an app that manages its schema
+   * with Prisma adds the fields to its model instead.
+   */
+  async addExpiryColumns(): Promise<void> {
+    if (await this.hasColumn(this.threadsTable, "expires_at")) return;
+    for (const statement of addExpiryColumnStatements(this.dialect, this.threadsTable)) {
+      await this.sql.unsafe(statement);
+    }
   }
 
   /**
@@ -177,12 +227,28 @@ export class DatabaseAgentStore implements AgentStore {
     }
   }
 
-  async createThread(params: { userId?: string | number }): Promise<{ threadId: string }> {
+  async createThread(params: CreateThreadParams = {}): Promise<{ threadId: string }> {
     const threadId = crypto.randomUUID();
     const userId = params.userId === undefined || params.userId === null ? null : String(params.userId);
+    const expiry = this.expiryOf(params);
     await this.run(async (q) => {
       const now = this.clock(q);
-      if (this.scope === null) {
+      if (expiry) {
+        const expiresAt =
+          expiry.at !== undefined ? this.ms(q, expiry.at) : expiry.ttlMs === null ? null : q`${now} + ${this.ms(q, expiry.ttlMs)}`;
+        const ttlMs = expiry.slides && expiry.ttlMs !== null ? this.ms(q, expiry.ttlMs) : null;
+        if (this.scope === null) {
+          await q`
+            INSERT INTO ${this.threads(q)} (id, user_id, created_at, updated_at, expires_at, ttl_ms)
+            VALUES (${threadId}, ${userId}, ${now}, ${now}, ${expiresAt}, ${ttlMs})
+          `;
+        } else {
+          await q`
+            INSERT INTO ${this.threads(q)} (id, scope, user_id, created_at, updated_at, expires_at, ttl_ms)
+            VALUES (${threadId}, ${this.scope}, ${userId}, ${now}, ${now}, ${expiresAt}, ${ttlMs})
+          `;
+        }
+      } else if (this.scope === null) {
         await q`
           INSERT INTO ${this.threads(q)} (id, user_id, created_at, updated_at)
           VALUES (${threadId}, ${userId}, ${now}, ${now})
@@ -200,7 +266,8 @@ export class DatabaseAgentStore implements AgentStore {
   async loadThread(threadId: string): Promise<AgentMessage[] | null> {
     return this.run(async (q) => {
       const thread: Row[] = await q`
-        SELECT id FROM ${this.threads(q)} WHERE id = ${threadId} AND ${this.inScope(q)}
+        SELECT id FROM ${this.threads(q)}
+        WHERE id = ${threadId} AND ${this.inScope(q)} AND ${this.live(q)}
       `;
       if (thread.length === 0) return null;
       const rows: Row[] = await q`
@@ -221,12 +288,24 @@ export class DatabaseAgentStore implements AgentStore {
     await this.atomically(async (q) => {
       // The write lock first: the row on Postgres and MySQL, the database on
       // SQLite. Everything below reads and writes under it.
-      await q`
-        UPDATE ${this.threads(q)} SET updated_at = ${this.clock(q)}
-        WHERE id = ${threadId} AND ${this.inScope(q)}
-      `;
+      // A sliding thread's expiry moves with the write (`ttl_ms` is set only
+      // on those); an expired thread is not touched, and is refused below.
+      if (this.expires) {
+        await q`
+          UPDATE ${this.threads(q)}
+          SET updated_at = ${this.clock(q)},
+            expires_at = CASE WHEN ttl_ms IS NULL THEN expires_at ELSE ${this.clock(q)} + ttl_ms END
+          WHERE id = ${threadId} AND ${this.inScope(q)} AND ${this.live(q)}
+        `;
+      } else {
+        await q`
+          UPDATE ${this.threads(q)} SET updated_at = ${this.clock(q)}
+          WHERE id = ${threadId} AND ${this.inScope(q)}
+        `;
+      }
       const thread: Row[] = await q`
-        SELECT title FROM ${this.threads(q)} WHERE id = ${threadId} AND ${this.inScope(q)}
+        SELECT title FROM ${this.threads(q)}
+        WHERE id = ${threadId} AND ${this.inScope(q)} AND ${this.live(q)}
       `;
       if (thread.length === 0) throw missingThread(threadId);
 
@@ -292,7 +371,8 @@ export class DatabaseAgentStore implements AgentStore {
   async loadSummaries(threadId: string): Promise<ThreadSummary[]> {
     return this.run(async (q) => {
       const [row] = (await q`
-        SELECT summaries FROM ${this.threads(q)} WHERE id = ${threadId} AND ${this.inScope(q)}
+        SELECT summaries FROM ${this.threads(q)}
+        WHERE id = ${threadId} AND ${this.inScope(q)} AND ${this.live(q)}
       `) as Row[];
       return row ? parseSummaries(row.summaries) : [];
     });
@@ -305,7 +385,8 @@ export class DatabaseAgentStore implements AgentStore {
         WHERE id = ${threadId} AND ${this.inScope(q)}
       `;
       const [row] = (await q`
-        SELECT summaries FROM ${this.threads(q)} WHERE id = ${threadId} AND ${this.inScope(q)}
+        SELECT summaries FROM ${this.threads(q)}
+        WHERE id = ${threadId} AND ${this.inScope(q)} AND ${this.live(q)}
       `) as Row[];
       // A thread that is gone has nothing to summarise; the summary goes with it.
       if (!row) return;
@@ -333,7 +414,7 @@ export class DatabaseAgentStore implements AgentStore {
       const result = await q`
         UPDATE ${this.threads(q)}
         SET summary_lock = ${token}, summary_lock_until = ${now} + ${this.ms(q, ttlMs)}
-        WHERE id = ${threadId} AND ${this.inScope(q)}
+        WHERE id = ${threadId} AND ${this.inScope(q)} AND ${this.live(q)}
           AND (summary_lock_until IS NULL OR summary_lock_until <= ${now})
       `;
       return affected(result) > 0;
@@ -355,8 +436,8 @@ export class DatabaseAgentStore implements AgentStore {
   async getThread(threadId: string): Promise<AgentThreadRecord | null> {
     return this.run(async (q) => {
       const [row] = (await q`
-        SELECT id, user_id, title, created_at, updated_at FROM ${this.threads(q)}
-        WHERE id = ${threadId} AND ${this.inScope(q)}
+        SELECT ${this.recordColumns(q)} FROM ${this.threads(q)}
+        WHERE id = ${threadId} AND ${this.inScope(q)} AND ${this.live(q)}
       `) as Row[];
       return row ? threadOf(row) : null;
     });
@@ -381,8 +462,8 @@ export class DatabaseAgentStore implements AgentStore {
             ? q`user_id IS NULL`
             : q`user_id = ${String(options.userId)}`;
       const rows: Row[] = await q`
-        SELECT id, user_id, title, created_at, updated_at FROM ${this.threads(q)}
-        WHERE ${this.inScope(q)} AND ${where}
+        SELECT ${this.recordColumns(q)} FROM ${this.threads(q)}
+        WHERE ${this.inScope(q)} AND ${this.live(q)} AND ${where}
         ORDER BY updated_at DESC, id DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -405,6 +486,48 @@ export class DatabaseAgentStore implements AgentStore {
       if (thread.length === 0) return;
       await q`DELETE FROM ${this.messages(q)} WHERE thread_id = ${threadId}`;
       await q`DELETE FROM ${this.threads(q)} WHERE id = ${threadId}`;
+    });
+  }
+
+  /**
+   * Deletes up to `limit` (default 500) expired threads with their messages
+   * and summaries (#1312), oldest expiry first. For a `CronJob` every few
+   * minutes, next to `AgentController.sweepAttachments()`.
+   *
+   * A scoped view sweeps its scope only. `now` (epoch milliseconds) stands in
+   * for the database's clock, for tests. A store without `ttlMs` has nothing
+   * that expires, and answers `{ deleted: 0 }` without touching the table.
+   * An expired thread is already unreadable before the sweep runs; the sweep
+   * only reclaims its rows.
+   */
+  async sweepExpired(options: { now?: number; limit?: number } = {}): Promise<ThreadSweepResult> {
+    if (!this.expires) {
+      this.guard();
+      return { deleted: 0 };
+    }
+    const limit = Math.max(0, Math.floor(options.limit ?? 500));
+    if (limit === 0) return { deleted: 0 };
+    return this.atomically(async (q) => {
+      const cutoff = options.now === undefined ? this.clock(q) : this.ms(q, options.now);
+      const expired = q`expires_at IS NOT NULL AND expires_at <= ${cutoff} AND ${this.inScope(q)}`;
+      const candidates: Row[] = await q`
+        SELECT id FROM ${this.threads(q)} WHERE ${expired}
+        ORDER BY expires_at, id
+        LIMIT ${limit}
+      `;
+      if (candidates.length === 0) return { deleted: 0 };
+      const ids = candidates.map((row) => String(row.id));
+      // Locks the rows (the database on SQLite), so an append that slides one
+      // of them waits for the sweep. Then only the ones still expired go.
+      await q`UPDATE ${this.threads(q)} SET updated_at = updated_at WHERE id IN (${list(q, ids)})`;
+      const still: Row[] = await q`
+        SELECT id FROM ${this.threads(q)} WHERE id IN (${list(q, ids)}) AND ${expired}
+      `;
+      if (still.length === 0) return { deleted: 0 };
+      const gone = still.map((row) => String(row.id));
+      await q`DELETE FROM ${this.messages(q)} WHERE thread_id IN (${list(q, gone)})`;
+      await q`DELETE FROM ${this.threads(q)} WHERE id IN (${list(q, gone)})`;
+      return { deleted: gone.length };
     });
   }
 
@@ -479,6 +602,47 @@ export class DatabaseAgentStore implements AgentStore {
   /** The scope condition: `1 = 1` on the unscoped store, which reads every row. */
   private inScope(q: SQL) {
     return this.scope === null ? q`1 = 1` : q`scope = ${this.scope}`;
+  }
+
+  /**
+   * Not expired (#1312), by the database's clock. `1 = 1` on a store without
+   * `ttlMs`, which never names the expiry columns.
+   */
+  private live(q: SQL) {
+    return this.expires ? q`(expires_at IS NULL OR expires_at > ${this.clock(q)})` : q`1 = 1`;
+  }
+
+  /** The columns of an `AgentThreadRecord`. */
+  private recordColumns(q: SQL) {
+    return this.expires
+      ? q.unsafe("id, user_id, title, created_at, updated_at, expires_at")
+      : q.unsafe("id, user_id, title, created_at, updated_at");
+  }
+
+  /**
+   * A new thread's expiry, or `null` on a store without `ttlMs`, which
+   * refuses a thread's own.
+   */
+  private expiryOf(
+    params: CreateThreadParams,
+  ): { at?: number; ttlMs: number | null; slides: boolean } | null {
+    const own = params.ttlMs !== undefined || params.expiresAt !== undefined;
+    if (!this.expires) {
+      if (own) {
+        throw new Error(
+          "createThread({ ttlMs, expiresAt }) needs a store with `ttlMs`: set `new DatabaseAgentStore(connection, { ttlMs })`, which turns expiry on and reads the expiry columns.",
+        );
+      }
+      return null;
+    }
+    if (params.expiresAt !== undefined) {
+      const at = params.expiresAt instanceof Date ? params.expiresAt.getTime() : params.expiresAt;
+      if (!Number.isFinite(at)) throw new TypeError("createThread: `expiresAt` is not a valid time.");
+      return { at, ttlMs: null, slides: false };
+    }
+    const ttlMs = params.ttlMs === undefined ? this.options.ttlMs! : params.ttlMs;
+    if (ttlMs !== null) positiveMs(ttlMs, "createThread: ttlMs");
+    return { ttlMs, slides: this.options.slidingTtl === true };
   }
 
 
@@ -561,7 +725,16 @@ function threadOf(row: Row): AgentThreadRecord {
     title: row.title === null || row.title === undefined ? null : String(row.title),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
+    ...("expires_at" in row
+      ? { expiresAt: row.expires_at === null || row.expires_at === undefined ? null : Number(row.expires_at) }
+      : {}),
   };
+}
+
+function positiveMs(value: number, name: string) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive number of milliseconds.`);
+  }
 }
 
 /** Rows an `UPDATE` touched, across the three drivers. */
@@ -591,8 +764,11 @@ export function createAgentStoreTableStatements(
     \`summary_lock_until\` BIGINT NULL,
     \`created_at\` BIGINT NOT NULL,
     \`updated_at\` BIGINT NOT NULL,
+    \`expires_at\` BIGINT NULL,
+    \`ttl_ms\` BIGINT NULL,
 
     INDEX \`${threadsTable}_user_id_updated_at_idx\`(\`user_id\`, \`updated_at\`),
+    INDEX \`${threadsTable}_expires_at_idx\`(\`expires_at\`),
     INDEX \`${threadsTable}_scope_user_id_updated_at_idx\`(\`scope\`, \`user_id\`, \`updated_at\`),
     PRIMARY KEY (\`id\`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
@@ -624,8 +800,11 @@ export function createAgentStoreTableStatements(
     "summary_lock" TEXT,
     "summary_lock_until" BIGINT,
     "created_at" BIGINT NOT NULL,
-    "updated_at" BIGINT NOT NULL${threadsConstraint}
+    "updated_at" BIGINT NOT NULL,
+    "expires_at" BIGINT,
+    "ttl_ms" BIGINT${threadsConstraint}
 )`,
+    `CREATE INDEX IF NOT EXISTS "${threadsTable}_expires_at_idx" ON "${threadsTable}"("expires_at")`,
     `CREATE INDEX IF NOT EXISTS "${threadsTable}_user_id_updated_at_idx" ON "${threadsTable}"("user_id", "updated_at")`,
     `CREATE INDEX IF NOT EXISTS "${threadsTable}_scope_user_id_updated_at_idx" ON "${threadsTable}"("scope", "user_id", "updated_at")`,
     `CREATE TABLE IF NOT EXISTS "${messagesTable}" (
@@ -672,5 +851,23 @@ export function addScopeColumnStatements(
       ],
     ],
     [messagesTable, [`ALTER TABLE "${messagesTable}" ADD COLUMN "scope" TEXT`]],
+  ];
+}
+
+/**
+ * What brings a threads table created before expiry (#1312) up to date: the
+ * `expires_at` and `ttl_ms` columns and the `expires_at` index. Run only for a
+ * table that does not have `expires_at` yet.
+ */
+export function addExpiryColumnStatements(dialect: Dialect, threadsTable: string): string[] {
+  if (dialect === "mysql" || dialect === "mariadb") {
+    return [
+      `ALTER TABLE \`${threadsTable}\` ADD COLUMN \`expires_at\` BIGINT NULL, ADD COLUMN \`ttl_ms\` BIGINT NULL, ADD INDEX \`${threadsTable}_expires_at_idx\`(\`expires_at\`)`,
+    ];
+  }
+  return [
+    `ALTER TABLE "${threadsTable}" ADD COLUMN "expires_at" BIGINT`,
+    `ALTER TABLE "${threadsTable}" ADD COLUMN "ttl_ms" BIGINT`,
+    `CREATE INDEX IF NOT EXISTS "${threadsTable}_expires_at_idx" ON "${threadsTable}"("expires_at")`,
   ];
 }
