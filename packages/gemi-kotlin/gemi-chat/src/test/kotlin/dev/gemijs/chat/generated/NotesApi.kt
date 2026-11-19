@@ -1,6 +1,7 @@
 // Generated from bin/http-client/__fixtures__/notes.ts#default. Do not edit.
 package dev.gemijs.chat.generated
 
+import dev.gemijs.http.GemiHttpClient
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Required
@@ -101,6 +102,12 @@ public data class POSTNotesErrorGone(
   @Required public val kind: POSTNotesErrorGoneKind = POSTNotesErrorGoneKind,
   @Required public val status: POSTNotesErrorGoneStatus = POSTNotesErrorGoneStatus,
 ) : POSTNotesError
+
+public class PATCHNotesIdErrorException(public val error: PATCHNotesIdError) : Exception("HTTP 422")
+
+public suspend fun GemiHttpClient.patchNotes(id: String, body: PATCHNotesIdInput): PATCHNotesIdResponse =
+  patch(listOf("notes", id), body, PATCHNotesIdInput.serializer(), PATCHNotesIdResponse.serializer(),
+        PATCHNotesIdError.serializer(), 422, ::PATCHNotesIdErrorException)
 
 @Serializable(with = PATCHNotesIdErrorKind.Serializer::class)
 public data object PATCHNotesIdErrorKind {

@@ -17,12 +17,13 @@ beforeAll(async () => {
   expect(api.routes.map((route) => route.key)).toEqual(["PATCH:/notes/:id", "POST:/notes"]);
 }, 60_000);
 
+const patchKey = "PATCH:/notes/:id";
 const kotlinPackage = "dev.gemijs.chat.generated";
 test.each([
-  ["../gemi-swift/Tests/GemiChatTests/Generated/NotesApi.swift", renderHttpSwift],
+  ["../gemi-swift/Tests/GemiChatTests/Generated/NotesApi.swift", (model: HttpApiModel) => renderHttpSwift(model, patchKey)],
   [
     "../gemi-kotlin/gemi-chat/src/test/kotlin/dev/gemijs/chat/generated/NotesApi.kt",
-    (model: HttpApiModel) => renderHttpKotlin(model, kotlinPackage),
+    (model: HttpApiModel) => renderHttpKotlin(model, kotlinPackage, patchKey),
   ],
 ] as const)("checked-in HTTP models match the router in %s", (relative, render) => {
   const target = path.resolve(cwd, relative);
@@ -58,4 +59,13 @@ test("a union with a raw variant preserves the complete JSON payload", () => {
   };
   expect(renderHttpSwift(model)).toContain("public typealias Event = JSONValue");
   expect(renderHttpKotlin(model, kotlinPackage)).toContain("public typealias Event = JsonElement");
+});
+
+test("PATCH calls follow the selected path and reject unsupported selections", () => {
+  const route = { ...api.routes[0]!, key: "PATCH:/v2/books/:id", path: "/v2/books/:id" };
+  const moved = { ...api, routes: [route] };
+  expect(renderHttpSwift(moved, route.key)).toContain('segments: ["v2", "books", id]');
+  expect(renderHttpKotlin(moved, kotlinPackage, route.key)).toContain('listOf("v2", "books", id)');
+  expect(() => renderHttpSwift(moved, patchKey)).toThrow("missing route");
+  expect(() => renderHttpSwift(api, "POST:/notes")).toThrow("expected a PATCH");
 });

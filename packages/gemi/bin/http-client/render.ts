@@ -14,6 +14,7 @@ import {
   swiftString,
 } from "../ai-client/swift";
 import type { HttpApiModel } from "./model";
+import { patchCall } from "./patch";
 
 type Literal = string | number | boolean;
 type LiteralType = { name: string; value: Literal };
@@ -112,8 +113,8 @@ function kotlinLiteral({ name, value }: LiteralType, packageName: string): strin
   ];
 }
 
-/** Internal data models. Transport and route methods consume these in a later step. */
-export function renderHttpSwift(api: HttpApiModel): string {
+/** Models for the whole API, optionally with a callable PATCH route. */
+export function renderHttpSwift(api: HttpApiModel, patchKey?: string): string {
   const { types, literals, usesJson, rawUnions } = nativeModels(api);
   const defaults = new Map(
     literals.map(({ name, value }) => [name, "." + swiftLiteralCase(value)]),
@@ -130,12 +131,27 @@ export function renderHttpSwift(api: HttpApiModel): string {
           : swiftUnion(type.name, type.discriminant, type.variants);
     }
   });
+  if (patchKey) {
+    const call = patchCall(api, patchKey);
+    const segments = [...call.segments.map(swiftString), "id"].join(", ");
+    declarations.push([
+      `extension ${call.error}: Error {}`,
+      "",
+      "extension GemiHTTPClient {",
+      `  public func ${call.name}(id: String, body: ${call.body}) async throws -> ${call.output} {`,
+      `    try await patch(segments: [${segments}], body: body, response: ${call.output}.self,`,
+      `                    rejection: ${call.error}.self, status: ${call.status})`,
+      "  }",
+      "}",
+    ]);
+  }
   return (
     [
       [
         `// Generated from ${api.source}. Do not edit.`,
         "import Foundation",
         ...(usesJson ? ["import GemiChat"] : []),
+        ...(patchKey ? ["import GemiHTTP"] : []),
       ],
       ...declarations,
       ...literals.map(swiftLiteral),
@@ -145,7 +161,7 @@ export function renderHttpSwift(api: HttpApiModel): string {
   );
 }
 
-export function renderHttpKotlin(api: HttpApiModel, packageName: string): string {
+export function renderHttpKotlin(api: HttpApiModel, packageName: string, patchKey?: string): string {
   const invalid = invalidPackage(packageName);
   if (invalid) throw new Error(invalid);
   const { types, literals, usesJson, rawUnions } = nativeModels(api);
@@ -192,6 +208,21 @@ export function renderHttpKotlin(api: HttpApiModel, packageName: string): string
         return kotlinUnion(type.name, type.discriminant, type.variants, true);
     }
   });
+  if (patchKey) {
+    const call = patchCall(api, patchKey);
+    const segments = [...call.segments.map(kotlinString), "id"].join(", ");
+    imports.add("dev.gemijs.http.GemiHttpClient");
+    const taken = new Set([...types, ...literals].map((type) => type.name));
+    let exception = call.error + "Exception";
+    for (let i = 2; taken.has(exception); i++) exception = call.error + "Exception" + i;
+    declarations.push([
+      `public class ${exception}(public val error: ${call.error}) : Exception("HTTP ${call.status}")`,
+      "",
+      `public suspend fun GemiHttpClient.${call.name}(id: String, body: ${call.body}): ${call.output} =`,
+      `  patch(listOf(${segments}), body, ${call.body}.serializer(), ${call.output}.serializer(),`,
+      `        ${call.error}.serializer(), ${call.status}, ::${exception})`,
+    ]);
+  }
   return (
     [
       [`// Generated from ${api.source}. Do not edit.`, `package ${packageName}`],

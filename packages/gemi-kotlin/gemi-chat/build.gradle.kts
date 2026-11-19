@@ -16,6 +16,7 @@ dependencies {
   api(libs.coroutines.core)
   implementation(libs.okhttp)
 
+  testImplementation(project(":gemi-http"))
   testImplementation(kotlin("test"))
   testImplementation(libs.coroutines.test)
 }

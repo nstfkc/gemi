@@ -1,6 +1,7 @@
 // Generated from bin/http-client/__fixtures__/notes.ts#default. Do not edit.
 import Foundation
 import GemiChat
+import GemiHTTP
 
 public struct PATCHNotesIdParams: Codable, Hashable, Sendable {
   public var id: String
@@ -208,6 +209,15 @@ public struct POSTNotesErrorGone: Codable, Hashable, Sendable {
   public init(kind: POSTNotesErrorGoneKind = .gone, status: POSTNotesErrorGoneStatus = ._410) {
     self.kind = kind
     self.status = status
+  }
+}
+
+extension PATCHNotesIdError: Error {}
+
+extension GemiHTTPClient {
+  public func patchNotes(id: String, body: PATCHNotesIdInput) async throws -> PATCHNotesIdResponse {
+    try await patch(segments: ["notes", id], body: body, response: PATCHNotesIdResponse.self,
+                    rejection: PATCHNotesIdError.self, status: 422)
   }
 }
 

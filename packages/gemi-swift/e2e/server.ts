@@ -26,6 +26,7 @@ import type {
 } from "../../gemi/ai/AgentProvider";
 import { s } from "../../gemi/ai/Schema";
 import type { AgentMessage } from "../../gemi/ai/types";
+import NotesApi from "../../gemi/bin/http-client/__fixtures__/notes";
 import { HttpRequest } from "../../gemi/http/HttpRequest";
 
 const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 };
@@ -138,6 +139,8 @@ class E2EController extends AgentController<typeof e2eAgent> {
   store = store;
 }
 
+const editNote = new NotesApi().routes["/notes/:id"];
+
 const server = Bun.serve({
   port: Number(process.argv[2] ?? 0),
   hostname: "127.0.0.1",
@@ -146,6 +149,12 @@ const server = Bun.serve({
     const request = new HttpRequest(raw, {}, "api", url.pathname.replace(/^\/api/, ""));
     const controller = new E2EController();
     try {
+      const note = /^\/api\/notes\/([^/]+)$/.exec(url.pathname);
+      if (note && raw.method === editNote.method) {
+        const req = new HttpRequest(raw, { id: decodeURIComponent(note[1]!) }, "api", "/notes/:id");
+        const result = await editNote.run(req);
+        return result.toResponse(new Headers(), []);
+      }
       switch (url.pathname) {
         case "/api/support":
           return await controller.stream(request);

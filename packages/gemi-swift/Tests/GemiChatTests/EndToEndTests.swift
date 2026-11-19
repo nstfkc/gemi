@@ -1,4 +1,5 @@
 import Foundation
+import GemiHTTP
 import Testing
 
 @testable import GemiChat
@@ -29,6 +30,29 @@ struct EndToEndTests {
     request.httpMethod = "POST"
     let (data, _) = try await URLSession.shared.data(for: request)
     return try #require(JSONValue.parse(data)?["threadId"]?.stringValue)
+  }
+
+  @Test func editNoteCallsTheTypedRoute() async throws {
+    let client = GemiHTTPClient(baseURL: server!.appendingPathComponent("api"))
+    for id in ["42", "a/b ?#%é"] {
+      let saved = try await client.patchNotes(id: id, body: .init(title: "Groceries"))
+      #expect(saved.id == id)
+      #expect(saved.title == "Groceries")
+    }
+    do {
+      _ = try await client.patchNotes(id: "42", body: .init(title: ""))
+      Issue.record("Expected an empty title to be rejected")
+    } catch let rejected as PATCHNotesIdError {
+      #expect(rejected.kind == .emptyTitle)
+      #expect(rejected.status == ._422)
+    }
+    let missing = GemiHTTPClient(baseURL: server!.appendingPathComponent("missing"))
+    do {
+      _ = try await missing.patchNotes(id: "42", body: .init(title: "Milk"))
+      Issue.record("Expected an unknown endpoint to fail")
+    } catch let unknown as GemiHTTPStatusError {
+      #expect(unknown.status == 404)
+    }
   }
 
   @Test func aStatelessConversationKeepsItsOwnHistory() async {

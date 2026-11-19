@@ -1,9 +1,17 @@
 package dev.gemijs.chat
 
 import dev.gemijs.chat.generated.E2eAgent
+import dev.gemijs.chat.generated.PATCHNotesIdErrorException
+import dev.gemijs.chat.generated.PATCHNotesIdErrorKind
+import dev.gemijs.chat.generated.PATCHNotesIdErrorStatus
+import dev.gemijs.chat.generated.PATCHNotesIdInput
+import dev.gemijs.chat.generated.patchNotes
+import dev.gemijs.http.GemiHttpClient
+import dev.gemijs.http.GemiHttpStatusException
 import java.util.concurrent.Executors
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -60,6 +68,25 @@ class EndToEndTest {
     val response =
       OkHttpClient().newCall(Request.Builder().url("$support/threads").post(ByteArray(0).toRequestBody()).build()).execute()
     return GemiJson.parseToJsonElement(response.body.string()).obj()!!.string("threadId")!!
+  }
+
+  @Test
+  fun editNoteCallsTheTypedRoute() = e2e {
+    val client = GemiHttpClient("$server/api/")
+    for (id in listOf("42", "a/b ?#%é")) {
+      val saved = client.patchNotes(id, PATCHNotesIdInput("Groceries"))
+      assertEquals(id, saved.id)
+      assertEquals("Groceries", saved.title)
+    }
+    val rejected = assertFailsWith<PATCHNotesIdErrorException> {
+      client.patchNotes("42", PATCHNotesIdInput(""))
+    }
+    assertEquals(PATCHNotesIdErrorKind, rejected.error.kind)
+    assertEquals(PATCHNotesIdErrorStatus, rejected.error.status)
+    val unknown = assertFailsWith<GemiHttpStatusException> {
+      GemiHttpClient("$server/missing").patchNotes("42", PATCHNotesIdInput("Milk"))
+    }
+    assertEquals(404, unknown.status)
   }
 
   @Test

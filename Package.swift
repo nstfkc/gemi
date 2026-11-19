@@ -16,13 +16,15 @@ let package = Package(
   // a simulator; nothing here is iOS-specific.
   platforms: [.iOS(.v17), .macOS(.v14)],
   products: [
-    .library(name: "GemiChat", targets: ["GemiChat"])
+    .library(name: "GemiChat", targets: ["GemiChat"]),
+    .library(name: "GemiHTTP", targets: ["GemiHTTP"])
   ],
   targets: [
     .target(name: "GemiChat", path: "packages/gemi-swift/Sources/GemiChat"),
+    .target(name: "GemiHTTP", path: "packages/gemi-swift/Sources/GemiHTTP"),
     .testTarget(
       name: "GemiChatTests",
-      dependencies: ["GemiChat"],
+      dependencies: ["GemiChat", "GemiHTTP"],
       path: "packages/gemi-swift/Tests/GemiChatTests"
     ),
   ]

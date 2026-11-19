@@ -24,7 +24,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "gemi-kotlin"
 
-include(":gemi-chat")
+include(":gemi-chat", ":gemi-http")
 
 // The Compose module needs an Android SDK. Left out where there is none, so
 // the core still builds and tests anywhere a JDK does — and where the module
