@@ -1,4 +1,4 @@
-import type { SQL } from "bun";
+import { SQL } from "bun";
 
 import type { Dialect } from "../../database/dialect";
 import type { EnqueueJob } from "./QueueDriver";
@@ -31,9 +31,22 @@ import { WORKFLOW_TICK_JOB } from "./workflow/WorkflowStore";
  * claim does: at REPEATABLE READ the range deletes and counts would take gap
  * locks reaching into the next key's rows, and steps on different keys would
  * wait on each other.
+ *
+ * ### Bun 1.3 and Postgres
+ *
+ * Bun 1.3's Postgres pool can send a query made on the pool (the queue's
+ * claim, say) down a connection that is inside a `sql.begin` or reserved.
+ * The claim then runs in the step's transaction, the step's next statement
+ * never comes back, and the key's gate row stays locked, so every other step
+ * on the key waits for good. Bun 1.4 does not. So under Bun 1.3, on
+ * Postgres, steps run one at a time per driver on a client of their own (one
+ * connection, closed when idle) that nothing else uses.
  */
 export class DatabaseSlots {
   private readonly statements: SlotStatements;
+  /** Bun 1.3 on Postgres: the steps' own client, and the step running on it. */
+  private own: SQL | undefined;
+  private ownTail: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly db: {
@@ -218,6 +231,12 @@ export class DatabaseSlots {
   }
 
   private async transaction<T>(fn: (q: SQL) => Promise<T>): Promise<T> {
+    const own = this.ownClient();
+    if (own) {
+      const result = this.ownTail.then(() => own.begin((tx) => fn(tx)) as Promise<T>);
+      this.ownTail = result.catch(() => {});
+      return result;
+    }
     if (this.db.dialect !== "mysql" && this.db.dialect !== "mariadb") {
       return this.db.atomically(fn);
     }
@@ -235,6 +254,18 @@ export class DatabaseSlots {
       }
       connection.release();
     }
+  }
+
+  /** See "Bun 1.3 and Postgres" above. */
+  private ownClient(): SQL | undefined {
+    if (this.own) return this.own;
+    if (this.db.dialect !== "postgres" || !bunBefore14()) return undefined;
+    const options = (this.db.sql as { options?: Record<string, unknown> }).options;
+    if (options?.adapter !== "postgres") return undefined;
+    this.own = new SQL({ ...options, max: 1, idleTimeout: 5 } as ConstructorParameters<
+      typeof SQL
+    >[0]);
+    return this.own;
   }
 
   private runner(q: SQL): Runner {
@@ -438,6 +469,11 @@ export function slotStatements(dialect: Dialect, tables: SlotTables): SlotStatem
       ];
     },
   };
+}
+
+function bunBefore14(): boolean {
+  const [major = 0, minor = 0] = Bun.version.split(".").map(Number);
+  return major < 1 || (major === 1 && minor < 4);
 }
 
 function isDeadlock(error: unknown): boolean {
