@@ -264,7 +264,7 @@ describe.each(backends)("concurrency on $name", (backend) => {
         total++;
         most = Math.max(most, total);
         mostPerOrg = Math.max(mostPerOrg, running.get(org)!);
-        await sleep(30);
+        await sleep(200); // long enough that two overlap even when claims are slow
         running.set(org, running.get(org)! - 1);
         total--;
         done++;
@@ -297,7 +297,7 @@ describe.each(backends)("concurrency on $name", (backend) => {
         async run() {
           running++;
           most = Math.max(most, running);
-          await sleep(30);
+          await sleep(200); // long enough that two overlap even when claims are slow
           running--;
           done++;
         }
