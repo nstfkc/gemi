@@ -19,8 +19,9 @@ import type {
   JobRelease,
   QueueDriver,
 } from "./QueueDriver";
+import { MemorySlots, type SlotRequest } from "./slots";
 import { MemoryWorkflowStore } from "./workflow/MemoryWorkflowStore";
-import type { WorkflowStore } from "./workflow/WorkflowStore";
+import { WORKFLOW_TICK_JOB, type WorkflowStore } from "./workflow/WorkflowStore";
 
 type Entry = {
   job: ClaimedJob;
@@ -75,6 +76,43 @@ export class MemoryQueueDriver implements QueueDriver {
   private entries = new Map<string, Entry>();
   private batches = new Map<string, BatchRecord>();
   private workflows: MemoryWorkflowStore | undefined;
+  /** Concurrency slots (#1319), per process like the jobs. */
+  readonly slots = new MemorySlots({
+    jobAlive: (id) => this.entries.has(id),
+    workflowAlive: (id) => {
+      const status = this.workflows?.statusOf(id);
+      return (
+        status !== undefined &&
+        status !== "completed" &&
+        status !== "failed" &&
+        status !== "cancelled" &&
+        status !== "paused"
+      );
+    },
+    park: (job, ms) => {
+      const entry = this.current(job);
+      if (!entry) return;
+      entry.job = { ...entry.job, attempt: entry.job.attempt - 1 };
+      entry.leased = false;
+      entry.until = Date.now() + Math.max(0, ms);
+      this.changed();
+    },
+    wake: (id) => {
+      const entry = this.entries.get(id);
+      if (!entry) return false;
+      if (!entry.leased && entry.until > Date.now()) {
+        entry.until = Date.now();
+        // Its place among the due jobs is the one it parked with.
+        this.changed();
+      }
+      return true;
+    },
+    tick: (workflowId) => {
+      const id = this.add({ name: WORKFLOW_TICK_JOB, args: JSON.stringify([workflowId]) });
+      this.changed();
+      return id;
+    },
+  });
   private listeners = new Set<() => void>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private timerAt = Infinity;
@@ -176,6 +214,19 @@ export class MemoryQueueDriver implements QueueDriver {
       cancelBatch: (id) => void this.cancelBatchNow(id),
     });
     return this.workflows;
+  }
+
+  /**
+   * Concurrency slots (#1319), in this process's memory: the same order,
+   * parking and waking as the database driver's, and per process, as every
+   * job here is.
+   */
+  async acquireSlots(request: SlotRequest): Promise<boolean> {
+    return this.slots.acquire(request);
+  }
+
+  async releaseSlots(holder: string): Promise<void> {
+    this.slots.release(holder);
   }
 
   async reportProgress(job: ClaimedJob, progress: number): Promise<void> {

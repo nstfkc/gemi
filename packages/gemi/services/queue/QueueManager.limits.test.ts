@@ -99,10 +99,11 @@ describe("concurrency", () => {
     for (let i = 0; i < 6; i++) await queue.push(Sync, '["acme"]');
     await until(() => done === 6);
     expect(most).toBe(2);
-    // Every slot is free again.
-    for (let i = 0; i < 2; i++) {
-      expect(await queue.locks.store.holder(`gemi:concurrency:sync:acme:${i}`)).toBeNull();
-    }
+    // Every slot is free again. More in `concurrency.test.ts`.
+    expect((queue.driver as MemoryQueueDriver).slots.line("sync:acme")).toEqual({
+      holding: [],
+      waiting: [],
+    });
   });
 });
 

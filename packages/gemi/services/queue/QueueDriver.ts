@@ -42,6 +42,7 @@
  */
 import type { LockStore } from "../lock/LockStore";
 import type { BatchCallbacks, BatchStatus } from "./batch";
+import type { SlotRequest } from "./slots";
 import type { WorkflowStore } from "./workflow/WorkflowStore";
 
 export interface QueueDriver {
@@ -160,6 +161,31 @@ export interface QueueDriver {
    * once per manager.
    */
   lockStore?(): LockStore;
+
+  /**
+   * Takes the concurrency slots a job or a workflow asks for (#1319), in the
+   * order given, and resolves to whether it got all of them. See `slots.ts`
+   * for the model.
+   *
+   * When it did not, the request's claim has been parked in the same atomic
+   * step as the decision: back to waiting, its attempt taken back, due after
+   * `recheckMs`, and the holder keeps its place in the key's line (and the
+   * slots it got for earlier keys). The manager must not report on that
+   * claim again. Whenever the step finds a line with free slots, it makes the
+   * line's first waiters due at once.
+   *
+   * Taking a slot the holder already holds succeeds, so a job reclaimed after
+   * its process died gets its own slot back. Optional, with `releaseSlots`:
+   * without them, job concurrency falls back to slot locks in the lock store
+   * (no order, waiters polling), and a workflow's `concurrency` is refused.
+   */
+  acquireSlots?(request: SlotRequest): Promise<boolean>;
+
+  /**
+   * Ends every slot and place in line `holder` has, and wakes the waiters
+   * that frees slots for. Releasing nothing is not an error.
+   */
+  releaseSlots?(holder: string): Promise<void>;
 
   /**
    * Records a batch and all of its jobs in one atomic step: either every job

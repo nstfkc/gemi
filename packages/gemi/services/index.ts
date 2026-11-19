@@ -200,11 +200,13 @@ export type {
   JobRelease,
   EnqueueBatch,
 } from "./queue/QueueDriver";
+export type { SlotLimit, SlotRequest } from "./queue/slots";
 export type { BatchStatus, BatchCallbacks, JobCall } from "./queue/batch";
 export {
   Job,
   type JobThrottle,
   type JobConcurrency,
+  type JobConcurrencyResult,
   type JobBatch,
   type JobCallArgs,
 } from "./queue/Job";

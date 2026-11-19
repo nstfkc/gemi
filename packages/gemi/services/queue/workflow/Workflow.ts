@@ -1,4 +1,5 @@
 import { app } from "../../../foundation/app";
+import type { JobConcurrencyResult } from "../Job";
 import { QueueManager } from "../QueueManager";
 import type { EachProblem, Step } from "./Step";
 import type { ChangeFeedResponse, StreamOptions } from "../../change-feed/stream";
@@ -72,6 +73,24 @@ export class Workflow {
    */
   run(_step: Step, ..._args: any[]): unknown {
     throw new Error(`The workflow ${(this.constructor as typeof Workflow).name} has no run method.`);
+  }
+
+  /**
+   * At most `limit` workflows with this `key` in flight at once, across every
+   * process sharing the queue's storage (#1319). Called with the `run`
+   * arguments after `step`, before a pass that does not hold its slots yet,
+   * so it may be `async` and read the limit from config or the database.
+   * Return a list for several limits, narrowest first, as for a job.
+   *
+   * The slot is held for the whole workflow, not per step: taken before its
+   * first step and kept through every pass, sleep, wait and batch, until it
+   * completes, fails, is cancelled or is paused. A workflow without a free
+   * slot waits its turn, first come first served, holding no queue slot.
+   * `onCancel` runs without one. A paused workflow gives its slot up and
+   * joins the back of the line when resumed.
+   */
+  concurrency(..._args: any[]): JobConcurrencyResult | Promise<JobConcurrencyResult> {
+    return undefined;
   }
 
   /**

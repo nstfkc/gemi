@@ -545,6 +545,15 @@ jobs:
         env:
           VITEST_MIN_PASSED: "60"
 
+      # Concurrency limits (#1319): lines shared by two processes, FIFO,
+      # parking and waking, whole-workflow slots, and an EXPLAIN of every
+      # slot statement showing it is answered from an index.
+      - name: Concurrency slots on Postgres and MySQL
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" services/queue/concurrency.test.ts services/queue/DatabaseSlots.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "20"
+
       # The lock store, unique jobs and cron withoutOverlapping/onOneServer
       # across several clients on one database (#662).
       - name: Locks on Postgres and MySQL

@@ -21925,11 +21925,70 @@ export class SendPush extends Job {
 ```
 
 - **`throttle`** returns one or more `{ key, limit, window }` budgets. A job that would go over one is put back until that window ends. It does not spend an attempt, so it never reaches the dead-letter queue by waiting. Windows are fixed (they start at the first job admitted after the last one ended), and a job is counted when it is admitted to run, whether it then succeeds or not.
-- **`concurrency`** returns `{ key, limit }`: at most `limit` jobs with that key run at once. A job with no free slot waits, again without spending an attempt. Each slot is a lock leased for `visibilityTimeout` and renewed while the job runs, so a slot held by a process that died frees itself.
+- **`concurrency`** returns `{ key, limit }` (or a list): at most `limit` jobs with that key run at once. A job with no free slot waits its turn without spending an attempt. See [Concurrency limits](#concurrency-limits--concurrency).
 - **`this.release(delayMs)`** inside `run` puts the job back to wait `delayMs` once `run` returns, without counting the attempt and without calling `onSuccess` or `onFail`.
 - **`this.fail(error, { retry: false })`** inside `run` dead-letters the job once `run` returns, whatever `maxAttempts` says. Use it where repeating the work is worse than losing it. Without `retry: false` it fails the attempt like a throw.
 
 `release` and `fail` are not available to `worker = true` jobs, whose `run` happens in another thread.
+
+### Concurrency limits — `concurrency`
+
+`concurrency` caps how many jobs of a key run at once, across every process sharing the queue's storage:
+
+```typescript
+import { Job } from "gemi/services";
+
+export class ImportCatalog extends Job {
+  static name = "ImportCatalog";
+
+  // Called each time the job is about to run, so the limit can come from
+  // config or the database (an admin setting) and changes take effect.
+  async concurrency(orgId: string, importId: string) {
+    return [
+      { key: `import:org:${orgId}`, limit: 1 },
+      { key: "import", limit: await maxRunningImports() },
+    ];
+  }
+
+  async run(orgId: string, importId: string) {
+    // ...
+  }
+}
+```
+
+- **Read at claim time.** `concurrency` may be `async`. It is called every time the job is admitted, with the job's arguments. A throw fails the attempt, as a throw from `run` would.
+- **Several limits.** A list is taken in order and all of it is needed. While a job waits for a later key, it keeps the earlier ones, since it is first in their lines anyway. List the narrowest key first and shared keys last, in the same order in every job, as with any nested locks.
+- **First come, first served.** Each key has a line, ordered by when each job first asked for a slot. A job is admitted only when the jobs holding a slot plus the ones waiting ahead of it are fewer than `limit`. A waiter keeps its place until it runs, however long it waits, so newer jobs never overtake it.
+- **Waiting holds nothing.** A job without a slot goes back to waiting with its attempt taken back. It holds no queue slot, connection or process. When a slot frees (a job finishes, fails, is released or is dead-lettered), the next jobs in line are made due at once. Nothing polls. As a safety net for a process that died before handing its slot on, the first waiters of a line re-check after `visibilityTimeout`, and the rest hourly.
+- **Changing the limit.** A raised limit applies at the key's next admission or release, and within `visibilityTimeout` at the latest. A lowered one lets the running jobs finish. `limit: 0` holds every job of the key until it is raised.
+- **A crashed holder** keeps its slot until its job is claimed again, after its lease runs out, and then runs in that same slot. A slot whose job is gone is dropped the next time anything happens on its line.
+- **Workflows** take the same `concurrency`, and hold their slot for the whole workflow, not per step. See [Workflows: concurrency](./workflows.md#concurrency).
+
+Where the lines live depends on the driver:
+
+- **Database driver:** in the `gemi_job_slots` table, shared by every process on the database. Each admission and release is one short transaction that locks the key's row. Every statement is answered from an index or a primary key (a test checks the `EXPLAIN` of each on SQLite, Postgres and MySQL), and nothing counts the jobs table, so a big queue or a long line costs no more than a short one. Add the model and migrate:
+
+  ```prisma
+  model GemiJobSlot {
+    key        String  @map("slot_key")
+    holder     String
+    jobId      String? @map("job_id")
+    workflowId String? @map("workflow_id")
+    state      String
+    limit      Int     @default(0) @map("slot_limit")
+    queuedAt   BigInt  @map("queued_at")
+    updatedAt  BigInt  @map("updated_at")
+
+    @@id([key, holder])
+    @@index([key, state, queuedAt, holder])
+    @@index([holder])
+    @@map("gemi_job_slots")
+  }
+  ```
+
+  Without Prisma, `await driver.createTable()` creates it. Nothing touches the table until a job or workflow declares `concurrency`. A driver on another jobs table keeps its slots in `<table>_slots`, or in the table named by the `slotTable` option. Keys are at most 191 characters.
+- **Memory driver:** in this process's memory, with the same order and behaviour. Like everything on the memory driver, the lines are per process.
+- **A custom driver** without `acquireSlots` and `releaseSlots` falls back to slot locks in the lock store. There the order isn't kept and waiters poll. A workflow that declares `concurrency` fails on such a driver.
 
 ### Locks — the `Lock` facade
 
@@ -22489,6 +22548,34 @@ const rows = workflow?.steps.find((step) => step.key === "rows")?.items;
 `useWorkflow` keeps the later of two updates (by `updatedAt`), reconnects and resumes from its cursor like [`useSubscription`](./change-feed.md#following-a-route-usesubscription), and disconnects once the workflow has ended. `onReset` is called when it was away longer than the feed keeps changes; the next update brings the whole status again.
 
 The channel goes through the application's change feed, so it reaches every instance that shares it: use the feed's [database driver](./change-feed.md#the-database-driver) when the instance that runs the workflow is not the one serving the stream.
+
+## Concurrency
+
+A workflow can cap how many of its kind are in flight, with the `concurrency` method jobs have (see [Concurrency limits](./jobs-and-queues.md#concurrency-limits--concurrency)). It gets the `run` arguments after `step`:
+
+```typescript
+export class ImportWorkflow extends Workflow {
+  static name = "ImportWorkflow";
+
+  async concurrency(importId: string, orgId: string) {
+    return [
+      { key: `import:org:${orgId}`, limit: 1 },
+      { key: "import", limit: await maxRunningImports() },
+    ];
+  }
+
+  async run(step: Step, importId: string, orgId: string) {
+    // ...
+  }
+}
+```
+
+- **One slot for the whole workflow.** It is taken before the first step and kept through every pass, sleep, wait and batch, until the workflow completes, fails or is cancelled. A sleeping or waiting workflow still counts.
+- **Waiting.** A workflow without a free slot waits its turn, first come first served, with its status still `running` and holding no queue slot. Its first step starts when a slot frees.
+- **Read when needed.** `concurrency` is called before each pass, so it may be `async` and read the limit from config or the database. A throw retries the pass with the tick's backoff.
+- **Pausing** gives the slot up. On `resume` the workflow takes a new place at the back of the line.
+- **Cancelling** runs `onCancel` without a slot, even for a workflow that was still waiting for one.
+- The slots are kept where the queue keeps them: the `gemi_job_slots` table with the database driver (add the `GemiJobSlot` model), and per process with the memory driver.
 
 ## Pausing
 

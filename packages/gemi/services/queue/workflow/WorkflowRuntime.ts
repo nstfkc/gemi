@@ -4,6 +4,7 @@ import { ChangeFeedManager } from "../../change-feed/ChangeFeedManager";
 import type { ChangeFeedResponse, StreamOptions } from "../../change-feed/stream";
 import { Job } from "../Job";
 import type { QueueManager } from "../QueueManager";
+import { type SlotLimit, slotLimits, workflowHolder } from "../slots";
 import {
   type EachProblem,
   Step,
@@ -372,6 +373,9 @@ export class WorkflowRuntime {
       }
       return { result: true, workflow: { status: "paused" } };
     });
+    // A paused workflow gives up its concurrency slots (#1319), and takes a
+    // new place in line when resumed.
+    if (paused === true) void this.releaseSlotsOf(id);
     return paused === true;
   }
 
@@ -473,8 +477,14 @@ export class WorkflowRuntime {
           if (!(error instanceof WorkflowLeaseLostError)) throw error;
         });
 
-    // Paused: the tick ends here, and `resume` queues the next one.
-    if (ENDED.includes(workflow.status) || workflow.status === "paused") return letGo();
+    // Paused: the tick ends here, and `resume` queues the next one. A tick
+    // parked for a slot that finds its workflow ended or paused hands the
+    // slot on.
+    if (ENDED.includes(workflow.status) || workflow.status === "paused") {
+      await letGo();
+      await this.releaseSlotsOf(id, workflow);
+      return;
+    }
 
     const Class = this.registry[workflow.name];
     if (!Class) return this.unknown(workflow, job, letGo);
@@ -488,6 +498,46 @@ export class WorkflowRuntime {
       });
     }
 
+    const cancelling = workflow.status === "cancelling";
+
+    // Concurrency (#1319): one set of slots for the whole workflow, taken
+    // before a pass that does not hold them yet. A workflow without a free
+    // slot is parked by the driver, its tick back to waiting, until one
+    // frees. `onCancel` runs without one.
+    let limits: SlotLimit[];
+    try {
+      limits = await this.limitsOf(Class, args);
+    } catch (error) {
+      // Most likely the limit could not be read (the database it lives in,
+      // say): the tick is retried with its backoff.
+      await letGo();
+      throw error;
+    }
+    if (limits.length > 0 && !cancelling && claimed) {
+      const driver = this.queue.driver;
+      if (!driver.acquireSlots || !driver.releaseSlots) {
+        return letGo({
+          workflow: {
+            status: "failed",
+            error:
+              `${workflow.name} declares concurrency, and this queue's driver has no ` +
+              `concurrency slots. The memory and database drivers do.`,
+          },
+        });
+      }
+      const granted = await driver.acquireSlots({
+        holder: workflowHolder(id),
+        workflowId: id,
+        job: claimed,
+        slots: limits,
+        recheckMs: this.queue.slotRecheck(),
+      });
+      if (!granted) {
+        job.$outcome = { kind: "parked" };
+        return letGo();
+      }
+    }
+
     const renew = setInterval(
       () => {
         store.renew(id, owner, lease).catch((error) => {
@@ -498,7 +548,6 @@ export class WorkflowRuntime {
     );
     renew.unref?.();
 
-    const cancelling = workflow.status === "cancelling";
     const step = new Step({
       workflowId: id,
       owner,
@@ -554,10 +603,16 @@ export class WorkflowRuntime {
       // not done until that step is.
       if (outcome.kind === "completed" && step.suspension) outcome = { kind: "suspended" };
 
-      await store.update(id, { owner }, ({ workflow: current, now }) =>
-        this.finish(current, outcome, step, cancelling, now),
-      );
+      let next: WorkflowRunStatus | undefined;
+      await store.update(id, { owner }, ({ workflow: current, now }) => {
+        const change = this.finish(current, outcome, step, cancelling, now);
+        next = change.workflow?.status ?? current.status;
+        return change;
+      });
       this.queue.claimSoon();
+      if (limits.length > 0 && next !== undefined && (ENDED.includes(next) || next === "paused")) {
+        await this.releaseSlots(id);
+      }
     } catch (error) {
       if (error instanceof WorkflowLeaseLostError) return;
       throw error;
@@ -634,6 +689,39 @@ export class WorkflowRuntime {
     return next;
   }
 
+  /** What the workflow's `concurrency` returns, checked. */
+  private async limitsOf(Class: WorkflowClass, args: unknown[]): Promise<SlotLimit[]> {
+    const instance = new Class() as { concurrency?: (...args: unknown[]) => unknown };
+    if (typeof instance.concurrency !== "function") return [];
+    return slotLimits(await instance.concurrency(...args), Class.name);
+  }
+
+  /** Hands the workflow's slots on. A failure is logged: the line drops them itself later. */
+  private async releaseSlots(id: string) {
+    try {
+      await this.queue.driver.releaseSlots?.(workflowHolder(id));
+    } catch (error) {
+      console.error(`[gemi] Could not free the concurrency slots of workflow ${id}.`, error);
+    }
+  }
+
+  /**
+   * `releaseSlots` for a workflow whose `concurrency` is not at hand: when
+   * its class declares any, so a queue that uses none never touches the
+   * slots table.
+   */
+  private async releaseSlotsOf(id: string, record?: WorkflowRecord) {
+    try {
+      const workflow = record ?? (await this.store.find(id, { steps: false }))?.workflow;
+      const Class = workflow && this.registry[workflow.name];
+      if (!workflow || !Class) return;
+      const limits = await this.limitsOf(Class, JSON.parse(workflow.args) as unknown[]);
+      if (limits.length > 0) await this.releaseSlots(id);
+    } catch (error) {
+      console.error(`[gemi] Could not free the concurrency slots of workflow ${id}.`, error);
+    }
+  }
+
   /**
    * A tick for a workflow this process has no class for. During a
    * blue/green ramp that is usually one only the other release has, so on a
@@ -693,6 +781,7 @@ export class WorkflowRuntime {
               unlock: true,
             },
       )
+      .then(() => this.releaseSlotsOf(id))
       .catch(() => {});
   }
 }
