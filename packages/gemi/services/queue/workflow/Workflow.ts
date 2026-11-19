@@ -168,6 +168,23 @@ export class Workflow {
   static cancel(id: string): Promise<boolean> {
     return app(QueueManager).workflows.cancel(id);
   }
+
+  /**
+   * Pauses a workflow that has not ended, and resolves to whether it did. No
+   * new step starts: a running `step.run` finishes and is recorded, a
+   * `step.each` lets the items in flight finish and takes no more, and the
+   * workflow then waits as `paused`, holding no queue slot, until `resume`.
+   * Signals and batches that arrive meanwhile are kept. It can still be
+   * cancelled.
+   */
+  static pause(id: string): Promise<boolean> {
+    return app(QueueManager).workflows.pause(id);
+  }
+
+  /** Resumes a paused workflow where it stopped, and resolves to whether it was paused. */
+  static resume(id: string): Promise<boolean> {
+    return app(QueueManager).workflows.resume(id);
+  }
 }
 
 export type WorkflowClass = (new () => Workflow) & { name: string };

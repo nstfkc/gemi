@@ -65,6 +65,10 @@ describe("Workflow", () => {
 
     const id = await inApp(() => Checkout.start("cart-1", 42));
     await until(async () => (await inApp(() => Workflow.find(id)))?.status === "waiting");
+    expect(await inApp(() => Workflow.pause(id))).toBe(true);
+    expect((await inApp(() => Workflow.find(id)))?.status).toBe("paused");
+    expect(await inApp(() => Workflow.resume(id))).toBe(true);
+    await until(async () => (await inApp(() => Workflow.find(id)))?.status === "waiting");
     expect(await inApp(() => Checkout.signal(id, "paid", { ok: true }))).toBe(true);
     await until(async () => (await inApp(() => Workflow.find(id)))?.status === "completed");
 

@@ -82,6 +82,35 @@ export type ItemContext = StepContext & {
    * the item and listed in the step's `problems`.
    */
   skip(reason: string, data?: unknown): never;
+  /**
+   * Puts this item back, to start again after `delayMs`, without using an
+   * attempt (a provider answered "slow down"). The whole step holds back
+   * for as long: no item starts until then.
+   */
+  release(delayMs: number): never;
+};
+
+/** What a `step.each` function with `chunk` is handed for one chunk of items. */
+export type ChunkContext = StepContext & {
+  /** The chunk's items, in the order of the inputs. */
+  items: Array<{ index: number; key: string; idempotencyKey: string }>;
+  /**
+   * Ends the item at `position` in the chunk as `skipped`, as `ctx.skip`
+   * does for one item, while the rest of the chunk succeeds. Does not throw.
+   */
+  skip(position: number, reason: string, data?: unknown): void;
+  /** As `ItemContext.release`, for every item of the chunk. */
+  release(delayMs: number): never;
+};
+
+/** A rate limit across processes, counted in the queue's lock store. */
+export type EachThrottle = {
+  /** Shared by everything that counts against the same budget, jobs included. */
+  key: string;
+  /** How many items may start per window. */
+  limit: number;
+  /** The window. */
+  window: Duration;
 };
 
 /** Where `step.each` takes its items from: a count and a transformer, or a stored source. */
@@ -141,6 +170,39 @@ export type StepEachOptions<I> = StepEachInput<I> & {
    * items that have ended. Default `true`.
    */
   progress?: boolean;
+  /**
+   * At most `limit` items start per `window`, across every process sharing
+   * the queue's lock store: one hit per item started (retries included). An
+   * item over the limit waits without using an attempt, and a wait past the
+   * tick hands the workflow back until the window resets. Several limits
+   * all apply. A throttle key is shared with jobs' `throttle` of that key.
+   */
+  throttle?: EachThrottle | EachThrottle[];
+  /**
+   * Runs `fn` in an ORM transaction on the queue's connection, and records
+   * the item's end as the last statement of that transaction: the item's
+   * database writes and its being done commit together, or not at all. A
+   * crash, a lost lease, a timeout or a cancel rolls both back, and the item
+   * runs again. On a workflow store that cannot (the memory driver, SQLite)
+   * `fn` runs without one and the item is at least once, as without this
+   * option. A throw, `ctx.skip` and `ctx.release` roll back too.
+   */
+  transaction?: boolean;
+  /**
+   * Hands `fn` up to `chunk` items at once (an array of inputs, and a
+   * `ChunkContext`), so their writes go in one statement or, with
+   * `transaction`, one transaction. `concurrency` then counts chunks. A
+   * throw fails the attempt of every item in the chunk.
+   */
+  chunk?: number;
+  /**
+   * Fails the step (a `StepFailedError` carrying the summary) once more
+   * items than this have failed, or, as `{ ratio, after }`, once the share
+   * of failed items among those that ended is over `ratio` (0 to 1) and at
+   * least `after` items (default 20) have ended. Items in flight are
+   * stopped. Default: never; the summary reports the failures.
+   */
+  maxFailures?: number | { ratio: number; after?: number };
 };
 
 /** An item that failed or was skipped, as `step.each` and `Workflow.items` list it. */
@@ -167,7 +229,7 @@ export type EachSummary = EachProgress & {
   moreProblems: boolean;
 };
 
-/** A step that ran out of attempts, or a batch that failed. */
+/** A step that ran out of attempts, a batch that failed, or a `step.each` past `maxFailures`. */
 export class StepFailedError extends Error {
   constructor(
     /** The step's key. */
@@ -175,6 +237,8 @@ export class StepFailedError extends Error {
     message: string,
     /** The batch's final status, for a `step.batch` that failed. */
     readonly batch?: BatchStatus,
+    /** Where the items stood, for a `step.each` that failed. */
+    readonly summary?: EachSummary,
   ) {
     super(message);
     this.name = "StepFailedError";
@@ -244,17 +308,26 @@ export type StepTick = {
   cancelCheckMs: number;
   /** Whether the queue's storage outlives this process. */
   durable?: boolean;
+  /** The queue's lock store's fixed windows, for `step.each`'s `throttle`. */
+  throttle?: {
+    hit(name: string, limit: number, windowMs: number): Promise<{ allowed: boolean; resetInMs: number }>;
+    refund(name: string): Promise<void>;
+  };
 };
 
 /** Why a tick stopped where it did. */
 export type Suspension = {
-  /** `running`: a `step.each` used up its tick and continues in the next one. */
-  status: "running" | "sleeping" | "waiting";
+  /**
+   * `running`: a `step.each` used up its tick and continues in the next one.
+   * `paused`: the workflow was paused, and waits for `resume`.
+   */
+  status: "running" | "sleeping" | "waiting" | "paused";
   /** When a tick is needed to continue; none for a wait on a signal or batch. */
   wakes: number[];
 };
 
 const DONE = Symbol("done");
+const PAUSED = Symbol("paused");
 
 /**
  * What `run` receives as its first argument. Every method takes a **key**,
@@ -369,8 +442,18 @@ export class Step {
    */
   each<I>(
     key: string,
-    options: StepEachOptions<I>,
+    options: StepEachOptions<I> & { chunk?: undefined },
     fn: (input: I, ctx: ItemContext) => unknown,
+  ): Promise<EachSummary>;
+  each<I>(
+    key: string,
+    options: StepEachOptions<I> & { chunk: number },
+    fn: (inputs: I[], ctx: ChunkContext) => unknown,
+  ): Promise<EachSummary>;
+  each<I>(
+    key: string,
+    options: StepEachOptions<I>,
+    fn: (input: never, ctx: never) => unknown,
   ): Promise<EachSummary> {
     return this.track(key, () => this.eachStep(key, options, fn));
   }
@@ -462,14 +545,15 @@ export class Step {
   /**
    * One atomic write, fenced by the tick's hold. A workflow that is being
    * cancelled takes no new work from `run`: the write is skipped and the
-   * tick suspended, so `onCancel` runs next.
+   * tick suspended, so `onCancel` runs next. With `start` (a write that
+   * starts work), a paused workflow is suspended the same way.
    */
   private async write<T>(
     key: string | undefined,
     decide: (snapshot: WorkflowSnapshot) => WorkflowChange<T>,
-    options: { items?: boolean } = {},
+    options: { items?: boolean; start?: boolean; joinTransaction?: boolean } = {},
   ): Promise<T> {
-    type Wrapped = { value: T } | typeof DONE;
+    type Wrapped = { value: T } | typeof DONE | typeof PAUSED;
     let outcome: Wrapped | undefined;
     try {
       outcome = await this.tick.store.update<Wrapped>(
@@ -478,10 +562,14 @@ export class Step {
           owner: this.tick.owner,
           ...(key === undefined ? {} : { key }),
           ...(options.items && key !== undefined ? { items: key } : {}),
+          ...(options.joinTransaction ? { joinTransaction: true } : {}),
         },
         (snapshot) => {
           if (snapshot.workflow.status === "cancelling" && !this.tick.cancelling) {
             return { result: DONE };
+          }
+          if (options.start && snapshot.workflow.status === "paused" && !this.tick.cancelling) {
+            return { result: PAUSED };
           }
           const change = decide(snapshot);
           return { ...change, result: { value: change.result } };
@@ -499,6 +587,7 @@ export class Step {
       this.cancelled = true;
       this.suspend("waiting");
     }
+    if (outcome === PAUSED) this.suspend("paused");
     return outcome.value;
   }
 
@@ -590,7 +679,7 @@ export class Step {
               ? { currentStep: key }
               : { currentStep: key, status: "running" },
         };
-      });
+      }, { start: true });
       this.current = key;
       if (begin.kind === "done") return decode(begin.output) as T;
       if (begin.kind === "failed") throw failure(key, begin.step);
@@ -797,7 +886,7 @@ export class Step {
   private async eachStep<I>(
     key: string,
     options: StepEachOptions<I>,
-    fn: (input: I, ctx: ItemContext) => unknown,
+    fn: (input: never, ctx: never) => unknown,
   ): Promise<EachSummary> {
     const source = options.source;
     const count = source ? source.count : options.count;
@@ -816,15 +905,31 @@ export class Step {
     const budgetMs =
       options.tickBudget === undefined ? EACH_TICK_BUDGET_MS : toMilliseconds(options.tickBudget);
     const setsProgress = options.progress !== false;
+    const chunked = options.chunk !== undefined;
+    const chunk = chunked ? Math.max(1, Math.floor(options.chunk!)) : 1;
+    const throttles = [options.throttle ?? []].flat().map((throttle) => ({
+      name: `gemi:throttle:${throttle.key}`,
+      limit: Math.max(0, Math.floor(throttle.limit)),
+      windowMs: toMilliseconds(throttle.window),
+    }));
+    const exceeded = failurePolicy(options.maxFailures);
     const store = this.tick.store;
+    const inTransaction =
+      options.transaction === true && store.transaction
+        ? <T>(body: () => Promise<T>) => store.transaction!(body)
+        : undefined;
+    if (options.transaction === true && !inTransaction) warnNoTransaction();
     const produce: (index: number) => I | Promise<I> = source
-      ? sourceReader(store, source, Math.max(EACH_SOURCE_WINDOW, concurrency * 4))
+      ? sourceReader(store, source, Math.max(EACH_SOURCE_WINDOW, concurrency * chunk * 4))
       : options.item!;
     if (!store.listItems) {
       throw new Error(
         `This queue's workflow store does not support step.each. The memory and ` +
           `database drivers do.`,
       );
+    }
+    if (throttles.length > 0 && !this.tick.throttle) {
+      throw new Error(`step.each "${key}" has a throttle, and this queue has no lock store.`);
     }
 
     const cached = this.steps.get(key);
@@ -836,11 +941,13 @@ export class Step {
 
     type Begin =
       | { kind: "done"; output: string | null }
+      | { kind: "failed"; step: StepRecord }
       | { kind: "go"; state: EachState; open: ItemRecord[] };
     const begin = await this.write<Begin>(
       key,
       ({ workflow, step, items, now }) => {
         if (step?.status === "completed") return { result: { kind: "done", output: step.output } };
+        if (step?.status === "failed") return { result: { kind: "failed", step } };
         if (step && step.status !== "iterating") this.mismatch(key, step.status, "step.each");
         const state = step ? stateOf(step.output) : newState(count);
         return {
@@ -860,26 +967,44 @@ export class Step {
               : { currentStep: key, status: "running" },
         };
       },
-      { items: true },
+      { items: true, start: true },
     );
     if (begin.kind === "done") return summaryOf(begin.output);
+    if (begin.kind === "failed") throw failure(key, begin.step);
     let state = begin.state;
     if (state.count !== count) warnCountChanged(this.workflowId, key, state.count, count);
     const total = state.count;
     const open = new Map(begin.open.map((item) => [item.index, item]));
 
-    /** How an attempt that finished ended, waiting to be recorded. */
-    type Ending = { index: number; row: ItemRecord | null; counter: keyof EachProgress | null };
+    /**
+     * How an attempt that finished ended, waiting to be recorded; `recorded`
+     * when its own transaction already did.
+     */
+    type Ending = {
+      index: number;
+      row: ItemRecord | null;
+      counter: "succeeded" | "skipped" | "failed" | null;
+      recorded?: boolean;
+    };
     const ended: Ending[] = [];
+    /** Units (an item, or a chunk) in flight, by their first index. */
     const inFlight = new Map<number, Promise<void>>();
+    /** Every item in flight, to the first index of its unit. */
+    const inFlightIndex = new Map<number, number>();
     const deadline = Date.now() + budgetMs;
+    /** No item starts before this: a throttle's window, or `ctx.release`. */
+    let holdUntil = 0;
+    let pausing = false;
+    /** Why the step fails, once `maxFailures` is passed. */
+    let failing: string | null = null;
     // One controller for every item of this tick: aborted when the workflow
-    // is cancelled, and when the tick stops early for any reason.
+    // is cancelled, when the step fails, and when the tick stops early.
     const tickAbort = new AbortController();
     const poll = setInterval(() => {
       store
         .find(this.workflowId, { steps: false })
         .then((found) => {
+          if (found?.workflow.status === "paused") pausing = true;
           if (found?.workflow.status !== "cancelling" || tickAbort.signal.aborted) return;
           this.cancelled = true;
           if (!this.suspension) this.suspension = { status: "waiting", wakes: [] };
@@ -888,38 +1013,136 @@ export class Step {
         .catch(() => {});
     }, this.tick.cancelCheckMs);
     poll.unref?.();
+    failing = exceeded(state);
 
-    const attempt = async (row: ItemRecord): Promise<void> => {
-      let itemKey: string | null = null;
+    /** The counters after `endings`, from what is stored. */
+    const advance = (stored: EachState, endings: Ending[]) => {
+      const next: EachState = { ...stored };
+      for (const ending of endings) if (ending.counter) next[ending.counter]++;
+      return next;
+    };
+    const progressChange = (next: EachState) => {
+      const done = next.succeeded + next.skipped + next.failed;
+      return setsProgress
+        ? { workflow: { progress: total === 0 ? 1 : clampProgress(done / total) } }
+        : {};
+    };
+    /** Takes in a newer state (writes may resolve out of order: every field only grows). */
+    const adopt = (next: EachState) => {
+      state = {
+        count: state.count,
+        next: Math.max(state.next, next.next),
+        succeeded: Math.max(state.succeeded, next.succeeded),
+        skipped: Math.max(state.skipped, next.skipped),
+        failed: Math.max(state.failed, next.failed),
+      };
+      if (!failing) failing = exceeded(state);
+      if (failing && !tickAbort.signal.aborted) tickAbort.abort(new WorkflowSuspended());
+    };
+
+    const attempt = async (rows: ItemRecord[]): Promise<void> => {
+      const keys: Array<string | null> = rows.map(() => null);
+      const skips = new Map<number, { reason: string; data: unknown }>();
       const controller = new AbortController();
       const onAbort = () => controller.abort(tickAbort.signal.reason);
       tickAbort.signal.addEventListener("abort", onAbort, { once: true });
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const label = rows.length === 1 ? `${key}[${rows[0]!.index}]` : `${key}[${rows[0]!.index}..${rows.at(-1)!.index}]`;
       const abandoned = new Promise<never>((_, reject) => {
         controller.signal.addEventListener("abort", () => reject(controller.signal.reason), {
           once: true,
         });
         if (timeoutMs !== undefined) {
           timer = setTimeout(
-            () => controller.abort(new StepTimeoutError(`${key}[${row.index}]`, timeoutMs)),
+            () => controller.abort(new StepTimeoutError(label, timeoutMs)),
             timeoutMs,
           );
         }
       });
+      const release = (delayMs: number): never => {
+        throw new ItemReleased(Math.max(0, Math.floor(Number(delayMs) || 0)));
+      };
+      /** Each item's end, once `fn` returned. */
+      const successes = (now: number): Ending[] =>
+        rows.map((row, position) => {
+          const skipped = skips.get(position);
+          if (!skipped) return { index: row.index, row: null, counter: "succeeded" };
+          return {
+            index: row.index,
+            row: skippedRow(row, keys[position]!, skipped.reason, skipped.data, now),
+            counter: "skipped",
+          };
+        });
+      let recorded: Ending[] | null = null;
       const work = (async () => {
-        const input = await produce(row.index);
-        itemKey = itemKeyOf(options.key ? options.key(input, row.index) : row.index);
-        const context: ItemContext = {
-          idempotencyKey: `${this.workflowId}:${key}:${itemKey}`,
-          attempt: row.attempt,
-          signal: controller.signal,
-          index: row.index,
-          key: itemKey,
-          skip: (reason: string, data?: unknown): never => {
-            throw new ItemSkipped(reason, data);
-          },
+        const inputs = await Promise.all(rows.map((row) => produce(row.index)));
+        rows.forEach((row, position) => {
+          keys[position] = itemKeyOf(options.key ? options.key(inputs[position]!, row.index) : row.index);
+        });
+        const idempotencyKey = (position: number) => `${this.workflowId}:${key}:${keys[position]}`;
+        const attemptNo = Math.max(...rows.map((row) => row.attempt));
+        const call = async () => {
+          if (chunked) {
+            const context: ChunkContext = {
+              idempotencyKey: idempotencyKey(0),
+              attempt: attemptNo,
+              signal: controller.signal,
+              items: rows.map((row, position) => ({
+                index: row.index,
+                key: keys[position]!,
+                idempotencyKey: idempotencyKey(position),
+              })),
+              skip: (position, reason, data) => {
+                if (!Number.isInteger(position) || position < 0 || position >= rows.length) {
+                  throw new RangeError(`ctx.skip: no item at position ${position} of this chunk.`);
+                }
+                skips.set(position, { reason: String(reason), data });
+              },
+              release,
+            };
+            await (fn as (inputs: I[], ctx: ChunkContext) => unknown)(inputs, context);
+          } else {
+            const context: ItemContext = {
+              idempotencyKey: idempotencyKey(0),
+              attempt: attemptNo,
+              signal: controller.signal,
+              index: rows[0]!.index,
+              key: keys[0]!,
+              skip: (reason: string, data?: unknown): never => {
+                throw new ItemSkipped(reason, data);
+              },
+              release,
+            };
+            await (fn as (input: I, ctx: ItemContext) => unknown)(inputs[0]!, context);
+          }
         };
-        await fn(input, context);
+        if (!inTransaction) return call();
+        await inTransaction(async () => {
+          await call();
+          // Abandoned meanwhile (a timeout, a cancel): roll back.
+          if (controller.signal.aborted) throw controller.signal.reason;
+          const endings = successes(Date.now());
+          const next = await this.write(
+            key,
+            ({ step }) => {
+              const change: Required<ItemChange> = { step: key, insert: [], update: [], delete: [] };
+              for (const ending of endings) {
+                if (ending.row === null) change.delete.push(ending.index);
+                else change.update.push(ending.row);
+              }
+              const after = advance(step ? stateOf(step.output) : state, endings);
+              return {
+                result: after,
+                step: this.record(key, step, { status: "iterating", output: stateOutput(after) }),
+                items: change,
+                ...progressChange(after),
+              };
+            },
+            { joinTransaction: true },
+          );
+          recorded = endings.map((ending) => ({ ...ending, recorded: true }));
+          adopt(next);
+        });
       })();
       let error: unknown;
       let failed = false;
@@ -934,84 +1157,139 @@ export class Step {
         work.catch(() => {});
         abandoned.catch(() => {});
       }
-      // Cancelled or stopped meanwhile: the item stays as it is.
-      if (tickAbort.signal.aborted) return;
+      // Recorded in its own transaction: only the bookkeeping is left.
+      if (recorded) {
+        ended.push(...(recorded as Ending[]));
+        return;
+      }
+      // Cancelled, stopped or lost meanwhile: the items stay as they are.
+      if (tickAbort.signal.aborted || this.cancelled || this.lost) return;
       const now = Date.now();
       if (!failed) {
-        ended.push({ index: row.index, row: null, counter: "succeeded" });
+        ended.push(...successes(now));
         return;
       }
       if (error instanceof ItemSkipped) {
-        let output: string | null = null;
-        let reason = clip(String(error.reason));
-        try {
-          output = encodeSmall(error.data);
-        } catch (tooLarge) {
-          reason = clip(`${reason} (${describe(tooLarge)})`);
-        }
         ended.push({
-          index: row.index,
-          row: { ...row, key: itemKey, status: "skipped", error: reason, output, wakeAt: null, finishedAt: now },
+          index: rows[0]!.index,
+          row: skippedRow(rows[0]!, keys[0], error.reason, error.data, now),
           counter: "skipped",
         });
         return;
       }
-      const message = clip(describe(error), 2000);
-      if (row.attempt < attempts) {
-        const delay = backoffFor(options.backoff ?? 0, row.attempt);
-        ended.push({
-          index: row.index,
-          row: { ...row, key: itemKey, status: "retrying", error: message, wakeAt: now + delay },
-          counter: null,
+      if (error instanceof ItemReleased) {
+        holdUntil = Math.max(holdUntil, now + error.delayMs);
+        rows.forEach((row, position) => {
+          ended.push({
+            index: row.index,
+            row: {
+              ...row,
+              key: keys[position],
+              status: "retrying",
+              // Not an attempt: the next one has this one's number again.
+              attempt: Math.max(0, row.attempt - 1),
+              wakeAt: now + error.delayMs,
+            },
+            counter: null,
+          });
         });
         return;
       }
-      ended.push({
-        index: row.index,
-        row: { ...row, key: itemKey, status: "failed", error: message, wakeAt: null, finishedAt: now },
-        counter: "failed",
+      const message = clip(describe(error), 2000);
+      rows.forEach((row, position) => {
+        if (row.attempt < attempts) {
+          const delay = backoffFor(options.backoff ?? 0, row.attempt);
+          ended.push({
+            index: row.index,
+            row: { ...row, key: keys[position], status: "retrying", error: message, wakeAt: now + delay },
+            counter: null,
+          });
+          return;
+        }
+        ended.push({
+          index: row.index,
+          row: { ...row, key: keys[position], status: "failed", error: message, wakeAt: null, finishedAt: now },
+          counter: "failed",
+        });
       });
+    };
+
+    /**
+     * Counts one hit per item against every throttle, for up to `wanted`
+     * items, and resolves to how many may start. The first refused hit holds
+     * the step until its window resets.
+     */
+    const admit = async (wanted: number): Promise<number> => {
+      if (throttles.length === 0 || wanted === 0) return wanted;
+      const limiter = this.tick.throttle!;
+      for (let admitted = 0; admitted < wanted; admitted++) {
+        const counted: string[] = [];
+        for (const throttle of throttles) {
+          const hit = await limiter.hit(throttle.name, throttle.limit, throttle.windowMs);
+          if (!hit.allowed) {
+            await Promise.all(counted.map((name) => limiter.refund(name)));
+            holdUntil = Math.max(holdUntil, Date.now() + Math.max(1, hit.resetInMs));
+            return admitted;
+          }
+          counted.push(throttle.name);
+        }
+      }
+      return wanted;
+    };
+    const refund = async (count: number) => {
+      if (throttles.length === 0) return;
+      for (let i = 0; i < count; i++) {
+        for (const throttle of throttles) await this.tick.throttle!.refund(throttle.name);
+      }
     };
 
     try {
       for (;;) {
         const now = Date.now();
-        const stopping = now >= deadline || isShuttingDown() || this.cancelled;
+        const stopping =
+          now >= deadline || isShuttingDown() || this.cancelled || pausing || failing !== null;
         // What to start: items left by a tick that died, retries that are
-        // due, then new items, up to `concurrency` in flight; and never more
-        // than a window of open items, so a run of retries cannot grow the
-        // rows without bound.
-        const rerun: ItemRecord[] = [];
+        // due, then new items, up to `concurrency` units (items, or chunks)
+        // in flight; and never more than a window of open items, so a run of
+        // retries cannot grow the rows without bound.
+        let rerun: ItemRecord[] = [];
         let fresh = 0;
-        if (!stopping) {
-          let free = concurrency - inFlight.size;
+        if (!stopping && now >= holdUntil) {
+          const free = (concurrency - inFlight.size) * chunk;
           // An attempt that ended here and is not recorded yet is not a rerun.
           const ending = new Set(ended.map((end) => end.index));
           for (const row of [...open.values()].sort((a, b) => a.index - b.index)) {
-            if (free <= 0) break;
-            if (inFlight.has(row.index) || ending.has(row.index)) continue;
-            if (row.status === "running" || (row.wakeAt ?? 0) <= now) {
-              rerun.push(row);
-              free--;
-            }
+            if (rerun.length >= free) break;
+            if (inFlightIndex.has(row.index) || ending.has(row.index)) continue;
+            if (row.status === "running" || (row.wakeAt ?? 0) <= now) rerun.push(row);
           }
-          const window = concurrency + EACH_RETRY_WINDOW - open.size;
-          fresh = Math.max(0, Math.min(free, total - state.next, window));
+          const window = concurrency * chunk + EACH_RETRY_WINDOW - open.size;
+          fresh = Math.max(0, Math.min(free - rerun.length, total - state.next, window));
+          const admitted = await admit(rerun.length + fresh);
+          if (admitted < rerun.length) {
+            rerun = rerun.slice(0, admitted);
+            fresh = 0;
+          } else {
+            fresh = admitted - rerun.length;
+          }
         }
 
         if (ended.length > 0 || rerun.length > 0 || fresh > 0) {
           const endings = ended.splice(0, ended.length);
-          const committed = await this.write(key, ({ step, now: at }) => {
-            const next: EachState = { ...state };
+          const unrecorded = endings.filter((ending) => !ending.recorded);
+          const wanted = rerun.length + fresh;
+          const committed = await this.write(key, ({ workflow, step, now: at }) => {
+            const next = advance(step ? stateOf(step.output) : state, unrecorded);
             const change: Required<ItemChange> = { step: key, insert: [], update: [], delete: [] };
             const started: ItemRecord[] = [];
             const closed: ItemRecord[] = [];
-            for (const ending of endings) {
-              if (ending.counter) next[ending.counter]++;
+            for (const ending of unrecorded) {
               if (ending.row === null) change.delete.push(ending.index);
               else change.update.push(ending.row);
             }
-            for (const row of rerun) {
+            // Paused since: record what ended, start nothing.
+            const paused = workflow.status === "paused" && !this.tick.cancelling;
+            for (const row of paused ? [] : rerun) {
               if (row.attempt + 1 > attempts) {
                 const dead: ItemRecord = {
                   ...row,
@@ -1040,33 +1318,45 @@ export class Step {
               change.update.push(running);
               started.push(running);
             }
-            for (let i = 0; i < fresh; i++) {
+            const starting = paused ? 0 : fresh;
+            const reruns = started.length;
+            for (let i = 0; i < starting; i++) {
               const running = newItem(this.workflowId, key, next.next + i, at);
               change.insert.push(running);
               started.push(running);
             }
-            next.next += fresh;
-            const done = next.succeeded + next.skipped + next.failed;
+            next.next += starting;
             return {
-              result: { next, started, closed },
+              result: { next, started, closed, reruns, paused },
               step: this.record(key, step, { status: "iterating", output: stateOutput(next) }),
               items: change,
-              ...(setsProgress
-                ? { workflow: { progress: total === 0 ? 1 : clampProgress(done / total) } }
-                : {}),
+              ...progressChange(next),
             };
           });
-          state = committed.next;
+          adopt(committed.next);
+          if (committed.paused) pausing = true;
+          await refund(wanted - committed.started.length);
           for (const ending of endings) {
             if (ending.row?.status === "retrying") open.set(ending.index, ending.row);
             else open.delete(ending.index);
           }
           for (const row of committed.closed) open.delete(row.index);
-          for (const row of committed.started) {
-            open.set(row.index, row);
+          for (const row of committed.started) open.set(row.index, row);
+          // Reruns and new items in chunks of their own: a chunk is a run of
+          // new items, or of retries.
+          const units = [
+            ...chunksOf(committed.started.slice(0, committed.reruns), chunk),
+            ...chunksOf(committed.started.slice(committed.reruns), chunk),
+          ];
+          for (const unit of units) {
+            const first = unit[0]!.index;
+            for (const row of unit) inFlightIndex.set(row.index, first);
             inFlight.set(
-              row.index,
-              attempt(row).finally(() => inFlight.delete(row.index)),
+              first,
+              attempt(unit).finally(() => {
+                inFlight.delete(first);
+                for (const row of unit) inFlightIndex.delete(row.index);
+              }),
             );
           }
         }
@@ -1077,26 +1367,28 @@ export class Step {
         }
         if (ended.length > 0) continue;
         if (this.cancelled) throw new WorkflowSuspended();
+        if (failing) break;
         if (state.next >= total && open.size === 0) break;
+        if (pausing) this.suspend("paused");
         if (stopping) this.suspend("running", Date.now());
-        // Something can start now (the slots went to items that turned out
-        // to be out of attempts): go round again.
+        // When something can start next: now (the slots went to items that
+        // turned out to be out of attempts), when a retry is due, or when a
+        // throttle or `ctx.release` lets go, whichever is latest.
         const nowAgain = Date.now();
-        const startable =
-          (state.next < total && open.size < concurrency + EACH_RETRY_WINDOW) ||
-          [...open.values()].some((row) => row.status === "running" || (row.wakeAt ?? 0) <= nowAgain);
-        if (startable) continue;
-        // Only retries that are not due yet are left (the list is done, or
-        // the window is full of them): wait here when the next one is near,
-        // or hand the workflow back until it is due.
-        let wake = Infinity;
-        for (const row of open.values()) wake = Math.min(wake, row.wakeAt ?? 0);
-        const wait = wake - Date.now();
-        if (wait <= Math.min(EACH_SHORT_WAIT_MS, deadline - Date.now())) {
+        let earliest = Infinity;
+        if (state.next < total && open.size < concurrency * chunk + EACH_RETRY_WINDOW) earliest = nowAgain;
+        for (const row of open.values()) {
+          if (row.status === "running") earliest = nowAgain;
+          else if (row.status === "retrying") earliest = Math.min(earliest, row.wakeAt ?? 0);
+        }
+        const at = Math.max(earliest, holdUntil);
+        if (at <= nowAgain) continue;
+        const wait = at - nowAgain;
+        if (wait <= Math.min(EACH_SHORT_WAIT_MS, deadline - nowAgain)) {
           await new Promise((resolve) => setTimeout(resolve, Math.max(0, wait)));
           continue;
         }
-        this.suspend("sleeping", wake);
+        this.suspend("sleeping", at);
       }
     } finally {
       clearInterval(poll);
@@ -1113,11 +1405,21 @@ export class Step {
       moreProblems: listed.length > EACH_SUMMARY_PROBLEMS,
     };
     const output = JSON.stringify({ $each: state, problems: summary.problems, moreProblems: summary.moreProblems });
-    await this.write(key, ({ step, now }) => ({
-      result: undefined,
-      step: this.record(key, step, { status: "completed", output, finishedAt: now }),
-      ...(setsProgress ? { workflow: { progress: 1 } } : {}),
-    }));
+    const reason = failing;
+    const record = await this.write(key, ({ step, now }) => {
+      const next = this.record(key, step, {
+        status: reason ? "failed" : "completed",
+        output,
+        error: reason,
+        finishedAt: now,
+      });
+      return {
+        result: next,
+        step: next,
+        ...(setsProgress && !reason ? { workflow: { progress: 1 } } : {}),
+      };
+    });
+    if (reason) throw failure(key, record);
     return summary;
   }
 
@@ -1147,7 +1449,7 @@ export class Step {
           startedAt: now,
         });
         return { result: record, step: record, batch, workflow: { currentStep: key } };
-      });
+      }, { start: true });
       this.tick.scheduled();
       if (cached.status === "completed") return decode(cached.output) as BatchStatus;
       if (cached.status === "failed") throw failure(key, cached);
@@ -1181,6 +1483,14 @@ export class Step {
 
 /** The error a failed step throws, on the pass it failed and every later one. */
 function failure(key: string, step: StepRecord): StepFailedError {
+  if (step.output?.startsWith('{"$each"')) {
+    return new StepFailedError(
+      key,
+      `Step "${key}" failed: ${step.error ?? "unknown error"}`,
+      undefined,
+      summaryOf(step.output),
+    );
+  }
   const batch = step.batchId !== null && step.output !== null
     ? (JSON.parse(step.output) as BatchStatus)
     : undefined;
@@ -1251,6 +1561,62 @@ class ItemSkipped extends Error {
     super(`Skipped: ${reason}`);
     this.name = "ItemSkipped";
   }
+}
+
+/** Thrown by `ctx.release`. */
+class ItemReleased extends Error {
+  constructor(readonly delayMs: number) {
+    super(`Released for ${delayMs}ms`);
+    this.name = "ItemReleased";
+  }
+}
+
+/** An item's row, ended as skipped. */
+function skippedRow(
+  row: ItemRecord,
+  key: string | null,
+  reason: string,
+  data: unknown,
+  now: number,
+): ItemRecord {
+  let output: string | null = null;
+  let text = clip(String(reason));
+  try {
+    output = encodeSmall(data);
+  } catch (tooLarge) {
+    text = clip(`${text} (${describe(tooLarge)})`);
+  }
+  return { ...row, key, status: "skipped", error: text, output, wakeAt: null, finishedAt: now };
+}
+
+function chunksOf<T>(list: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < list.length; i += size) chunks.push(list.slice(i, i + size));
+  return chunks;
+}
+
+/** `maxFailures` as a test: why the step fails at `state`, or `null`. */
+function failurePolicy(
+  policy: StepEachOptions<unknown>["maxFailures"],
+): (state: EachState) => string | null {
+  if (policy === undefined) return () => null;
+  if (typeof policy === "number") {
+    const most = Math.max(0, Math.floor(policy));
+    return (state) =>
+      state.failed > most
+        ? `${state.failed} items failed, more than maxFailures (${most}).`
+        : null;
+  }
+  const ratio = Math.min(1, Math.max(0, policy.ratio));
+  const after = Math.max(1, Math.floor(policy.after ?? 20));
+  return (state) => {
+    const done = state.succeeded + state.skipped + state.failed;
+    if (done < after || state.failed / done <= ratio) return null;
+    return (
+      `${state.failed} of ${done} items failed, more than maxFailures ` +
+      `allows (a ratio of ${ratio}).`
+    );
+  };
 }
 
 function newState(count: number): EachState {
@@ -1370,7 +1736,20 @@ function warnNotDurable() {
 }
 
 /** @internal For tests. */
+let warnedNoTransaction = false;
+
+function warnNoTransaction() {
+  if (warnedNoTransaction) return;
+  warnedNoTransaction = true;
+  console.warn(
+    `[gemi] step.each with transaction: true runs its items without a transaction: ` +
+      `this queue's workflow store cannot record an item in the app's transaction ` +
+      `(only the database driver on Postgres or MySQL can). Items are at least once.`,
+  );
+}
+
 export function resetEachWarnings() {
+  warnedNoTransaction = false;
   warnedNotDurable = false;
   warnedCounts.clear();
 }

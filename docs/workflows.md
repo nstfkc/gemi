@@ -48,7 +48,7 @@ export class ImportSiteWorkflow extends Workflow {
 
 The static `name` is required for the same reason a job's is: workflows are stored under it, and a production build renames classes. Discovery warns about a workflow without one. To list workflows yourself instead of discovering them, set `workflows: [...]` in `app/config/queue.ts` (`workflowsDir` moves the directory).
 
-## Starting, signalling, inspecting, cancelling
+## Starting, signalling, inspecting, pausing, cancelling
 
 ```typescript
 import { Workflow } from "gemi/services";
@@ -57,15 +57,17 @@ import { ImportSiteWorkflow } from "@/app/workflows/ImportSiteWorkflow";
 const id = await ImportSiteWorkflow.start(importId); // typed against run's arguments
 await ImportSiteWorkflow.signal(id, "pages-chosen", ["p1", "p3"]); // resumes step.waitFor
 const status = await Workflow.find(id);
+await Workflow.pause(id); // and Workflow.resume(id)
 await Workflow.cancel(id);
 ```
 
 - `start(...args)` records the workflow and its first tick in one write, and resolves to the workflow's id. Inside an ORM transaction it belongs to the transaction, like a [dispatch](./jobs-and-queues.md#dispatching-inside-a-transaction): it is written with the transaction's rows on Postgres and MySQL, held until the commit otherwise, and dropped if the transaction rolls back.
 - `signal(id, key, payload)` delivers `payload` to `step.waitFor(key)` and resolves to `true` if it was taken. It is `false` for an unknown or ended workflow, one being cancelled, and a key that was already signalled. A signal that arrives before the workflow reaches its `waitFor` is kept until it does.
 - `find(id)` resolves to the status below, or `null`.
+- `pause(id)` and `resume(id)` resolve to `true` if they paused a workflow that had not ended, or resumed a paused one. See [Pausing](#pausing).
 - `cancel(id)` resolves to `true` if it cancelled a workflow that had not ended. See [Cancelling](#cancelling).
 
-`signal`, `find` and `cancel` work from `Workflow` or any subclass.
+`signal`, `find`, `pause`, `resume` and `cancel` work from `Workflow` or any subclass.
 
 ## How a workflow runs
 
@@ -177,7 +179,7 @@ export class ImportProductsWorkflow extends Workflow {
 How it runs:
 
 - **A cursor, not a step per item.** The step row keeps the next index to start and the counts. Each item that is in flight, waiting for a retry, failed or skipped has a row in the items table; an item that succeeded leaves nothing behind. A list of 100,000 items with 20 problems keeps about `concurrency + 20` rows.
-- **Retries per item.** A throw retries the item up to `attempts`, after `backoff`. A retry that waits does not hold up the items after it. An item out of attempts is recorded as `failed` with its error, and the list goes on: `step.each` does not fail because items failed. `ctx.skip(reason, data?)` ends an item as `skipped` (no retry).
+- **Retries per item.** A throw retries the item up to `attempts`, after `backoff`. A retry that waits does not hold up the items after it. An item out of attempts is recorded as `failed` with its error, and the list goes on: `step.each` does not fail because items failed, unless `maxFailures` says so. `ctx.skip(reason, data?)` ends an item as `skipped` (no retry).
 - **Time-boxed ticks.** A tick works through items for at most `tickBudget` (30 seconds), waits for the items in flight, and hands the workflow back to the queue, which runs the next tick from the cursor. A long list never holds a queue slot for long, other work interleaves, and a process that shuts down stops starting items.
 - **Crashes and deploys.** An item whose process died is found in flight by the next tick and runs again as its next attempt; one whose last attempt died is `failed`. Only the items in flight run again, never the ones that ended. Use the [database driver](./jobs-and-queues.md#the-database-driver): on the memory driver nothing survives a restart, and `step.each` warns once in production.
 - **At least once.** As with `step.run`, an item can run twice when its process dies after the work and before the result is stored. `ctx.idempotencyKey` is `<workflow id>:<step key>:<item key>`, the same on every attempt; pass it to anything that must not happen twice (a payment, a generated file stored under that name, an email).
@@ -197,8 +199,23 @@ How it runs:
 | `timeout` | How long one attempt may take; `ctx.signal` is aborted when it passes. |
 | `tickBudget` | How long one tick works before handing over. Default `"30s"`. |
 | `progress` | Whether the step sets the workflow's `progress`. Default `true`. |
+| `throttle` | `{ key, limit, window }` or a list of them: at most `limit` items start per `window`, across every process sharing the queue's lock store. See [rate limits](#rate-limits-throttle-and-ctxrelease). |
+| `transaction` | `true` runs each item in an ORM transaction that also records its end. See [transactional items](#transactional-items-transaction-and-chunk). |
+| `chunk` | Hands `fn` up to this many items at once. See [transactional items](#transactional-items-transaction-and-chunk). |
+| `maxFailures` | Fails the step once more than this many items failed, or `{ ratio, after? }`: once the share of failed items among those that ended is over `ratio` and at least `after` (default 20) have ended. Default: never. |
 
-`fn` gets the input and an `ItemContext`: `index`, `key`, `attempt`, `idempotencyKey`, `signal` (aborted on `timeout` and on cancel) and `skip(reason, data?)`. Its return value is not kept.
+`fn` gets the input and an `ItemContext`: `index`, `key`, `attempt`, `idempotencyKey`, `signal` (aborted on `timeout` and on cancel), `skip(reason, data?)` and `release(delayMs)`. Its return value is not kept.
+
+**`maxFailures`.** Past it, the items in flight are stopped, no more start, and the step fails: `step.each` throws a `StepFailedError` whose `summary` is where the items stood, problems included, on this pass and every later one. Catch it in `run` to report, or let the workflow fail.
+
+```typescript
+try {
+  await step.each("rows", { source: rows, maxFailures: { ratio: 0.5, after: 20 } }, importRow);
+} catch (error) {
+  if (!(error instanceof StepFailedError) || !error.summary) throw error;
+  await step.run("report", () => notifyImportFailed(importId, error.summary));
+}
+```
 
 The summary lists the first 100 problems (`{ index, key, status, reason, data?, attempt }`, by index); `moreProblems` says whether there are more. `Workflow.items(id, key, { status?, after?, limit? })` pages through all of them:
 
@@ -207,7 +224,49 @@ const failed = await Workflow.items(workflowId, "rows", { status: "failed", limi
 const next = await Workflow.items(workflowId, "rows", { status: "failed", after: failed.at(-1)?.index });
 ```
 
-Cancelling the workflow aborts the items in flight through `ctx.signal` and starts no more; `onCancel` then runs as usual, and `Workflow.find` shows how far the list got.
+Cancelling the workflow aborts the items in flight through `ctx.signal` and starts no more; `onCancel` then runs as usual, and `Workflow.find` shows how far the list got. [Pausing](#pausing) it lets the items in flight finish and starts no more until it is resumed.
+
+#### Rate limits: `throttle` and `ctx.release`
+
+`throttle: { key, limit, window }` counts one hit per item started (a retry too) in the queue's lock store (`gemi_locks` with the database driver), the same fixed windows as a [job's `throttle`](./jobs-and-queues.md#per-key-throttles-and-concurrency--throttle-concurrency), under the same keys: a job and a `step.each` with one key share the budget. An item over the limit waits without using an attempt. A wait that fits in the tick happens in it; a longer one hands the workflow back until the window resets, so no process sleeps on it.
+
+```typescript
+await step.each("pictures", {
+  source: products,
+  concurrency: 4,
+  throttle: { key: `images:${orgId}`, limit: 20, window: "1s" },
+}, async (product, ctx) => {
+  const response = await generatePicture(product, ctx.signal);
+  if (response.status === 429) ctx.release(30_000); // try this item again in 30 s, and hold the rest
+  await storePicture(product.id, response, ctx.idempotencyKey);
+});
+```
+
+`ctx.release(delayMs)` puts the item back to start again after `delayMs` without using an attempt, for a provider that answered "slow down", and holds the whole step for as long: no item starts before then.
+
+#### Transactional items: `transaction` and `chunk`
+
+With `transaction: true`, `fn` runs inside an ORM transaction on the queue's connection (`Model.create`, `DB.query` and the rest join it), and the item's end is the last statement of that transaction. The item's writes and its being done commit together or not at all: a crash, a lost lease, a `timeout`, a cancel or a throw rolls both back, and the item runs again with nothing of the failed attempt left behind. Database writes are then exactly once; calls to other services in `fn` are still at least once, so keep passing `ctx.idempotencyKey`. `ctx.skip` and `ctx.release` roll back too.
+
+It needs the [database driver](./jobs-and-queues.md#the-database-driver) on Postgres or MySQL, on a named connection (as `driver: "database"` builds it). On the memory driver and on SQLite `fn` runs without a transaction, the item is at least once, and gemi warns once. Keep the work in `fn` short: the transaction holds a connection while it runs.
+
+`chunk: n` hands `fn` up to `n` items at once, as an array, with a `ChunkContext`, so their writes go in one statement or, with `transaction`, one transaction per chunk:
+
+```typescript
+await step.each("rows", { source: rows, chunk: 25, transaction: true, key: (row) => row.sku }, async (batch, ctx) => {
+  for (const [position, row] of batch.entries()) {
+    if (!row.name) {
+      ctx.skip(position, "no name");
+      continue;
+    }
+    await Product.create(toProduct(row)); // in the chunk's transaction
+  }
+});
+```
+
+- `ctx.items` has each item's `index`, `key` and `idempotencyKey`, in the order of the inputs. `ctx.skip(position, reason, data?)` ends one item of the chunk as `skipped` and does not throw: the rest of the chunk succeeds.
+- A throw fails the attempt of every item in the chunk; each is retried, or fails, on its own attempts. A retried item may land in a different chunk.
+- `concurrency` counts chunks in flight, and `ctx.attempt` is the highest attempt among the chunk's items.
 
 ### Item sources: `step.source` and `ItemSource`
 
@@ -308,6 +367,10 @@ const rows = workflow?.steps.find((step) => step.key === "rows")?.items;
 
 The channel goes through the application's change feed, so it reaches every instance that shares it: use the feed's [database driver](./change-feed.md#the-database-driver) when the instance that runs the workflow is not the one serving the stream.
 
+## Pausing
+
+`Workflow.pause(id)` marks the workflow `paused`. No new step starts: a `step.run` in flight finishes and is recorded, a `step.each` lets its items in flight finish and starts no more, and the tick then lets go. A paused workflow holds no queue slot and runs nothing, even past a `step.sleep`; signals and batches that end meanwhile are kept. `Workflow.resume(id)` sets it `running` and queues a tick at once, which goes on where it stopped: a `step.each` from its cursor, a sleep that is over at once. A paused workflow can still be cancelled; `onCancel` runs as usual.
+
 ## Cancelling
 
 `Workflow.cancel(id)` marks the workflow `cancelling` and then:
@@ -324,7 +387,7 @@ The channel goes through the application's change feed, so it reaches every inst
 | Field | Description |
 | --- | --- |
 | `id`, `name`, `args` | The workflow's id, its class's name and the arguments it was started with. |
-| `status` | `running` (also between the ticks of a `step.each`), `sleeping` (a sleep or a retry's delay), `waiting` (a signal or a batch), `cancelling`, or one of the final `completed`, `failed`, `cancelled`. |
+| `status` | `running` (also between the ticks of a `step.each`), `sleeping` (a sleep or a retry's delay), `waiting` (a signal or a batch), `paused`, `cancelling`, or one of the final `completed`, `failed`, `cancelled`. |
 | `currentStep` | The key of the step it is on, or `null`. |
 | `progress` | 0 to 1: what `step.progress` set, or the share of items a running `step.each` has done, and 1 once completed. |
 | `result` | What `run` returned, once completed. |

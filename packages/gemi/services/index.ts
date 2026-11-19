@@ -237,6 +237,8 @@ export {
   type ItemContext,
   type StepBatchOptions,
   type StepContext,
+  type ChunkContext,
+  type EachThrottle,
   type StepEachInput,
   type StepEachOptions,
   type StepRunOptions,
