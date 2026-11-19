@@ -1,7 +1,12 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createElement } from "react";
 
 import { App } from "./App";
+import { Storage } from "../facades/Storage";
+import { FileSystemDriver } from "../services/file-storage/drivers/FileSystemDriver";
 import { ApiRouter } from "../http/ApiRouter";
 import { ViewRouter } from "../http/ViewRouter";
 import { HttpRequest } from "../http/HttpRequest";
@@ -23,20 +28,23 @@ class RootApiRouter extends ApiRouter {
       route: "/users/:id",
       id: req.params.id,
     })),
+    "/assets/:src*": this.stream((req: HttpRequest<{}, { src: string }>) => Storage.read(req.params.src)),
+    "/archive/:rest*": this.get(() => ({})),
+    "/optional/:id?": this.get(() => ({})),
     "/files/api": this.get(() => ({ route: "/files/api" })),
   };
 }
 
+const route = {
+  api: { rootRouter: RootApiRouter },
+  view: {
+    root: createRoot(() => createElement("div")),
+    rootRouter: class extends ViewRouter {},
+  },
+};
+
 class AppKernel extends Kernel {
-  config = {
-    route: {
-      api: { rootRouter: RootApiRouter },
-      view: {
-        root: createRoot(() => createElement("div")),
-        rootRouter: class extends ViewRouter {},
-      },
-    },
-  };
+  config = { route };
 }
 
 const app = new App({ kernel: AppKernel });
@@ -93,6 +101,34 @@ describe("App.fetch routes by the /api segment", () => {
     expect(await res.json()).toEqual({ route: "/users/:id", id: "1" });
   });
 
+  test("a stream route serves nested assets and refuses invalid storage names", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gemi-api-assets-"));
+    try {
+      const driver = new FileSystemDriver(join(root, "assets"));
+      class AssetKernel extends Kernel {
+        config = { route, filesystem: { driver } };
+      }
+      const assetApp = new App({ kernel: AssetKernel });
+      const requestAsset = (name: string) =>
+        assetApp.fetch(new Request("http://gemi.dev/api/assets/" + encodeURIComponent(name)));
+
+      const name = await driver.put({ name: "nested/..notes.txt", body: new Blob(["notes"]) });
+      const valid = await requestAsset(name);
+      expect(valid.status).toBe(200);
+      expect(await valid.text()).toBe("notes");
+
+      const openFile = vi.spyOn(Bun, "file");
+      for (const invalidName of ["../outside.txt", "a\0b"]) {
+        const refused = await requestAsset(invalidName);
+        expect(refused.status).toBe(404);
+        expect((await refused.json()).error.kind).toBe("not_found");
+      }
+      expect(openFile).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   // A regression guard: the old `replace("/api", "")` cut only the first
   // `/api` too, so this passed before the fix as well.
   test("an api route whose own path contains /api still matches", async () => {
@@ -104,6 +140,24 @@ describe("App.fetch routes by the /api segment", () => {
 
 describe("ApiRouteDispatcher.getRouteHandlerAndParams", () => {
   const dispatcher = () => new ApiRouteDispatcher({ rootRouter: RootApiRouter });
+
+  test("decodes path values once after matching the route", async () => {
+    const id = "a/b ?#é %2F";
+    const response = await app.fetch(new Request("http://gemi.dev/api/users/" + encodeURIComponent(id)));
+    expect(await response.json()).toEqual({ route: "/users/:id", id });
+
+    const match = (path: string) => dispatcher().getRouteHandlerAndParams(new Request("http://gemi.dev" + path));
+    expect(match("/api/archive/a%20b/c").params.rest).toBe("a b/c");
+    expect(match("/api/archive/a%2Fb/c").params.rest).toBe("a/b/c");
+    expect(match("/api/archive/a/b/c").params.rest).toBe("a/b/c");
+    expect(match("/api/optional").params.id).toBeUndefined();
+  });
+
+  test("a malformed parameter gets the dispatcher's normal 404", async () => {
+    const response = await app.fetch(new Request("http://gemi.dev/api/users/%E0%A4%A"));
+    expect(response.status).toBe(404);
+    expect((await response.json()).error.kind).toBe("not_found");
+  });
 
   test("strips only the leading /api", () => {
     const match = (pathname: string) =>

@@ -48,15 +48,18 @@ export function matchApiUrl(key: string, url: string): Record<string, string> | 
     return null;
   }
   const groups = pattern.exec({ pathname })?.pathname.groups;
-  if (!groups) return null;
-  const params: Record<string, string> = {};
-  for (const [name, value] of Object.entries(groups)) {
-    if (value === undefined) continue;
-    try {
-      params[name] = decodeURIComponent(value);
-    } catch {
-      return null;
+  return groups ? decodePathParams(groups) : null;
+}
+
+/** Decode captures after matching, so an encoded slash stays in its parameter. */
+export function decodePathParams(groups: Record<string, string | undefined>): Record<string, string> | null {
+  const params: [string, string][] = [];
+  try {
+    for (const [name, value] of Object.entries(groups)) {
+      if (value !== undefined) params.push([name, decodeURIComponent(value)]);
     }
+  } catch {
+    return null;
   }
-  return params;
+  return Object.fromEntries(params);
 }

@@ -51,6 +51,22 @@ export class FileSystemDriver extends FileStorageDriver {
     return this.configured ?? `${projectRoot()}/storage`;
   }
 
+  private resolveObjectPath(name: string, operation: "read" | "write" | "delete"): string {
+    if (!name) {
+      throw new Error("Object name has to be specified");
+    }
+    const root = resolve(this.folderPath);
+    const path = resolve(root, name);
+    const rel = relative(root, path);
+    const hasNul = name.includes("\0");
+    if (hasNul || !rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      if (operation === "read") throw new FileNotFoundError(name);
+      if (hasNul) throw new Error(`Refusing to ${operation} an object name containing a NUL byte`);
+      throw new Error(`Refusing to ${operation} "${name}": it is outside the storage folder`);
+    }
+    return path;
+  }
+
   async put(params: PutFileParams | Blob, { signal }: PutFileOptions = {}) {
     signal?.throwIfAborted();
 
@@ -65,14 +81,13 @@ export class FileSystemDriver extends FileStorageDriver {
       name = params.name;
     }
 
+    const path = this.resolveObjectPath(name, "write");
     const buffer =
       body instanceof Buffer
         ? body
         : body instanceof Blob || body instanceof File
           ? Buffer.from(await body.arrayBuffer())
           : "";
-
-    const path = `${this.folderPath}/${name}`;
 
     // `Bun.write` takes no signal, and a local write is not worth interrupting
     // halfway, so the last chance to abort is once the body has been read.
@@ -96,15 +111,7 @@ export class FileSystemDriver extends FileStorageDriver {
     let partial: string | null = null;
     try {
       signal?.throwIfAborted();
-      if (!name) {
-        throw new Error("Object name has to be specified");
-      }
-      const root = resolve(this.folderPath);
-      const path = resolve(root, name);
-      const rel = relative(root, path);
-      if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-        throw new Error(`Refusing to write "${name}": it is outside the storage folder`);
-      }
+      const path = this.resolveObjectPath(name, "write");
 
       await mkdir(dirname(path), { recursive: true });
       partial = `${path}.${Bun.randomUUIDv7()}.partial`;
@@ -141,25 +148,11 @@ export class FileSystemDriver extends FileStorageDriver {
   ) {
     signal?.throwIfAborted();
 
-    let bucket = process.env.BUCKET_NAME;
-    let name: string | undefined;
-
-    if (typeof params === "string") {
-      name = params;
-    } else {
-      bucket = params.bucket ?? bucket;
-      name = params.name;
-    }
-
-    if (!name) {
-      throw new Error("Object name has to be specified");
-    }
-
-    const path = `${this.folderPath}/${name}`;
-    const file = Bun.file(path);
+    const name = typeof params === "string" ? params : params.name;
+    const file = Bun.file(this.resolveObjectPath(name, "read"));
     // The disk read has no signal of its own. The body is wrapped instead, so
     // an abort stops the stream and closes the file mid-read.
-    const result = abortableBody(Bun.file(path).stream(), signal);
+    const result = abortableBody(file.stream(), signal);
     const date = new Date(file.lastModified).toUTCString();
 
     return new Response(result, {
@@ -177,11 +170,7 @@ export class FileSystemDriver extends FileStorageDriver {
     const params = typeof input === "string" ? { name: input } : input;
     const { name, range = null } = params;
 
-    if (!name) {
-      throw new Error("Object name has to be specified");
-    }
-
-    const file = Bun.file(`${this.folderPath}/${name}`);
+    const file = Bun.file(this.resolveObjectPath(name, "read"));
 
     // `Bun.file()` is lazy. Without this the response commits with a 200 and
     // the ENOENT only surfaces once the stream is pulled, as an unhandled
@@ -216,7 +205,7 @@ export class FileSystemDriver extends FileStorageDriver {
 
   async size(params: ReadFileParams | string) {
     const name = typeof params === "string" ? params : params.name;
-    const file = Bun.file(`${this.folderPath}/${name}`);
+    const file = Bun.file(this.resolveObjectPath(name, "read"));
     if (!(await file.exists())) {
       throw new FileNotFoundError(name);
     }
@@ -226,18 +215,7 @@ export class FileSystemDriver extends FileStorageDriver {
   async delete(params: DeleteFileParams | string) {
     const name = typeof params === "string" ? params : params.name;
 
-    if (!name) {
-      throw new Error("Object name has to be specified");
-    }
-
-    // A bucket key cannot climb out of its bucket, but a path can: refuse a
-    // name that resolves outside the storage folder rather than unlink it.
-    const root = resolve(this.folderPath);
-    const path = resolve(root, name);
-    const rel = relative(root, path);
-    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-      throw new Error(`Refusing to delete "${name}": it is outside the storage folder`);
-    }
+    const path = this.resolveObjectPath(name, "delete");
 
     try {
       await unlink(path);

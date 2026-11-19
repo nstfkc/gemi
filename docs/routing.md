@@ -15,6 +15,17 @@ import { ApiRouter, ViewRouter, HttpRequest } from "gemi/http";
 
 A project wires a root `ApiRouter` (`app/http/routes/api.ts`) and a root `ViewRouter` (`app/http/routes/view.ts`) into the kernel. Everything else hangs off those two via nesting.
 
+API handlers, including those called through MCP, receive path parameters in
+`req.params` decoded once after route matching. For `/notes/:id`, the request
+`/api/notes/a%2Fb` matches one segment and gives the handler the ID `a/b`.
+For a splat such as `/assets/:src*`, both `a%2Fb/c` and `a/b/c` give
+`src === "a/b/c"`. A malformed escape in a matched parameter returns HTTP 404.
+
+Remove manual `decodeURIComponent` calls on API parameters. A decoded value can
+contain `/` and `..`. When building a filesystem path or an S3 key, validate the
+result against the directory or key prefix the caller may access. View loaders
+and client-side view routes still receive raw captures such as `a%2Fb`.
+
 ## The `routes` object
 
 A router is a class with a `routes` field. Keys are URL path segments; values describe what happens at that path — a route handler, a group of handlers, a nested router, a layout, or a resource.
