@@ -781,13 +781,18 @@ export function workflowContract(
         patch(a);
         const id = await a.workflows.start(Crashy, []);
         await until(() => dead !== undefined);
-        const b = worker([Crashy], [], config);
-        patch(b);
-        // Its lease lapses; the next tick (as a signal or a wake-up would
-        // enqueue) takes the workflow over.
-        await sleep(400);
-        await driver().enqueue({ name: WORKFLOW_TICK_JOB, args: JSON.stringify([id]) });
-        await until(async () => (await status(a, id)) === "completed");
+        // A second process, where two clients are two processes.
+        if (features.concurrentWorkers !== false) patch(worker([Crashy], [], config));
+        // Once its lease lapses, the next tick (as a signal or a wake-up
+        // would enqueue) takes the workflow over; one that comes too early is
+        // only marked, so keep sending them until one gets through.
+        const producer = driver();
+        await until(async () => {
+          if ((await status(a, id)) === "completed") return true;
+          await producer.enqueue({ name: WORKFLOW_TICK_JOB, args: JSON.stringify([id]) });
+          await sleep(150);
+          return false;
+        }, 15_000);
         hang();
 
         expect(attempts.get(3)).toEqual([1, 2]);
