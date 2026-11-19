@@ -24,6 +24,7 @@ import { isPolicyDeniedError, isRecordNotFoundError } from "../../orm/errors";
 import { apiPath } from "./apiPath";
 import { notFoundResponse } from "./notFound";
 import { policyDeniedResponse } from "./policyDenied";
+import { type NormalizedCorsPolicy, isPreflight, preflightResponse, withCorsPolicy } from "../../http/corsPolicy";
 
 class DebugRouter extends ApiRouter {
   routes = {
@@ -547,11 +548,40 @@ export class ApiRouteDispatcher {
 
     const routeHandler = this.flatRoutes[path];
 
+    // A preflight for a path whose routes declare a CORS policy (#913) is
+    // answered from the policy alone: no middleware, no hooks, as a preflight
+    // carries no credentials. A path without one keeps the plain 204.
+    if (routeHandler && isPreflight(req)) {
+      const policies: Record<string, NormalizedCorsPolicy | undefined> = {};
+      for (const [method, route] of Object.entries(routeHandler)) {
+        if (method !== "OPTIONS") policies[method] = route.cors;
+      }
+      if (Object.values(policies).some(Boolean)) {
+        return preflightResponse(req, policies);
+      }
+    }
+
     if (!routeHandler || !routeHandler[req.method]) {
       return new Response(JSON.stringify({ error: refusal("not_found", "Not found", 404) }), {
         status: 404,
       });
     }
+
+    const cors = routeHandler[req.method].cors;
+    const response = await this.dispatchRoute(req, params, path, carried);
+    // Every answer the route gives — the handler's, a middleware's refusal,
+    // a policy denial, a 404 for a missing record — carries the policy's
+    // headers, so the browser shows the status instead of a CORS failure.
+    return cors ? withCorsPolicy(response, cors, req) : response;
+  }
+
+  private async dispatchRoute(
+    req: Request,
+    params: Record<string, any>,
+    path: string,
+    carried?: CarriedContext | null,
+  ): Promise<Response> {
+    const routeHandler = this.flatRoutes[path];
 
     const httpRequest = new HttpRequest(req, params, "api", path);
     if (!this.isFrameworkRoute(path)) {

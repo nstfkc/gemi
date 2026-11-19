@@ -21,11 +21,14 @@ export const DOMAIN_ASK_PATH = "/__gemi__/domains/ask";
 
 /**
  * How the servers serve static files to a request's host (#1015): see
- * `ViewRouteConfig.publicFiles` and `ViewRouteConfig.assetRoutes`.
+ * `ViewRouteConfig.publicFiles` and `ViewRouteConfig.assetRoutes`, and
+ * whether `/assets` files carry `Access-Control-Allow-Origin: *` (#1311,
+ * `ViewRouteConfig.assetCors`).
  */
 export interface StaticFilesPolicy {
   publicFiles: boolean;
   assetRoutes: boolean;
+  assetCors: boolean;
 }
 
 export interface DomainDispatchers {
@@ -91,7 +94,10 @@ export class DomainRouter {
       this.groups.set(FALLBACK_GROUP, build(domains.custom.fallback));
     }
     this.staticFilesVary = this.viewDispatchers().some(
-      (view) => view.publicFiles !== root.view.publicFiles || view.assetRoutes !== root.view.assetRoutes,
+      (view) =>
+        view.publicFiles !== root.view.publicFiles ||
+        view.assetRoutes !== root.view.assetRoutes ||
+        view.assetCors !== root.view.assetCors,
     );
   }
 
@@ -103,7 +109,7 @@ export class DomainRouter {
    */
   async staticFiles(req: Request): Promise<StaticFilesPolicy> {
     const view = (this.staticFilesVary ? await this.route(req) : null)?.view ?? this.dispatchers(null).view;
-    return { publicFiles: view.publicFiles, assetRoutes: view.assetRoutes };
+    return { publicFiles: view.publicFiles, assetRoutes: view.assetRoutes, assetCors: view.assetCors };
   }
 
   /**

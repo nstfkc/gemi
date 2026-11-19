@@ -59,6 +59,7 @@ export default defineRouteConfig({
 | `groups[].view.detectLocale` | `(req, { supportedLocales, defaultLocale }) => string \| null` | With `localeRouting: "off"`: the locale of each request of the group, matched or not, e.g. from `?locale=`, so its not-found page reads `useDictionary` in it too. No cookie. See [Picking the locale of a group out of locale routing](./i18n.md#picking-the-locale-of-a-group-out-of-locale-routing). |
 | `groups[].view.publicFiles` | `boolean` (default `true`) | `false`: the files copied out of `public/` are not served on the group's hosts, and their paths reach the group's routes. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
 | `groups[].view.assetRoutes` | `boolean` (default `false`) | `true`: the group's routes may answer under `/assets` where the build has no file. See [Static files on a group's hosts](#static-files-on-a-groups-hosts). |
+| `groups[].view.assetCors` | `boolean` (default `false`) | `true`: the build's files under `/assets` are sent with `Access-Control-Allow-Origin: *` on the group's hosts, so the group's views can hydrate in a sandboxed frame. See [Embedding in a sandboxed frame](./static-views-and-islands.md#embedding-in-a-sandboxed-frame). |
 | `groups[].view.translate` | `boolean` | `true` lets browsers and Google Search translate the group's pages: `<Head />` leaves out `<meta name="google" content="notranslate">`. See [Translation](./views-and-layouts.md#translation). |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
 | `custom.group` | `string` | The `subdomain` of the group a resolved custom host is served as. |
@@ -379,13 +380,18 @@ export default class ShopViewRouter extends ViewRouter {
   build has no file for reaches the routes. A missing `/assets/*.js` (or
   `.mjs`) keeps gemi's [reload stub](./configuration.md) for a chunk of
   another release, so a route there is never reached.
-- Both are view config, so a group inherits the root `view`'s value unless it
+- `assetCors: true` sends the build's files under `/assets` with
+  `Access-Control-Allow-Origin: *` on the group's hosts, for views embedded in
+  a sandboxed frame or loaded from another origin. A route under `/assets`
+  keeps its own headers. See
+  [Embedding in a sandboxed frame](./static-views-and-islands.md#embedding-in-a-sandboxed-frame).
+- All three are view config, so a group inherits the root `view`'s value unless it
   sets its own, and a group that brings no `view` serves what the root does.
   A custom domain is served as its `custom.group`.
 - Other paths, `/image/*` for one, were never reserved: a group's routes
   answer them as they answer any path.
 - The host is resolved for a static file request only when some group sets
-  either option differently from the root, and only for a path that needs
+  one of these options differently from the root, and only for a path that needs
   it. The resolution is reused by the route that answers.
 
 ## Development

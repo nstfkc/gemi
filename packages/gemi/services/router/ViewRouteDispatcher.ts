@@ -318,6 +318,9 @@ export class ViewRouteDispatcher {
   /** See `ViewRouteConfig.assetRoutes`. */
   readonly assetRoutes: boolean;
 
+  /** See `ViewRouteConfig.assetCors`. */
+  readonly assetCors: boolean;
+
   /** See `ViewRouteConfig.translate`. */
   readonly translate: boolean | undefined;
 
@@ -345,6 +348,7 @@ export class ViewRouteDispatcher {
     this.notFound = config.notFound;
     this.publicFiles = config.publicFiles ?? defaults.publicFiles;
     this.assetRoutes = config.assetRoutes ?? defaults.assetRoutes;
+    this.assetCors = config.assetCors ?? defaults.assetCors;
 
     this.translate = config.translate;
     this.csp = config.csp;

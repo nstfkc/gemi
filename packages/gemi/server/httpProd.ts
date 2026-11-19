@@ -257,22 +257,27 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
         // Another release's file, from the store every release uploads to.
         if (isAssetPath && assetFallback) {
           const fallback = await assetFallback(req, pathname);
-          if (fallback) return fallback;
+          if (fallback) return await withAssetCors(req, fallback);
         }
         // A host whose views own `/assets` (#1015) gets its routes for what
         // the build has no file for; a missing chunk keeps its reload stub.
+        // A route's answer keeps its own headers: `assetCors` is for the
+        // build's files only.
         if (isAssetPath && !isBuildChunkPath(pathname) && (await staticFilesPolicy(req)).assetRoutes) {
           return await handleWithApp(req, pathname);
         }
-        return staticAssetMiss(pathname) ?? (await handleWithApp(req, pathname));
+        const miss = staticAssetMiss(pathname);
+        return miss ? await withAssetCors(req, miss) : await handleWithApp(req, pathname);
       }
 
+      let response: Response;
       try {
-        return await staticFileResponse(req, distPath, staticAssets.get(distPath));
+        response = await staticFileResponse(req, distPath, staticAssets.get(distPath));
       } catch (error) {
         app.onException?.(error);
         return new Response("Not found", { status: 404 });
       }
+      return isAssetPath ? await withAssetCors(req, response) : response;
     }
 
     const response = await handleWithApp(req, pathname);
@@ -295,10 +300,25 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   // which answers the same failure as for any route.
   async function staticFilesPolicy(req: Request) {
     try {
-      return (await app.staticFiles?.(req)) ?? { publicFiles: true, assetRoutes: false };
+      return (await app.staticFiles?.(req)) ?? { publicFiles: true, assetRoutes: false, assetCors: false };
     } catch {
-      return { publicFiles: false, assetRoutes: true };
+      return { publicFiles: false, assetRoutes: true, assetCors: false };
     }
+  }
+
+  // A build file under `/assets`, with `Access-Control-Allow-Origin: *` on a
+  // host whose views set `assetCors` (#1311), so a sandboxed frame (`Origin:
+  // null`) or a page on another origin can load it as a module script or a
+  // font. The files are public and immutable, and the header allows no
+  // credentials. Set in place, never by rebuilding the Response: a file's body
+  // must stay the `Bun.file` it is (see `isOpenEndedBody` in the api
+  // dispatcher, #725). Every response here was built by gemi, so its headers
+  // are mutable.
+  async function withAssetCors(req: Request, response: Response) {
+    if ((await staticFilesPolicy(req)).assetCors) {
+      response.headers.set("Access-Control-Allow-Origin", "*");
+    }
+    return response;
   }
 
   async function handleWithApp(req: Request, pathname: string) {

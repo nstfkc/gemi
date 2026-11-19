@@ -420,6 +420,28 @@ pieces) are left out. It applies to `"eager"` islands only, since a lazy
 island announces nothing up front, and changes nothing in hydrated views or in
 dev.
 
+### Embedding in a sandboxed frame
+
+A static view can run inside a sandboxed frame on another site, as a widget: an `<iframe sandbox="allow-scripts">` without `allow-same-origin`, or a frame inside a document sent with `Content-Security-Policy: sandbox`. The sandbox carries down to nested frames, so the view's own frame has an opaque origin too. The browser then loads the view's islands, their chunks and its fonts as cross-origin CORS requests with `Origin: null`, and without `Access-Control-Allow-Origin` on them the page stays server-rendered only.
+
+Set `assetCors: true` on the views that are embedded, the root `view` or a [`route.domains` group's](./domains.md#static-files-on-a-groups-hosts) `view`:
+
+```typescript
+// app/config/route.ts
+domains: {
+  root: "example.com",
+  groups: [
+    { subdomain: "widgets", view: { rootRouter: WidgetViewRouter, assetCors: true } },
+  ],
+},
+```
+
+- On those hosts, `gemi start` sends `Access-Control-Allow-Origin: *` with the build's files under `/assets` (and with files from `GEMI_ASSET_FALLBACK_URL`). Never with a route, a document, view data or a `public/` file, and never with `Access-Control-Allow-Credentials`.
+- It is off by default. The files are public, immutable and carry no credentials, so `*` is safe for a public app, but it lets script on any website read the client bundle, which matters for an app on a private network. Turn it on only for the hosts that are embedded.
+- In `gemi dev`, the scripts gemi serves itself (`/refresh.js`, the dev entry) always allow any origin: they are fixed snippets with nothing of the app in them. Vite serves the rest; allow them with `vite: { server: { cors: true } }` in `gemi.config.ts`.
+- With an [`assetBase`](./configuration.md) on a CDN, the CDN has to send the header.
+- The widget's api calls come from `Origin: null` as well. Give those routes a [CORS policy](./routing.md#cors-for-api-routes) and authenticate them with a signed token, not cookies: see [`Origin: null` and sandboxed frames](./routing.md#origin-null-and-sandboxed-frames).
+
 ### Content Security Policy
 
 The loader is an inline module script whose text is the same on every page. The
