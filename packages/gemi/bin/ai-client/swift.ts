@@ -277,6 +277,10 @@ function caseIdentifiers(texts: string[], taken = new Set<string>()): string[] {
 }
 
 export function swiftLiteralCase(value: string | number | boolean): string {
+  if (typeof value === "number") {
+    const digits = String(value).replace(".", "_").replaceAll("-", "minus").replace("+", "plus");
+    return `_${digits}`;
+  }
   return escape(caseIdentifiers([String(value)])[0]!);
 }
 

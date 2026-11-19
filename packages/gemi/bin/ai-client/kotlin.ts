@@ -276,11 +276,11 @@ export function renderUnion(
       `        ${strictTagType ? `JsonPrimitive(${literal})` : literal} -> ${variantClass(variant)}.serializer()`,
     );
   }
-  // The discriminant is wire text inside the message; `$value` is the one
-  // template in it.
-  const unknown = kotlinString(`Unknown ${discriminant} "`).slice(0, -1);
+  const unknown = kotlinString(`Unknown ${discriminant} `).slice(0, -1);
+  // A JsonElement already renders string tags with their JSON quotes.
+  const displayValue = strictTagType ? '${value ?: "missing"}' : '\\"$value\\"';
   lines.push(
-    `        else -> throw SerializationException(${unknown}$value\\"")`,
+    `        else -> throw SerializationException(${unknown}${displayValue}")`,
     "      }",
     "  }",
     "}",

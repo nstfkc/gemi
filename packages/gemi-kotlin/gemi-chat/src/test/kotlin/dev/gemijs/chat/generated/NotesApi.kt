@@ -60,7 +60,7 @@ public sealed interface POSTNotesResponse {
       when (val value = element.jsonObject["ok"]) {
         JsonPrimitive(true) -> POSTNotesResponseTrue.serializer()
         JsonPrimitive(false) -> POSTNotesResponseFalse.serializer()
-        else -> throw SerializationException("Unknown ok \"$value\"")
+        else -> throw SerializationException("Unknown ok ${value ?: "missing"}")
       }
   }
 }
@@ -85,7 +85,7 @@ public sealed interface POSTNotesError {
       when (val value = element.jsonObject["kind"]) {
         JsonPrimitive("empty_title") -> POSTNotesErrorEmptyTitle.serializer()
         JsonPrimitive("gone") -> POSTNotesErrorGone.serializer()
-        else -> throw SerializationException("Unknown kind \"$value\"")
+        else -> throw SerializationException("Unknown kind ${value ?: "missing"}")
       }
   }
 }

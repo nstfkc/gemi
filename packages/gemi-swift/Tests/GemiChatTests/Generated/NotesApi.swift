@@ -51,7 +51,7 @@ public struct POSTNotesInput: Codable, Hashable, Sendable {
   public init(
     note: String? = nil,
     title: String? = nil,
-    wireVersion: POSTNotesInputWireVersion = ._25,
+    wireVersion: POSTNotesInputWireVersion = ._2_5,
     wireVersion2: POSTNotesInputWireVersion2? = nil,
     state: POSTNotesInputState? = nil
   ) {
@@ -246,14 +246,14 @@ public enum PATCHNotesIdErrorStatus: Codable, Hashable, Sendable {
 }
 
 public enum POSTNotesInputWireVersion: Codable, Hashable, Sendable {
-  case _25
+  case _2_5
 
   public init(from decoder: Decoder) throws {
     let container = try decoder.singleValueContainer()
     guard try container.decode(Double.self) == 2.5 else {
       throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unexpected POSTNotesInputWireVersion")
     }
-    self = ._25
+    self = ._2_5
   }
 
   public func encode(to encoder: Encoder) throws {
