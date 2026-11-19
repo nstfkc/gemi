@@ -102,6 +102,11 @@ export class MemoryWorkflowStore implements WorkflowStore {
     return true;
   }
 
+  /** The workflow's status, synchronously, for the memory driver's slots. */
+  statusOf(id: string): WorkflowRecord["status"] | undefined {
+    return this.workflows.get(id)?.status;
+  }
+
   async update<T>(
     id: string,
     options: UpdateOptions,

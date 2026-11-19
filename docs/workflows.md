@@ -367,6 +367,34 @@ const rows = workflow?.steps.find((step) => step.key === "rows")?.items;
 
 The channel goes through the application's change feed, so it reaches every instance that shares it: use the feed's [database driver](./change-feed.md#the-database-driver) when the instance that runs the workflow is not the one serving the stream.
 
+## Concurrency
+
+A workflow can cap how many of its kind are in flight, with the `concurrency` method jobs have (see [Concurrency limits](./jobs-and-queues.md#concurrency-limits--concurrency)). It gets the `run` arguments after `step`:
+
+```typescript
+export class ImportWorkflow extends Workflow {
+  static name = "ImportWorkflow";
+
+  async concurrency(importId: string, orgId: string) {
+    return [
+      { key: `import:org:${orgId}`, limit: 1 },
+      { key: "import", limit: await maxRunningImports() },
+    ];
+  }
+
+  async run(step: Step, importId: string, orgId: string) {
+    // ...
+  }
+}
+```
+
+- **One slot for the whole workflow.** It is taken before the first step and kept through every pass, sleep, wait and batch, until the workflow completes, fails or is cancelled. A sleeping or waiting workflow still counts.
+- **Waiting.** A workflow without a free slot waits its turn, first come first served, with its status still `running` and holding no queue slot. Its first step starts when a slot frees.
+- **Read when needed.** `concurrency` is called before each pass, so it may be `async` and read the limit from config or the database. A throw retries the pass with the tick's backoff.
+- **Pausing** gives the slot up. On `resume` the workflow takes a new place at the back of the line.
+- **Cancelling** runs `onCancel` without a slot, even for a workflow that was still waiting for one.
+- The slots are kept where the queue keeps them: the `gemi_job_slots` table with the database driver (add the `GemiJobSlot` model), and per process with the memory driver.
+
 ## Pausing
 
 `Workflow.pause(id)` marks the workflow `paused`. No new step starts: a `step.run` in flight finishes and is recorded, a `step.each` lets its items in flight finish and starts no more, and the tick then lets go. A paused workflow holds no queue slot and runs nothing, even past a `step.sleep`; signals and batches that end meanwhile are kept. `Workflow.resume(id)` sets it `running` and queues a tick at once, which goes on where it stopped: a `step.each` from its cursor, a sleep that is over at once. A paused workflow can still be cancelled; `onCancel` runs as usual.

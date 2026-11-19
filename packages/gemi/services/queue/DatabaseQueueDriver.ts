@@ -26,6 +26,8 @@ import type {
   JobRelease,
   QueueDriver,
 } from "./QueueDriver";
+import { DatabaseSlots, createSlotTableStatements } from "./DatabaseSlots";
+import type { SlotRequest } from "./slots";
 import {
   DatabaseWorkflowStore,
   createWorkflowItemTableStatements,
@@ -66,6 +68,12 @@ export type DatabaseQueueDriverOptions = {
    * jobs table of another name. Only touched by what uses them.
    */
   workflowSourceTable?: string;
+  /**
+   * The table concurrency slots are kept in (#1319). Default
+   * `gemi_job_slots`, or `<table>_slots` beside a jobs table of another name.
+   * Only touched by jobs and workflows that declare `concurrency`.
+   */
+  slotTable?: string;
   /**
    * SQLite only: how long, in milliseconds, a statement waits for another
    * process's write lock before failing with `SQLITE_BUSY`. Default `1000`.
@@ -186,7 +194,9 @@ export class DatabaseQueueDriver implements QueueDriver {
   readonly workflowStepTable: string;
   readonly workflowItemTable: string;
   readonly workflowSourceTable: string;
+  readonly slotTable: string;
   private workflows: DatabaseWorkflowStore | undefined;
+  private slotLines: DatabaseSlots | undefined;
   private readonly sql: SQL;
   private readonly dialect: Dialect;
   /** The connection's name, when it came with one; see `transaction`. */
@@ -216,8 +226,10 @@ export class DatabaseQueueDriver implements QueueDriver {
     const workflowSourceTable =
       options.workflowSourceTable ??
       (defaults ? "gemi_workflow_sources" : `${table}_workflow_sources`);
+    const slotTable = options.slotTable ?? (defaults ? "gemi_job_slots" : `${table}_slots`);
     for (const name of [
       table,
+      slotTable,
       batchTable,
       workflowTable,
       workflowStepTable,
@@ -243,6 +255,7 @@ export class DatabaseQueueDriver implements QueueDriver {
     this.workflowStepTable = workflowStepTable;
     this.workflowItemTable = workflowItemTable;
     this.workflowSourceTable = workflowSourceTable;
+    this.slotTable = slotTable;
     this.sql = connection.sql;
     this.dialect = connection.dialect;
     this.connection = connection.name;
@@ -335,6 +348,9 @@ export class DatabaseQueueDriver implements QueueDriver {
       this.dialect,
       this.workflowSourceTable,
     )) {
+      await this.sql.unsafe(statement);
+    }
+    for (const statement of createSlotTableStatements(this.dialect, this.slotTable)) {
       await this.sql.unsafe(statement);
     }
   }
@@ -696,6 +712,32 @@ export class DatabaseQueueDriver implements QueueDriver {
       },
     );
     return this.workflows;
+  }
+
+  /**
+   * Concurrency slots (#1319), in `slotTable`, shared by every process on
+   * this database; see `DatabaseSlots`.
+   */
+  acquireSlots(request: SlotRequest): Promise<boolean> {
+    return this.slots().acquire(request);
+  }
+
+  releaseSlots(holder: string): Promise<void> {
+    return this.slots().release(holder);
+  }
+
+  private slots(): DatabaseSlots {
+    this.slotLines ??= new DatabaseSlots(
+      {
+        sql: this.sql,
+        dialect: this.dialect,
+        configure: () => this.configure(),
+        atomically: (fn) => this.atomically(fn),
+        insertJob: (q, job) => this.insert(q, job),
+      },
+      { slots: this.slotTable, jobs: this.table, workflows: this.workflowTable },
+    );
+    return this.slotLines;
   }
 
   async reportProgress(job: ClaimedJob, progress: number): Promise<void> {

@@ -1,3 +1,24 @@
+# 0.223.0
+
+## Concurrency limits read at claim time, across processes, first come first served, and for whole workflows (#1319, #987)
+
+**New API and behaviour changes (minor version).** See [Concurrency limits](docs/jobs-and-queues.md#concurrency-limits--concurrency) and [Workflows: concurrency](docs/workflows.md#concurrency).
+
+- `Job.concurrency(...args)` may be `async` and may return a list of `{ key, limit }`. It is called each time the job is admitted, so the limit can come from config or the database. A list is taken in order, and all of it is needed.
+- `Workflow.concurrency(...args)` (the `run` arguments after `step`): one slot held for the whole workflow, from its first step until it ends or is paused. `onCancel` runs without one.
+- Each key has a line, served first come first served. A job or workflow without a slot is parked: back to waiting, holding nothing, made due as soon as a slot frees. It no longer polls every `pollInterval`.
+- The database driver keeps the lines in a new table, `gemi_job_slots` (`<table>_slots` beside another jobs table, or the `slotTable` option). The memory driver keeps them per process.
+- New exported types: `JobConcurrencyResult`, `SlotLimit`, `SlotRequest`. `QueueDriver` gains optional `acquireSlots` and `releaseSlots`.
+
+What to check:
+
+- **Database driver, if any job or workflow declares `concurrency`:** add the `GemiJobSlot` model from the docs and migrate, or call `driver.createTable()`. Until then such a job fails its attempt with an error that names the table.
+- **Rolling deploys:** old processes count slots as locks in `gemi_locks` and new ones in `gemi_job_slots`, so while both run, a key can run up to twice its limit. Locks left over in `gemi_locks` (`gemi:concurrency:*`) expire on their own.
+- **`limit: 0` now holds every job of the key.** Before, it meant no limit.
+- **A key longer than 191 characters, a limit that isn't a whole number, or a key repeated in one list** now fails the attempt with a message that says so.
+- **A throw from `concurrency` or `throttle`** now fails the attempt like a throw from `run` (with `onFail`, retries and dead letters). It used to escape the queue's loop.
+- **A custom `QueueDriver`** keeps the old lock-based job concurrency until it implements `acquireSlots` and `releaseSlots`. A workflow with `concurrency` fails on such a driver.
+
 # 0.222.1
 
 ## `worker = true` jobs run again (#1318)

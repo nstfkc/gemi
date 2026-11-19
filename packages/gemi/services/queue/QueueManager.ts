@@ -19,6 +19,7 @@ import type { ClaimOptions, ClaimedJob, EnqueueBatch, QueueDriver } from "./Queu
 import type { BatchCallbacks, BatchStatus, JobCall } from "./batch";
 import { withDefaults } from "../../support/withDefaults";
 import { backoffFor } from "./backoff";
+import { type SlotLimit, slotLimits } from "./slots";
 import type { WorkflowClass } from "./workflow/Workflow";
 import { WorkflowRuntime } from "./workflow/WorkflowRuntime";
 
@@ -1365,22 +1366,34 @@ export class QueueManager {
     // Per-key limits (#661), before the job runs. A job over a limit goes
     // back without spending an attempt: it is waiting for capacity, not
     // failing.
-    const admitted = await this.admit(job, args, claimed);
-    if (!admitted) return;
-
     let error: Error | undefined;
-    let result: unknown;
+    let admitted: { done(): Promise<void> } | undefined;
     try {
-      result = await (job.worker
-        ? runInWorker(claimed.name, claimed.args)
-        : job.run(...args));
+      admitted = await this.admit(job, args, claimed);
     } catch (err) {
+      // A `concurrency` or `throttle` that threw fails the attempt like `run`
+      // would; the job never started.
       error = err as Error;
-    } finally {
-      await admitted.done();
+    }
+    if (!admitted && error === undefined) return;
+
+    let result: unknown;
+    if (admitted) {
+      try {
+        result = await (job.worker
+          ? runInWorker(claimed.name, claimed.args)
+          : job.run(...args));
+      } catch (err) {
+        error = err as Error;
+      } finally {
+        await admitted.done();
+      }
     }
 
     const outcome = job.$outcome;
+    // Parked by a workflow's tick to wait for its slots: the driver has put
+    // the claim back already.
+    if (error === undefined && outcome?.kind === "parked") return;
     if (error === undefined && outcome?.kind === "release") {
       // `this.release(delay)`: back to waiting, the attempt taken back.
       await this.driver.release(claimed, { retryInMs: Math.max(0, outcome.delayMs) });
@@ -1435,64 +1448,114 @@ export class QueueManager {
   }
 
   /**
-   * Takes a slot under the job's `concurrency` key and a hit under each of
-   * its `throttle` keys, all in the queue's lock store, so the limits hold
-   * across every process sharing it. Resolves to what to undo after the run,
-   * or `undefined` when the job was released to wait for capacity.
+   * Takes the job's `concurrency` slots and a hit under each of its
+   * `throttle` keys, so the limits hold across every process sharing the
+   * queue's storage. Resolves to what to undo after the run, or `undefined`
+   * when the job was put back to wait for capacity.
    *
-   * Concurrency is `limit` slot locks per key, each leased for the
-   * visibility timeout and renewed while the job runs, so a slot held by a
-   * dead process frees itself like the job's own lease. Throttles are fixed
-   * windows counted when a job is admitted, whether it then succeeds or not.
+   * Slots are the driver's lines (#1319, `slots.ts`): first come first
+   * served, and a job without a slot is parked by the driver, holding
+   * nothing, until one frees. A driver without them falls back to `limit`
+   * slot locks per key in the lock store, leased for the visibility timeout
+   * and renewed while the job runs, with a waiter put back to poll.
+   * Throttles are fixed windows counted when a job is admitted, whether it
+   * then succeeds or not.
    */
   private async admit(
     job: Job,
     args: unknown[],
     claimed: ClaimedJob,
   ): Promise<{ done(): Promise<void> } | undefined> {
-    const concurrency = job.concurrency(...args);
+    const limits = slotLimits(await job.concurrency(...args), claimed.name);
     const throttles = [job.throttle(...args) ?? []].flat();
-    if (!concurrency && throttles.length === 0) return { done: async () => {} };
+    if (limits.length === 0 && throttles.length === 0) return { done: async () => {} };
 
-    const locks = this.locks;
-    let slot: HeldLock | undefined;
-    if (concurrency && concurrency.limit > 0) {
-      const ttl = this.config.visibilityTimeout;
-      for (let i = 0; i < concurrency.limit && !slot; i++) {
-        slot =
-          (await locks.acquire(`gemi:concurrency:${concurrency.key}:${i}`, {
-            ttl,
-            renew: true,
-          })) ?? undefined;
-      }
-      if (!slot) {
-        await this.driver.release(claimed, {
+    const driver = this.driver;
+    let free = async () => {};
+    if (limits.length > 0 && driver.acquireSlots && driver.releaseSlots) {
+      const granted = await driver.acquireSlots({
+        holder: claimed.id,
+        job: claimed,
+        slots: limits,
+        recheckMs: this.slotRecheck(),
+      });
+      if (!granted) return undefined;
+      free = () => driver.releaseSlots!(claimed.id);
+    } else if (limits.length > 0) {
+      const held = await this.lockSlots(limits);
+      if (!held) {
+        await driver.release(claimed, {
           retryInMs: Math.round(this.config.pollInterval * (1 + Math.random())),
         });
         return undefined;
       }
+      free = async () => {
+        await Promise.all(held.map((slot) => slot.release()));
+      };
     }
 
+    const locks = this.locks;
     const counted: string[] = [];
-    for (const throttle of throttles) {
-      const name = `gemi:throttle:${throttle.key}`;
-      const hit = await locks.store.hit(name, throttle.limit, throttle.window);
-      if (!hit.allowed) {
-        await Promise.all(counted.map((counted) => locks.store.refund(counted)));
-        await slot?.release();
-        await this.driver.release(claimed, { retryInMs: Math.max(1, hit.resetInMs) });
-        return undefined;
+    try {
+      for (const throttle of throttles) {
+        const name = `gemi:throttle:${throttle.key}`;
+        const hit = await locks.store.hit(name, throttle.limit, throttle.window);
+        if (!hit.allowed) {
+          await Promise.all(counted.map((counted) => locks.store.refund(counted)));
+          await free();
+          await driver.release(claimed, { retryInMs: Math.max(1, hit.resetInMs) });
+          return undefined;
+        }
+        counted.push(name);
       }
-      counted.push(name);
+    } catch (error) {
+      // The slots were taken for a run that is not going to happen.
+      await free().catch(() => {});
+      throw error;
     }
 
     return {
       done: async () => {
-        await slot?.release().catch((error) => {
+        await free().catch((error) => {
           console.error(`[gemi] Could not free a concurrency slot of ${claimed.name}.`, error);
         });
       },
     };
+  }
+
+  /**
+   * When a job or workflow parked for a slot is claimed again to re-check
+   * (see `SlotRequest.recheckMs`): after the visibility timeout for the first
+   * waiters of a line, by when a holder whose process died has had its job
+   * reclaimed, and hourly for the rest. Neither is how a waiter normally
+   * moves up; a freed slot wakes it at once.
+   */
+  /** @internal */
+  slotRecheck() {
+    return { near: Math.max(1000, this.config.visibilityTimeout), far: 60 * 60_000 };
+  }
+
+  /**
+   * The fallback for a driver without `acquireSlots`: one of `limit` slot
+   * locks per key, all keys or none. No order, and a waiter polls.
+   */
+  private async lockSlots(limits: SlotLimit[]): Promise<HeldLock[] | undefined> {
+    const ttl = this.config.visibilityTimeout;
+    const held: HeldLock[] = [];
+    for (const { key, limit } of limits) {
+      let slot: HeldLock | undefined;
+      for (let i = 0; i < limit && !slot; i++) {
+        slot =
+          (await this.locks.acquire(`gemi:concurrency:${key}:${i}`, { ttl, renew: true })) ??
+          undefined;
+      }
+      if (!slot) {
+        await Promise.all(held.map((other) => other.release()));
+        return undefined;
+      }
+      held.push(slot);
+    }
+    return held;
   }
 }
 
