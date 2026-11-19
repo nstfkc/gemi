@@ -6,6 +6,7 @@ import type { QueueDriver } from "../QueueDriver";
 import { QueueManager } from "../QueueManager";
 import { type EachSummary, type Step, StepFailedError, WaitTimeoutError } from "./Step";
 import { Workflow, type WorkflowClass } from "./Workflow";
+import type { WorkflowUpdate } from "./wire";
 import { WORKFLOW_TICK_JOB, WorkflowLeaseLostError } from "./WorkflowStore";
 
 /**
@@ -79,6 +80,7 @@ export function workflowContract(
         });
       } finally {
         await Promise.all(managers.map((manager) => manager.drain(5_000)));
+        await Promise.all(managers.map((manager) => manager.workflows.close()));
         await store.dispose();
       }
     };
@@ -935,6 +937,56 @@ export function workflowContract(
         const reused = await queue.workflows.start(Empty, [true]);
         await until(async () => (await status(queue, reused)) === "failed");
         expect((await queue.workflows.find(reused))!.error).toContain("rows");
+      }),
+    );
+  });
+
+
+  describe(`${name} — workflow updates`, () => {
+    test(
+      "every change is published to the workflow's channel, coalesced, and the last one always",
+      withQueue(async ({ worker }) => {
+        let release: () => void = () => {};
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        class Streamed extends Workflow {
+          static name = "Streamed";
+          async run(step: Step, secret: string) {
+            await step.each("rows", { count: 40, item: (index) => index }, async (index) => {
+              if (index === 20) await gate;
+            });
+            return secret;
+          }
+        }
+        const queue = worker([Streamed]);
+        const id = await queue.workflows.start(Streamed, ["do not show"]);
+        expect(queue.workflows.channel(id)).toBe(`gemi:workflow:${id}`);
+
+        const seen: WorkflowUpdate[] = [];
+        const following = (async () => {
+          for await (const update of queue.workflows.subscribe(id)) seen.push(update);
+        })();
+        await until(() => seen.some((update) => update.progress === 0.5));
+        release();
+        await following;
+
+        const last = seen.at(-1)!;
+        expect(last).toMatchObject({ id, name: "Streamed", status: "completed", progress: 1 });
+        expect(last.steps[0]).toMatchObject({ key: "rows", status: "completed" });
+        expect(last).not.toHaveProperty("args");
+        expect(last).not.toHaveProperty("result");
+        // Coalesced: far fewer updates than the 80-odd writes, in order.
+        expect(seen.length).toBeLessThan(20);
+        const progress = seen.map((update) => update.progress);
+        expect([...progress].sort((a, b) => a - b)).toEqual(progress);
+        const times = seen.map((update) => update.updatedAt);
+        expect([...times].sort((a, b) => a - b)).toEqual(times);
+
+        // An ended workflow yields once and ends; an unknown one yields nothing.
+        const after: WorkflowUpdate[] = [];
+        for await (const update of queue.workflows.subscribe(id)) after.push(update);
+        expect(after.map((update) => update.status)).toEqual(["completed"]);
+        for await (const update of queue.workflows.subscribe("no-such-workflow")) after.push(update);
+        expect(after).toHaveLength(1);
       }),
     );
   });

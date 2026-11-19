@@ -1,3 +1,4 @@
+import type { EachProgress } from "./wire";
 import { isShuttingDown } from "../../../server/shutdown";
 import { backoffFor } from "../backoff";
 import { type BatchStatus, clampProgress } from "../batch";
@@ -140,15 +141,7 @@ export type EachProblem = {
   attempt: number;
 };
 
-/** How far a `step.each` is. */
-export type EachProgress = {
-  total: number;
-  /** Items that ended: `succeeded + skipped + failed`. */
-  done: number;
-  succeeded: number;
-  skipped: number;
-  failed: number;
-};
+export type { EachProgress } from "./wire";
 
 /** What `step.each` returns once every item has ended. */
 export type EachSummary = EachProgress & {
