@@ -230,9 +230,11 @@ describe.each(backends)("concurrency on $name", (backend) => {
       // job still gets a slot at once.
       await queue.push(Fast, "[]");
       await until(() => order.includes("fast"));
-      expect(order.filter((entry) => entry.startsWith("slow"))).toEqual(["slow:0"]);
+      // Dispatched together and claimed together, they asked in whatever
+      // order their admissions reached the line; the FIFO test spaces them.
+      expect(order.filter((entry) => entry.startsWith("slow"))).toHaveLength(1);
       await until(() => order.length === 5, 20_000);
-      expect(order.filter((entry) => entry.startsWith("slow"))).toEqual([
+      expect(order.filter((entry) => entry.startsWith("slow")).sort()).toEqual([
         "slow:0",
         "slow:1",
         "slow:2",
