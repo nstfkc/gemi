@@ -1,4 +1,5 @@
 import Foundation
+import GemiHTTP
 import Testing
 
 @testable import GemiChat
@@ -29,6 +30,66 @@ struct EndToEndTests {
     request.httpMethod = "POST"
     let (data, _) = try await URLSession.shared.data(for: request)
     return try #require(JSONValue.parse(data)?["threadId"]?.stringValue)
+  }
+
+  @Test func httpClientCookiesAreOptIn() async throws {
+    let url = server!.appendingPathComponent("session-test")
+    let client = GemiHTTPClient(baseURL: url)
+    let body = PATCHNotesIdInput(title: "Milk")
+    _ = try await client.patchNotesById(id: "42", body: body)
+    let second = try await client.patchNotesById(id: "42", body: body)
+    #expect(second.title == "none")
+
+    let session = URLSession(configuration: .ephemeral)
+    defer { session.invalidateAndCancel() }
+    let optedIn = GemiHTTPClient(baseURL: url, session: session)
+    _ = try await optedIn.patchNotesById(id: "42", body: body)
+    let third = try await optedIn.patchNotesById(id: "42", body: body)
+    #expect(third.title == "theme=blue")
+  }
+
+  @Test func transportUsesTheRequestedMethod() async throws {
+    let client = GemiHTTPClient(baseURL: server!.appendingPathComponent("api"))
+    do {
+      _ = try await client.send(method: "GET", segments: ["notes", "42"],
+                                response: PATCHNotesIdResponse.self, rejection: PATCHNotesIdError.self)
+      Issue.record("The notes item route only accepts PATCH")
+    } catch let error as GemiHTTPStatusError {
+      #expect(error.status == 404)
+    }
+  }
+
+  @Test func editNoteCallsTheTypedRoute() async throws {
+    let client = GemiHTTPClient(baseURL: server!.appendingPathComponent("api"))
+    for id in ["42", "a/b ?#%é"] {
+      let saved = try await client.patchNotesById(id: id, body: .init(title: "Groceries"))
+      #expect(saved.id == id)
+      #expect(saved.title == "Groceries")
+    }
+    do {
+      _ = try await client.patchNotesById(id: "42", body: .init(title: ""))
+      Issue.record("Expected an empty title to be rejected")
+    } catch let refusal as any GemiHTTPError {
+      #expect(refusal.status == 422)
+      let rejected = try #require(refusal as? PATCHNotesIdError)
+      #expect(rejected.kind == .emptyTitle)
+      #expect(rejected.status == ._422)
+    }
+    for (prefix, status, body) in [
+      ("api/missing", 404, #"{"error":{"kind":"not_found","message":"Not found","status":404}}"#),
+      ("redirect", 307, "redirect"),
+      ("unexpected", 422, #"{"error":{"kind":"other"}}"#),
+    ] {
+      let other = GemiHTTPClient(baseURL: server!.appendingPathComponent(prefix))
+      do {
+        _ = try await other.patchNotesById(id: "42", body: .init(title: "Milk"))
+        Issue.record("Expected HTTP \(status)")
+      } catch let refusal as any GemiHTTPError {
+        #expect(refusal.status == status)
+        let unknown = try #require(refusal as? GemiHTTPStatusError)
+        #expect(unknown.body == Data(body.utf8))
+      }
+    }
   }
 
   @Test func aStatelessConversationKeepsItsOwnHistory() async {

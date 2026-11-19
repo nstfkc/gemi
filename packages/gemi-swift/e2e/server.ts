@@ -26,6 +26,11 @@ import type {
 } from "../../gemi/ai/AgentProvider";
 import { s } from "../../gemi/ai/Schema";
 import type { AgentMessage } from "../../gemi/ai/types";
+import { App } from "../../gemi/app/App";
+import { createRoot } from "../../gemi/client/createRoot";
+import { ViewRouter } from "../../gemi/http/ViewRouter";
+import { Kernel } from "../../gemi/kernel";
+import NotesApi from "../../gemi/bin/http-client/__fixtures__/notes";
 import { HttpRequest } from "../../gemi/http/HttpRequest";
 
 const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 };
@@ -138,6 +143,17 @@ class E2EController extends AgentController<typeof e2eAgent> {
   store = store;
 }
 
+class NotesKernel extends Kernel {
+  config = {
+    route: {
+      api: { rootRouter: NotesApi },
+      view: { root: createRoot(() => null), rootRouter: class extends ViewRouter {} },
+    },
+  };
+}
+const notesApp = new App({ kernel: NotesKernel });
+await notesApp.waitForBoot();
+
 const server = Bun.serve({
   port: Number(process.argv[2] ?? 0),
   hostname: "127.0.0.1",
@@ -147,6 +163,15 @@ const server = Bun.serve({
     const controller = new E2EController();
     try {
       switch (url.pathname) {
+        case "/session-test/notes/42":
+          return Response.json(
+            { id: "42", title: raw.headers.get("Cookie") ?? "none" },
+            { headers: { "Set-Cookie": "theme=blue; Path=/session-test" } },
+          );
+        case "/redirect/notes/42":
+          return new Response("redirect", { status: 307, headers: { Location: "/api/notes/42" } });
+        case "/unexpected/notes/42":
+          return Response.json({ error: { kind: "other" } }, { status: 422 });
         case "/api/support":
           return await controller.stream(request);
         case "/api/support/attach":
@@ -158,6 +183,9 @@ const server = Bun.serve({
         case "/api/support/threads":
           return Response.json(await store.createThread({}));
         default:
+          if (url.pathname.startsWith("/api/")) {
+            return await notesApp.fetch(raw);
+          }
           return new Response("not found", { status: 404 });
       }
     } catch (error) {

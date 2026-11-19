@@ -15,7 +15,7 @@ objects, default `Record<string, never>` and unknown request shapes normalize
 to `none`; arbitrary `any` and nonempty inputs remain JSON/type shapes. Nested,
 group and resource paths are resolved by `CreateRPC`, not duplicated here.
 Agent and voice entries are excluded. `CreateFileRPC` file/stream routes are
-explicitly deferred, as are uploads, authentication, transport, built-in auth
+explicitly deferred, as are uploads, authentication, built-in auth
 routes and app-level stale-build enforcement.
 
 The shared AI `TypeMapper` is reused without changing its output. This is not a
@@ -59,7 +59,38 @@ The checked-in notes fixture covers a PATCH and a POST, including two typed
 errors, a boolean-tagged response, and optional and nullable fields. Required
 singleton fields have constructor defaults and are always encoded. The native
 tests check the JSON on the wire, including explicit nulls and omitted optional
-fields. Networking and generated route methods remain follow-ups.
+fields.
+
+Pass a route key as the last argument to either internal renderer to emit one
+callable PATCH alongside the models. The first supported shape has static path
+segments, a trailing string `:id`, JSON object input and output, and one object
+error with a literal HTTP status. An unsupported selection fails generation.
+For the notes fixture the call is `client.patchNotesById(id: "42", body: .init(title: "Milk"))`
+in Swift (with `try await`) or `client.patchNotesById("42", PATCHNotesIdInput("Milk"))`
+in a Kotlin coroutine. Initialize the client with the API base URL including
+`/api`. The Swift test target imports the internal `GemiHTTP` target. Kotlin callers use `dev.gemijs.http.GemiHttpClient`
+and import the generated extension.
+
+For this internal slice the method name includes the verb, static segments,
+and trailing parameter (`patchNotesById`). A collection-level PATCH can use
+`patchNotes` later. Models retain the extractor's route-key names, and the
+Kotlin rejection adds `Exception` to the generated error type. The Swift
+target stays internal while the public API for #1280 is being designed.
+
+Both clients default to cookie-free sessions. To supply cookies or customize
+networking, inject a configured URLSession or OkHttpClient. Swift callers can
+catch `GemiHTTPError` and Kotlin callers can catch `GemiHttpException` to read
+the HTTP status of any server refusal. Kotlin transport failures use `IOException`.
+The generated method supplies the verb and path to each platform's `send`
+transport. Only the PATCH route shape above is selectable by the generator.
+
+The request sends the ID as one path segment. A successful reply decodes to
+`PATCHNotesIdResponse`. On HTTP 422, the client decodes the envelope's `error`
+field, supplying the HTTP status when the field is absent. Swift throws
+`PATCHNotesIdError`; Kotlin throws `PATCHNotesIdErrorException` with the decoded
+value in `error`. An undeclared refusal retains its original HTTP status and
+body. Both native end-to-end suites call the fixture handler through the
+normal API dispatcher and check its JSON 404 for a missing route.
 
 From `packages/gemi`, run
 `bun --bun x vitest run bin/http-client/render.test.ts` to check both generated

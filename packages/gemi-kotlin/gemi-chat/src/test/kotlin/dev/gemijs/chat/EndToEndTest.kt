@@ -1,9 +1,19 @@
 package dev.gemijs.chat
 
 import dev.gemijs.chat.generated.E2eAgent
+import dev.gemijs.chat.generated.PATCHNotesIdError
+import dev.gemijs.chat.generated.PATCHNotesIdErrorException
+import dev.gemijs.chat.generated.PATCHNotesIdErrorKind
+import dev.gemijs.chat.generated.PATCHNotesIdErrorStatus
+import dev.gemijs.chat.generated.PATCHNotesIdInput
+import dev.gemijs.chat.generated.PATCHNotesIdResponse
+import dev.gemijs.chat.generated.patchNotesById
+import dev.gemijs.http.GemiHttpClient
+import dev.gemijs.http.GemiHttpStatusException
 import java.util.concurrent.Executors
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -15,6 +25,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -60,6 +73,63 @@ class EndToEndTest {
     val response =
       OkHttpClient().newCall(Request.Builder().url("$support/threads").post(ByteArray(0).toRequestBody()).build()).execute()
     return GemiJson.parseToJsonElement(response.body.string()).obj()!!.string("threadId")!!
+  }
+
+  @Test
+  fun httpClientCookiesAreOptIn() = e2e {
+    val url = "$server/session-test"
+    val client = GemiHttpClient(url)
+    val body = PATCHNotesIdInput("Milk")
+    client.patchNotesById("42", body)
+    assertEquals("none", client.patchNotesById("42", body).title)
+
+    val jar = object : CookieJar {
+      private var stored = emptyList<Cookie>()
+      override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) { stored = cookies }
+      override fun loadForRequest(url: HttpUrl): List<Cookie> = stored.filter { it.matches(url) }
+    }
+    val optedIn = GemiHttpClient(url, OkHttpClient.Builder().cookieJar(jar).build())
+    assertEquals("none", optedIn.patchNotesById("42", body).title)
+    assertEquals("theme=blue", optedIn.patchNotesById("42", body).title)
+  }
+
+  @Test
+  fun transportUsesTheRequestedMethod() = e2e {
+    val client = GemiHttpClient("$server/api")
+    val refused = assertFailsWith<GemiHttpStatusException> {
+      client.send(
+        method = "GET", segments = listOf("notes", "42"), output = PATCHNotesIdResponse.serializer(),
+        rejection = PATCHNotesIdError.serializer(), status = 422, exception = ::PATCHNotesIdErrorException,
+      )
+    }
+    assertEquals(404, refused.status)
+  }
+
+  @Test
+  fun editNoteCallsTheTypedRoute() = e2e {
+    val client = GemiHttpClient("$server/api/")
+    for (id in listOf("42", "a/b ?#%é")) {
+      val saved = client.patchNotesById(id, PATCHNotesIdInput("Groceries"))
+      assertEquals(id, saved.id)
+      assertEquals("Groceries", saved.title)
+    }
+    val rejected = assertFailsWith<PATCHNotesIdErrorException> {
+      client.patchNotesById("42", PATCHNotesIdInput(""))
+    }
+    assertEquals(PATCHNotesIdErrorKind, rejected.error.kind)
+    assertEquals(PATCHNotesIdErrorStatus, rejected.error.status)
+    val okHttp = OkHttpClient.Builder().followRedirects(true).build()
+    for ((prefix, status, body) in listOf(
+      Triple("api/missing", 404, """{"error":{"kind":"not_found","message":"Not found","status":404}}"""),
+      Triple("redirect", 307, "redirect"),
+      Triple("unexpected", 422, """{"error":{"kind":"other"}}"""),
+    )) {
+      val unknown = assertFailsWith<GemiHttpStatusException> {
+        GemiHttpClient("$server/$prefix", okHttp).patchNotesById("42", PATCHNotesIdInput("Milk"))
+      }
+      assertEquals(status, unknown.status)
+      assertEquals(body, unknown.body)
+    }
   }
 
   @Test

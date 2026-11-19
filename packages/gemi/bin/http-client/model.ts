@@ -1,7 +1,7 @@
 import type { HttpMethod } from "../../http/ApiRouter";
 import type { NamedType, TypeRef } from "../ai-client/model";
 
-/** Internal foundation only: no transport, auth or native rendering contract. */
+/** Language-neutral description shared by the native HTTP renderers. */
 export type HttpRouteModel = {
   /** The exact CreateRPC key, with groups removed by the framework. */
   key: string;
