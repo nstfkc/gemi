@@ -14,6 +14,7 @@
  * a workflow sleeps) is decided by the runtime, in the `decide` callback of
  * `update`, while the store holds the workflow exclusively.
  */
+import type { StepRunStatus, WorkflowRunStatus } from "./wire";
 import type { EnqueueBatch } from "../QueueDriver";
 
 /** The registered name the internal tick job runs under. */
@@ -25,40 +26,7 @@ export const WORKFLOW_TICK_JOB = "gemi.WorkflowTick";
  */
 export const WORKFLOW_OUTPUT_LIMIT = 256 * 1024;
 
-/**
- * Where a workflow stands.
- *
- * - `running`: a tick is running it, or one is queued to.
- * - `sleeping`: waiting for a `step.sleep` or a step's retry backoff.
- * - `waiting`: waiting for a signal (`step.waitFor`) or a batch (`step.batch`).
- * - `cancelling`: `cancel` was accepted, and `onCancel` has not finished yet.
- * - `completed`, `failed`, `cancelled`: final.
- */
-export type WorkflowRunStatus =
-  | "running"
-  | "sleeping"
-  | "waiting"
-  | "completed"
-  | "failed"
-  | "cancelling"
-  | "cancelled";
-
-/**
- * Where one step stands. `signalled` is a signal that arrived before its
- * `step.waitFor`, kept until the workflow gets there. `iterating` is a
- * `step.each` that has items left.
- */
-export type StepRunStatus =
-  | "running"
-  | "retrying"
-  | "completed"
-  | "failed"
-  | "sleeping"
-  | "waiting"
-  | "signalled"
-  | "timed_out"
-  | "batching"
-  | "iterating";
+export type { StepRunStatus, WorkflowRunStatus } from "./wire";
 
 /** A workflow's row. Times are epoch milliseconds. */
 export type WorkflowRecord = {

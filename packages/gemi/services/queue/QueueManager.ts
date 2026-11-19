@@ -298,6 +298,11 @@ export class QueueManager {
     return this.workflowRuntime;
   }
 
+  /** @internal The application this queue belongs to, when it was built with one. */
+  get boundApplication(): Application | undefined {
+    return this.application;
+  }
+
   /**
    * The tick job, beside the app's own, once there is a workflow to tick.
    * Not in `registeredJobs`, which reports what the app handed over.
