@@ -1,10 +1,12 @@
 package dev.gemijs.chat
 
 import dev.gemijs.chat.generated.E2eAgent
+import dev.gemijs.chat.generated.PATCHNotesIdError
 import dev.gemijs.chat.generated.PATCHNotesIdErrorException
 import dev.gemijs.chat.generated.PATCHNotesIdErrorKind
 import dev.gemijs.chat.generated.PATCHNotesIdErrorStatus
 import dev.gemijs.chat.generated.PATCHNotesIdInput
+import dev.gemijs.chat.generated.PATCHNotesIdResponse
 import dev.gemijs.chat.generated.patchNotesById
 import dev.gemijs.http.GemiHttpClient
 import dev.gemijs.http.GemiHttpStatusException
@@ -23,6 +25,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -78,10 +83,26 @@ class EndToEndTest {
     client.patchNotesById("42", body)
     assertEquals("none", client.patchNotesById("42", body).title)
 
-    val okHttp = OkHttpClient.Builder().addInterceptor { chain ->
-      chain.proceed(chain.request().newBuilder().header("Cookie", "theme=blue").build())
-    }.build()
-    assertEquals("theme=blue", GemiHttpClient(url, okHttp).patchNotesById("42", body).title)
+    val jar = object : CookieJar {
+      private var stored = emptyList<Cookie>()
+      override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) { stored = cookies }
+      override fun loadForRequest(url: HttpUrl): List<Cookie> = stored.filter { it.matches(url) }
+    }
+    val optedIn = GemiHttpClient(url, OkHttpClient.Builder().cookieJar(jar).build())
+    assertEquals("none", optedIn.patchNotesById("42", body).title)
+    assertEquals("theme=blue", optedIn.patchNotesById("42", body).title)
+  }
+
+  @Test
+  fun transportUsesTheRequestedMethod() = e2e {
+    val client = GemiHttpClient("$server/api")
+    val refused = assertFailsWith<GemiHttpStatusException> {
+      client.send(
+        method = "GET", segments = listOf("notes", "42"), output = PATCHNotesIdResponse.serializer(),
+        rejection = PATCHNotesIdError.serializer(), status = 422, exception = ::PATCHNotesIdErrorException,
+      )
+    }
+    assertEquals(404, refused.status)
   }
 
   @Test
@@ -99,7 +120,7 @@ class EndToEndTest {
     assertEquals(PATCHNotesIdErrorStatus, rejected.error.status)
     val okHttp = OkHttpClient.Builder().followRedirects(true).build()
     for ((prefix, status, body) in listOf(
-      Triple("missing", 404, "not found"),
+      Triple("api/missing", 404, """{"error":{"kind":"not_found","message":"Not found","status":404}}"""),
       Triple("redirect", 307, "redirect"),
       Triple("unexpected", 422, """{"error":{"kind":"other"}}"""),
     )) {

@@ -6,7 +6,6 @@ import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.SerializationException
-import kotlinx.serialization.SerializationStrategy
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -28,10 +27,10 @@ public class GemiHttpClient(baseUrl: String, okHttp: OkHttpClient = defaultClien
   private val base = baseUrl.toHttpUrl()
   private val json = Json { ignoreUnknownKeys = true }
 
-  public suspend fun <Body, Output, Failure> patch(
-    segments: List<String>, body: Body, input: SerializationStrategy<Body>,
+  public suspend fun <Output, Failure> send(
+    method: String, segments: List<String>, body: String? = null,
     output: DeserializationStrategy<Output>, rejection: DeserializationStrategy<Failure>,
-    status: Int, exception: (Failure) -> Exception,
+    status: Int, exception: (Failure) -> GemiHttpException,
   ): Output {
     val url = base.newBuilder().apply {
       for (segment in segments) {
@@ -40,7 +39,7 @@ public class GemiHttpClient(baseUrl: String, okHttp: OkHttpClient = defaultClien
       }
     }.build()
     val request = Request.Builder().url(url)
-      .patch(json.encodeToString(input, body).toRequestBody("application/json".toMediaType()))
+      .method(method, body?.toRequestBody("application/json".toMediaType()))
       .build()
     val (code, data) = client.newCall(request).readResponse()
     if (code in 200..299) return json.decodeFromString(output, data)

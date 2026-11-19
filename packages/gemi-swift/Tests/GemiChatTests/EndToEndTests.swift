@@ -48,6 +48,17 @@ struct EndToEndTests {
     #expect(third.title == "theme=blue")
   }
 
+  @Test func transportUsesTheRequestedMethod() async throws {
+    let client = GemiHTTPClient(baseURL: server!.appendingPathComponent("api"))
+    do {
+      _ = try await client.send(method: "GET", segments: ["notes", "42"],
+                                response: PATCHNotesIdResponse.self, rejection: PATCHNotesIdError.self)
+      Issue.record("The notes item route only accepts PATCH")
+    } catch let error as GemiHTTPStatusError {
+      #expect(error.status == 404)
+    }
+  }
+
   @Test func editNoteCallsTheTypedRoute() async throws {
     let client = GemiHTTPClient(baseURL: server!.appendingPathComponent("api"))
     for id in ["42", "a/b ?#%é"] {
@@ -58,12 +69,14 @@ struct EndToEndTests {
     do {
       _ = try await client.patchNotesById(id: "42", body: .init(title: ""))
       Issue.record("Expected an empty title to be rejected")
-    } catch let rejected as PATCHNotesIdError {
+    } catch let refusal as any GemiHTTPError {
+      #expect(refusal.status == 422)
+      let rejected = try #require(refusal as? PATCHNotesIdError)
       #expect(rejected.kind == .emptyTitle)
       #expect(rejected.status == ._422)
     }
     for (prefix, status, body) in [
-      ("missing", 404, "not found"),
+      ("api/missing", 404, #"{"error":{"kind":"not_found","message":"Not found","status":404}}"#),
       ("redirect", 307, "redirect"),
       ("unexpected", 422, #"{"error":{"kind":"other"}}"#),
     ] {
@@ -71,8 +84,9 @@ struct EndToEndTests {
       do {
         _ = try await other.patchNotesById(id: "42", body: .init(title: "Milk"))
         Issue.record("Expected HTTP \(status)")
-      } catch let unknown as GemiHTTPStatusError {
-        #expect(unknown.status == status)
+      } catch let refusal as any GemiHTTPError {
+        #expect(refusal.status == status)
+        let unknown = try #require(refusal as? GemiHTTPStatusError)
         #expect(unknown.body == Data(body.utf8))
       }
     }

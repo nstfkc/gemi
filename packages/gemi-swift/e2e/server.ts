@@ -26,7 +26,10 @@ import type {
 } from "../../gemi/ai/AgentProvider";
 import { s } from "../../gemi/ai/Schema";
 import type { AgentMessage } from "../../gemi/ai/types";
-import { ApiRouteDispatcher } from "../../gemi/services/router/ApiRouteDispatcher";
+import { App } from "../../gemi/app/App";
+import { createRoot } from "../../gemi/client/createRoot";
+import { ViewRouter } from "../../gemi/http/ViewRouter";
+import { Kernel } from "../../gemi/kernel";
 import NotesApi from "../../gemi/bin/http-client/__fixtures__/notes";
 import { HttpRequest } from "../../gemi/http/HttpRequest";
 
@@ -140,8 +143,16 @@ class E2EController extends AgentController<typeof e2eAgent> {
   store = store;
 }
 
-const notesDispatcher = new ApiRouteDispatcher({ rootRouter: NotesApi });
-const editNote = new NotesApi().routes["/notes/:id"];
+class NotesKernel extends Kernel {
+  config = {
+    route: {
+      api: { rootRouter: NotesApi },
+      view: { root: createRoot(() => null), rootRouter: class extends ViewRouter {} },
+    },
+  };
+}
+const notesApp = new App({ kernel: NotesKernel });
+await notesApp.waitForBoot();
 
 const server = Bun.serve({
   port: Number(process.argv[2] ?? 0),
@@ -151,14 +162,6 @@ const server = Bun.serve({
     const request = new HttpRequest(raw, {}, "api", url.pathname.replace(/^\/api/, ""));
     const controller = new E2EController();
     try {
-      if (url.pathname.startsWith("/api/notes/")) {
-        const { path, params } = notesDispatcher.getRouteHandlerAndParams(raw);
-        if (path === "/notes/:id" && raw.method === editNote.method) {
-          const result = await editNote.run(new HttpRequest(raw, params, "api", path));
-          return result.toResponse(new Headers(), []);
-        }
-        return new Response("not found", { status: 404 });
-      }
       switch (url.pathname) {
         case "/session-test/notes/42":
           return Response.json(
@@ -180,6 +183,9 @@ const server = Bun.serve({
         case "/api/support/threads":
           return Response.json(await store.createThread({}));
         default:
+          if (url.pathname.startsWith("/api/")) {
+            return await notesApp.fetch(raw);
+          }
           return new Response("not found", { status: 404 });
       }
     } catch (error) {

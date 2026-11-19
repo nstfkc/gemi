@@ -212,12 +212,14 @@ public struct POSTNotesErrorGone: Codable, Hashable, Sendable {
   }
 }
 
-extension PATCHNotesIdError: Error {}
+extension PATCHNotesIdError: GemiHTTPRouteError {
+  public static var declaredStatus: Int { 422 }
+}
 
 extension GemiHTTPClient {
   public func patchNotesById(id: String, body: PATCHNotesIdInput) async throws -> PATCHNotesIdResponse {
-    try await patch(segments: ["notes", id], body: body, response: PATCHNotesIdResponse.self,
-                    rejection: PATCHNotesIdError.self, status: 422)
+    try await send(method: "PATCH", segments: ["notes", id], body: body, response: PATCHNotesIdResponse.self,
+                   rejection: PATCHNotesIdError.self)
   }
 }
 

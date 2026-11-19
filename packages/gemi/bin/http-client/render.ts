@@ -135,12 +135,14 @@ export function renderHttpSwift(api: HttpApiModel, patchKey?: string): string {
     const call = patchCall(api, patchKey);
     const segments = [...call.segments.map(swiftString), "id"].join(", ");
     declarations.push([
-      `extension ${call.error}: Error {}`,
+      `extension ${call.error}: GemiHTTPRouteError {`,
+      `  public static var declaredStatus: Int { ${call.status} }`,
+      "}",
       "",
       "extension GemiHTTPClient {",
       `  public func ${call.name}(id: String, body: ${call.body}) async throws -> ${call.output} {`,
-      `    try await patch(segments: [${segments}], body: body, response: ${call.output}.self,`,
-      `                    rejection: ${call.error}.self, status: ${call.status})`,
+      `    try await send(method: "PATCH", segments: [${segments}], body: body, response: ${call.output}.self,`,
+      `                   rejection: ${call.error}.self)`,
       "  }",
       "}",
     ]);
@@ -211,6 +213,7 @@ export function renderHttpKotlin(api: HttpApiModel, packageName: string, patchKe
   if (patchKey) {
     const call = patchCall(api, patchKey);
     const segments = [...call.segments.map(kotlinString), "id"].join(", ");
+    imports.add("kotlinx.serialization.json.Json");
     imports.add("dev.gemijs.http.GemiHttpClient");
     imports.add("dev.gemijs.http.GemiHttpException");
     const taken = new Set([...types, ...literals].map((type) => type.name));
@@ -220,8 +223,8 @@ export function renderHttpKotlin(api: HttpApiModel, packageName: string, patchKe
       `public class ${exception}(public val error: ${call.error}) : GemiHttpException(${call.status})`,
       "",
       `public suspend fun GemiHttpClient.${call.name}(id: String, body: ${call.body}): ${call.output} =`,
-      `  patch(listOf(${segments}), body, ${call.body}.serializer(), ${call.output}.serializer(),`,
-      `        ${call.error}.serializer(), ${call.status}, ::${exception})`,
+      `  send("PATCH", listOf(${segments}), Json.encodeToString(${call.body}.serializer(), body),`,
+      `       ${call.output}.serializer(), ${call.error}.serializer(), ${call.status}, ::${exception})`,
     ]);
   }
   return (

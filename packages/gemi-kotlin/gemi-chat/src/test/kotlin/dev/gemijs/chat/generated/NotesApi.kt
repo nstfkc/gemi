@@ -13,6 +13,7 @@ import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonContentPolymorphicSerializer
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
@@ -107,8 +108,8 @@ public data class POSTNotesErrorGone(
 public class PATCHNotesIdErrorException(public val error: PATCHNotesIdError) : GemiHttpException(422)
 
 public suspend fun GemiHttpClient.patchNotesById(id: String, body: PATCHNotesIdInput): PATCHNotesIdResponse =
-  patch(listOf("notes", id), body, PATCHNotesIdInput.serializer(), PATCHNotesIdResponse.serializer(),
-        PATCHNotesIdError.serializer(), 422, ::PATCHNotesIdErrorException)
+  send("PATCH", listOf("notes", id), Json.encodeToString(PATCHNotesIdInput.serializer(), body),
+       PATCHNotesIdResponse.serializer(), PATCHNotesIdError.serializer(), 422, ::PATCHNotesIdErrorException)
 
 @Serializable(with = PATCHNotesIdErrorKind.Serializer::class)
 public data object PATCHNotesIdErrorKind {

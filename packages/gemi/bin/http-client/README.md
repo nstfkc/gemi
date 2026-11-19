@@ -78,8 +78,11 @@ Kotlin rejection adds `Exception` to the generated error type. The Swift
 target stays internal while the public API for #1280 is being designed.
 
 Both clients default to cookie-free sessions. To supply cookies or customize
-networking, inject a configured URLSession or OkHttpClient. Kotlin server
-refusals share `GemiHttpException` and transport failures use `IOException`.
+networking, inject a configured URLSession or OkHttpClient. Swift callers can
+catch `GemiHTTPError` and Kotlin callers can catch `GemiHttpException` to read
+the HTTP status of any server refusal. Kotlin transport failures use `IOException`.
+The generated method supplies the verb and path to each platform's `send`
+transport. Only the PATCH route shape above is selectable by the generator.
 
 The request sends the ID as one path segment. A successful reply decodes to
 `PATCHNotesIdResponse`. On HTTP 422, the client decodes the envelope's `error`
@@ -87,7 +90,7 @@ field, supplying the HTTP status when the field is absent. Swift throws
 `PATCHNotesIdError`; Kotlin throws `PATCHNotesIdErrorException` with the decoded
 value in `error`. An undeclared refusal retains its original HTTP status and
 body. Both native end-to-end suites call the fixture handler through the
-shared test server.
+normal API dispatcher and check its JSON 404 for a missing route.
 
 From `packages/gemi`, run
 `bun --bun x vitest run bin/http-client/render.test.ts` to check both generated
