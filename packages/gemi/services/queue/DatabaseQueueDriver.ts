@@ -28,6 +28,7 @@ import type {
 } from "./QueueDriver";
 import {
   DatabaseWorkflowStore,
+  createWorkflowItemTableStatements,
   createWorkflowTableStatements,
 } from "./workflow/DatabaseWorkflowStore";
 
@@ -52,6 +53,12 @@ export type DatabaseQueueDriverOptions = {
    */
   workflowTable?: string;
   workflowStepTable?: string;
+  /**
+   * The table `step.each` keeps its item rows in. Default
+   * `gemi_workflow_items`, or `<table>_workflow_items` beside a jobs table of
+   * another name. Only touched by workflows that use `step.each`.
+   */
+  workflowItemTable?: string;
   /**
    * SQLite only: how long, in milliseconds, a statement waits for another
    * process's write lock before failing with `SQLITE_BUSY`. Default `1000`.
@@ -170,6 +177,7 @@ export class DatabaseQueueDriver implements QueueDriver {
   readonly batchTable: string;
   readonly workflowTable: string;
   readonly workflowStepTable: string;
+  readonly workflowItemTable: string;
   private workflows: DatabaseWorkflowStore | undefined;
   private readonly sql: SQL;
   private readonly dialect: Dialect;
@@ -194,7 +202,10 @@ export class DatabaseQueueDriver implements QueueDriver {
     const workflowStepTable =
       options.workflowStepTable ??
       (defaults ? "gemi_workflow_steps" : `${table}_workflow_steps`);
-    for (const name of [table, batchTable, workflowTable, workflowStepTable]) {
+    const workflowItemTable =
+      options.workflowItemTable ??
+      (defaults ? "gemi_workflow_items" : `${table}_workflow_items`);
+    for (const name of [table, batchTable, workflowTable, workflowStepTable, workflowItemTable]) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
         throw new Error(
           `The queue table name "${name}" is not a plain identifier. Use ` +
@@ -212,6 +223,7 @@ export class DatabaseQueueDriver implements QueueDriver {
     this.batchTable = batchTable;
     this.workflowTable = workflowTable;
     this.workflowStepTable = workflowStepTable;
+    this.workflowItemTable = workflowItemTable;
     this.sql = connection.sql;
     this.dialect = connection.dialect;
     this.connection = connection.name;
@@ -263,7 +275,7 @@ export class DatabaseQueueDriver implements QueueDriver {
   }
 
   /**
-   * Creates the jobs table, the batches table, the two workflow tables and
+   * Creates the jobs table, the batches table, the three workflow tables and
    * their indexes if they do not exist — the same DDL Prisma generates for
    * the models in the docs, so
    * a table made either way is the table the other expects — and adds the
@@ -291,6 +303,12 @@ export class DatabaseQueueDriver implements QueueDriver {
       this.dialect,
       this.workflowTable,
       this.workflowStepTable,
+    )) {
+      await this.sql.unsafe(statement);
+    }
+    for (const statement of createWorkflowItemTableStatements(
+      this.dialect,
+      this.workflowItemTable,
     )) {
       await this.sql.unsafe(statement);
     }
@@ -645,7 +663,11 @@ export class DatabaseQueueDriver implements QueueDriver {
         cancelBatch: (q, id) => this.cancelBatchOn(q, id),
         quoted: (table) => this.quoted(table),
       },
-      { table: this.workflowTable, stepTable: this.workflowStepTable },
+      {
+        table: this.workflowTable,
+        stepTable: this.workflowStepTable,
+        itemTable: this.workflowItemTable,
+      },
     );
     return this.workflows;
   }

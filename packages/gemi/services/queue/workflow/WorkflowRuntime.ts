@@ -2,11 +2,14 @@ import { deferUntilCommit } from "../../../orm/context";
 import { Job } from "../Job";
 import type { QueueManager } from "../QueueManager";
 import {
+  type EachProblem,
   Step,
   WorkflowSuspended,
   decode,
   describe,
+  eachProgressOf,
   encode,
+  problemOf,
 } from "./Step";
 import type { WorkflowClass, WorkflowStatus } from "./Workflow";
 import {
@@ -222,6 +225,14 @@ export class WorkflowRuntime {
             startedAt: step.startedAt,
             finishedAt: step.finishedAt,
           };
+          const items = eachProgressOf(step.output);
+          if (items) {
+            return {
+              ...status,
+              items,
+              progress: items.total === 0 ? 1 : items.done / items.total,
+            };
+          }
           if (step.batchId === null) return status;
           const batch = await this.queue.driver.findBatch?.(step.batchId);
           return batch ? { ...status, progress: batch.progress } : status;
@@ -230,6 +241,22 @@ export class WorkflowRuntime {
       createdAt: workflow.createdAt,
       updatedAt: workflow.updatedAt,
     };
+  }
+
+  async items(
+    id: string,
+    key: string,
+    options: { status?: "failed" | "skipped"; after?: number; limit?: number } = {},
+  ): Promise<EachProblem[]> {
+    const store = this.store;
+    if (!store.listItems) return [];
+    const limit = Math.max(1, Math.min(1000, Math.floor(options.limit ?? 100)));
+    const rows = await store.listItems(id, key, {
+      statuses: options.status ? [options.status] : ["failed", "skipped"],
+      ...(options.after === undefined ? {} : { after: options.after }),
+      limit,
+    });
+    return rows.map(problemOf);
   }
 
   /** One pass of the workflow `id`, run by its tick job. */
@@ -297,6 +324,7 @@ export class WorkflowRuntime {
         ),
       scheduled: () => this.queue.claimSoon(),
       cancelCheckMs: CANCEL_CHECK_MS,
+      durable: this.queue.durable,
     });
 
     try {
