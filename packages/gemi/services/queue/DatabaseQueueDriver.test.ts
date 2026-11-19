@@ -111,7 +111,7 @@ function server(name: string, dialect: Dialect, url: string): Backend {
         async dispose() {
           await first.unsafe(`DROP TABLE IF EXISTS ${quoted}`);
           await first.unsafe(`DROP TABLE IF EXISTS ${quoteTable(dialect, `${table}_batches`)}`);
-          for (const suffix of ["_workflows", "_workflow_steps", "_workflow_items", "_workflow_sources"]) {
+          for (const suffix of ["_slots", "_workflows", "_workflow_steps", "_workflow_items", "_workflow_sources"]) {
             await first.unsafe(`DROP TABLE IF EXISTS ${quoteTable(dialect, `${table}${suffix}`)}`);
           }
           await Promise.all(clients.map((client) => client.close()));

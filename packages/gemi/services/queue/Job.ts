@@ -73,10 +73,19 @@ export class Job {
 
   /**
    * At most `limit` jobs with this `key` running at once, across every process
-   * sharing the queue's storage. A job with no free slot waits, without
-   * spending an attempt.
+   * sharing the queue's storage (#1319). Called each time the job is about to
+   * run, so it may be `async` and read the limit from config or the database.
+   * Return a list for several limits ("1 per org, 5 overall"): they are taken
+   * in order and all are needed, so list the narrowest first, in the same
+   * order everywhere.
+   *
+   * A job with no free slot waits its turn, first come first served, without
+   * spending an attempt and without holding a queue slot or a connection: it
+   * is put back and made due again as soon as a slot frees.
    */
-  concurrency(..._args: any[]): JobConcurrency | undefined | null {
+  concurrency(
+    ..._args: any[]
+  ): JobConcurrencyResult | Promise<JobConcurrencyResult> {
     return undefined;
   }
 
@@ -131,6 +140,8 @@ export class Job {
   $outcome:
     | { kind: "release"; delayMs: number }
     | { kind: "fail"; error: Error; retry: boolean }
+    /** The claim was parked to wait for a concurrency slot; nothing is reported on it. */
+    | { kind: "parked" }
     | undefined;
 
   run(..._args: any[]): Promise<any> | any {}
@@ -238,4 +249,11 @@ export type JobThrottle = {
   window: number;
 };
 
+/**
+ * One concurrency limit: at most `limit` holders of `key` at once. `limit`
+ * is a whole number; `0` holds every job of the key until it is raised.
+ */
 export type JobConcurrency = { key: string; limit: number };
+
+/** What `concurrency` returns: one limit, several, or none. */
+export type JobConcurrencyResult = JobConcurrency | readonly JobConcurrency[] | undefined | null;
