@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { AgentMessage } from "../types";
 import { MemoryAgentStore } from "./MemoryAgentStore";
@@ -178,5 +178,64 @@ describe("MemoryAgentStore", () => {
     expect(await b.loadThread("t1")).toBeNull();
     await expect(b.appendMessages("t1", [message("2", "user", "x")])).rejects.toThrow(/does not exist/);
     expect(await a.loadThread("t1")).toHaveLength(1);
+  });
+});
+
+describe("MemoryAgentStore expiring threads (#1312)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("an expired thread is null at once, not only after the throttled sweep", async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const store = new MemoryAgentStore({ ttlMs: 60_000 });
+    const short = await store.createThread({ ttlMs: 1000 });
+    const usual = await store.createThread({});
+    vi.setSystemTime(1_000_000 + 1500);
+    expect(await store.loadThread(short.threadId)).toBeNull();
+    await expect(store.appendMessages(short.threadId, [message("1", "user", "x")])).rejects.toThrow(/does not exist/);
+    expect(await store.loadThread(usual.threadId)).toEqual([]);
+  });
+
+  test("sliding by default; slidingTtl: false keeps the expiry fixed", async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const sliding = new MemoryAgentStore({ ttlMs: 1000 });
+    const fixed = new MemoryAgentStore({ ttlMs: 1000, slidingTtl: false });
+    const a = await sliding.createThread({});
+    const b = await fixed.createThread({});
+    vi.setSystemTime(1_000_000 + 700);
+    await sliding.appendMessages(a.threadId, [message("1", "user", "hi")]);
+    await fixed.appendMessages(b.threadId, [message("1", "user", "hi")]);
+    vi.setSystemTime(1_000_000 + 1400);
+    expect(await sliding.loadThread(a.threadId)).toHaveLength(1);
+    expect(await fixed.loadThread(b.threadId)).toBeNull();
+  });
+
+  test("expiresAt is fixed, and ttlMs: null keeps a thread", async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const store = new MemoryAgentStore({ ttlMs: 1000 });
+    const dated = await store.createThread({ expiresAt: new Date(1_000_000 + 5000) });
+    const forever = await store.createThread({ ttlMs: null });
+    vi.setSystemTime(1_000_000 + 4000);
+    await store.appendMessages(dated.threadId, [message("1", "user", "hi")]);
+    vi.setSystemTime(1_000_000 + 6000);
+    expect(await store.loadThread(dated.threadId)).toBeNull();
+    vi.setSystemTime(1_000_000 + 10 ** 10);
+    expect(await store.loadThread(forever.threadId)).toEqual([]);
+    await expect(store.createThread({ ttlMs: 0 })).rejects.toThrow(/positive/);
+  });
+
+  test("sweepExpired deletes now, up to limit, in a view's own scope", async () => {
+    const store = new MemoryAgentStore({ ttlMs: 1000 });
+    const a = store.forScope("a");
+    for (let i = 0; i < 3; i++) await a.createThread({});
+    const other = await store.forScope("b").createThread({});
+    const later = Date.now() + 5000;
+    expect(await a.sweepExpired({ now: later, limit: 2 })).toEqual({ deleted: 2 });
+    expect(await a.sweepExpired({ now: later })).toEqual({ deleted: 1 });
+    expect(store.size).toBe(1);
+    expect(await store.forScope("b").loadThread(other.threadId)).toEqual([]);
+    expect(await store.sweepExpired({ now: later + 10_000 })).toEqual({ deleted: 1 });
+    expect(await store.sweepExpired()).toEqual({ deleted: 0 });
   });
 });

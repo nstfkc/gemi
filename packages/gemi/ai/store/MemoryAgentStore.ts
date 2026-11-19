@@ -1,4 +1,4 @@
-import type { AgentStore } from "../AgentController";
+import type { AgentStore, CreateThreadParams, ThreadSweepResult } from "../AgentController";
 import { keepSummary, type ThreadSummary } from "../contextCompaction";
 import type { AgentMessage } from "../types";
 
@@ -15,9 +15,12 @@ type Thread = {
   scope?: string;
   /** `contextWindow.compact`'s summaries of this thread, most recent first. */
   summaries?: ThreadSummary[];
-  /** Bumped by every read and every write: a conversation someone is still
-   *  having must not expire out from under them mid-turn. */
-  touchedAt: number;
+  /** Epoch milliseconds it expires at, or `null` for a thread that does not. */
+  expiresAt: number | null;
+  /** How far each read and write moves `expiresAt` (a sliding thread), or
+   *  `null` for a fixed expiry. A conversation someone is still having must
+   *  not expire out from under them mid-turn. */
+  slideMs: number | null;
 };
 
 /**
@@ -44,7 +47,10 @@ type Thread = {
  * setup where an unknown id is not a lost thread, because the client minted it.
  */
 export class MemoryAgentStore implements AgentStore {
+  /** How long a thread lasts: after its last read or write, or after it was created when `slidingTtl` is `false`. */
   readonly ttlMs: number;
+  /** Each read and write restarts a thread's `ttlMs` (the default), or not (`false`). */
+  readonly slidingTtl: boolean;
   /** The ids come from the client, not from `createThread`, so an id this
    *  store has never seen is a conversation starting rather than one lost. */
   readonly clientOwnedIds: boolean;
@@ -55,8 +61,9 @@ export class MemoryAgentStore implements AgentStore {
   private threads = new Map<string, Thread>();
   private lastSweep = 0;
 
-  constructor(params: { ttlMs?: number; clientOwnedIds?: boolean } = {}) {
+  constructor(params: { ttlMs?: number; slidingTtl?: boolean; clientOwnedIds?: boolean } = {}) {
     this.ttlMs = params.ttlMs ?? DEFAULT_TTL_MS;
+    this.slidingTtl = params.slidingTtl ?? true;
     this.clientOwnedIds = params.clientOwnedIds ?? false;
   }
 
@@ -69,35 +76,70 @@ export class MemoryAgentStore implements AgentStore {
     if (typeof scope !== "string" || scope === "") {
       throw new TypeError("A MemoryAgentStore scope is a non-empty string.");
     }
-    const view = new MemoryAgentStore({ ttlMs: this.ttlMs, clientOwnedIds: this.clientOwnedIds });
+    const view = new MemoryAgentStore({
+      ttlMs: this.ttlMs,
+      slidingTtl: this.slidingTtl,
+      clientOwnedIds: this.clientOwnedIds,
+    });
     view.threads = this.threads;
     (view as { scope: string | null }).scope = scope;
     return view;
   }
 
-  /** The thread, if this store or view may see it. */
-  private visible(threadId: string): Thread | undefined {
+  /**
+   * The thread, if this store or view may see it. One that has expired is
+   * dropped here (#1312), not only by the next sweep, so it is never read or
+   * written after its time.
+   */
+  private visible(threadId: string, now = Date.now()): Thread | undefined {
     const thread = this.threads.get(threadId);
+    if (thread && isExpired(thread, now)) {
+      this.threads.delete(threadId);
+      return undefined;
+    }
     if (!thread || this.scope === null || thread.scope === this.scope) return thread;
     return undefined;
   }
 
-  /** A fresh thread, in this view's scope. */
-  private fresh(): Thread {
+  /** A fresh thread, in this view's scope, with `params`' expiry or the store's. */
+  private fresh(params: CreateThreadParams = {}): Thread {
+    const now = Date.now();
+    let expiresAt: number | null;
+    let slideMs: number | null = null;
+    if (params.expiresAt !== undefined) {
+      expiresAt = params.expiresAt instanceof Date ? params.expiresAt.getTime() : params.expiresAt;
+      if (!Number.isFinite(expiresAt)) throw new TypeError("createThread: `expiresAt` is not a valid time.");
+    } else {
+      const ttlMs = params.ttlMs === undefined ? this.ttlMs : params.ttlMs;
+      if (ttlMs !== null && !(typeof ttlMs === "number" && ttlMs > 0)) {
+        throw new TypeError("createThread: ttlMs must be a positive number of milliseconds.");
+      }
+      expiresAt = ttlMs === null ? null : now + ttlMs;
+      slideMs = this.slidingTtl ? ttlMs : null;
+    }
     return {
       messages: [],
-      touchedAt: Date.now(),
+      expiresAt,
+      slideMs,
       ...(this.scope !== null ? { scope: this.scope } : {}),
     };
   }
 
-  async createThread(params: { userId?: string | number }): Promise<{ threadId: string }> {
+  /** A read or write: a sliding thread's expiry starts again. */
+  private touch(thread: Thread) {
+    if (thread.slideMs !== null) thread.expiresAt = Date.now() + thread.slideMs;
+  }
+
+  /**
+   * `ttlMs` (or `null`, never) and `expiresAt` set this thread's expiry in
+   * place of the store's `ttlMs`, as `DatabaseAgentStore` takes them.
+   */
+  async createThread(params: CreateThreadParams = {}): Promise<{ threadId: string }> {
     // The user id is not part of the id and not stored: this store cannot
     // authorize anything, and an id that looked like a key would invite an app
     // to treat it as one. Ownership belongs to the app's own table.
-    void params;
     const threadId = crypto.randomUUID();
-    this.threads.set(threadId, this.fresh());
+    this.threads.set(threadId, this.fresh(params));
     this.sweep();
     return { threadId };
   }
@@ -115,7 +157,7 @@ export class MemoryAgentStore implements AgentStore {
       // hand out in place of the user's history.
       return this.clientOwnedIds ? [] : null;
     }
-    thread.touchedAt = Date.now();
+    this.touch(thread);
     // Copied, so a caller that sorts or splices the result does not edit the
     // stored history in place.
     return thread.messages.slice();
@@ -157,7 +199,7 @@ export class MemoryAgentStore implements AgentStore {
         thread.messages[at] = message;
       }
     }
-    thread.touchedAt = Date.now();
+    this.touch(thread);
   }
 
   async removeMessages(threadId: string, messageIds: string[]): Promise<void> {
@@ -166,7 +208,7 @@ export class MemoryAgentStore implements AgentStore {
     if (!thread) return;
     const drop = new Set(messageIds);
     thread.messages = thread.messages.filter((message) => !drop.has(message.id));
-    thread.touchedAt = Date.now();
+    this.touch(thread);
   }
 
   async loadSummaries(threadId: string): Promise<ThreadSummary[]> {
@@ -190,17 +232,43 @@ export class MemoryAgentStore implements AgentStore {
     return this.threads.size;
   }
 
+  /** Drops expired threads, at most once a minute; every read and write calls it. */
   sweep(now = Date.now()): void {
     if (now - this.lastSweep < SWEEP_INTERVAL_MS) {
       return;
     }
     this.lastSweep = now;
     for (const [threadId, thread] of this.threads) {
-      if (now - thread.touchedAt > this.ttlMs) {
+      if (isExpired(thread, now)) {
         this.threads.delete(threadId);
       }
     }
   }
+
+  /**
+   * Deletes up to `limit` (default 500) expired threads now, as
+   * `DatabaseAgentStore.sweepExpired` does (#1312). A view sweeps its scope
+   * only. An expired thread is already unreadable before this runs.
+   */
+  async sweepExpired(options: { now?: number; limit?: number } = {}): Promise<ThreadSweepResult> {
+    const now = options.now ?? Date.now();
+    let left = Math.max(0, Math.floor(options.limit ?? 500));
+    let deleted = 0;
+    for (const [threadId, thread] of this.threads) {
+      if (left === 0) break;
+      if (this.scope !== null && thread.scope !== this.scope) continue;
+      if (isExpired(thread, now)) {
+        this.threads.delete(threadId);
+        deleted += 1;
+        left -= 1;
+      }
+    }
+    return { deleted };
+  }
+}
+
+function isExpired(thread: Thread, now: number) {
+  return thread.expiresAt !== null && now >= thread.expiresAt;
 }
 
 /**

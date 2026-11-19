@@ -116,6 +116,28 @@ import type {
  * survives the browser — and, with `/attach`, one whose interrupted turn is
  * still there after a refresh.
  */
+/**
+ * What `AgentStore.createThread` takes. `ttlMs` and `expiresAt` (#1312) are
+ * honoured by `MemoryAgentStore` and by a `DatabaseAgentStore` with `ttlMs`;
+ * a store of the app's own may ignore them, or refuse them.
+ */
+export type CreateThreadParams = {
+  userId?: string | number;
+  /**
+   * This thread's lifetime in place of the store's `ttlMs` (#1312); `null`
+   * keeps it until it is deleted. Slides with the store's `slidingTtl`.
+   */
+  ttlMs?: number | null;
+  /** A fixed expiry, epoch milliseconds or a `Date`, in place of any `ttlMs`. It never slides. */
+  expiresAt?: number | Date;
+};
+
+/** What `sweepExpired` answers. */
+export type ThreadSweepResult = {
+  /** Expired threads deleted, with their messages and summaries. */
+  deleted: number;
+};
+
 export interface AgentStore {
   /**
    * Where a `threadId` comes from. `ApiRouter.agent()` mounts no route for
@@ -126,7 +148,7 @@ export interface AgentStore {
    * the store's ids are the client's by design (`MemoryAgentStore`'s
    * `clientOwnedIds`).
    */
-  createThread(params: { userId?: string | number }): Promise<{ threadId: string }>;
+  createThread(params: CreateThreadParams): Promise<{ threadId: string }>;
   /**
    * The history, or `null` for a thread the store does not have.
    *
@@ -2826,9 +2848,9 @@ export abstract class AgentController<
   /**
    * DELETES EXPIRED ATTACHMENTS (#1307): every attachment whose `expiresAt`
    * has passed (its stored bytes, its provider file and its record), and every
-   * short-lived provider-only upload. For a cron:
+   * short-lived provider-only upload. For a `CronJob`'s callback:
    *
-   *   Cron.everyFiveMinutes(() => new StoreChatController().sweepAttachments());
+   *   await new StoreChatController().sweepAttachments();
    *
    * Deletes at most `limit` of each (default 500) per call. A failure is passed
    * to `reportHookFailure` and counted in `failed`; its record stays, so the

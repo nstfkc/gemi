@@ -536,6 +536,8 @@ export type {
   AgentRouteMethod,
   AgentRouteRPC,
   AgentStore,
+  CreateThreadParams,
+  ThreadSweepResult,
   AgentTurn,
   AgentTurnBusyPolicy,
   AgentTurnEvent,
