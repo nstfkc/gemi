@@ -225,6 +225,7 @@ export class WorkflowRuntime {
         }),
     };
     if (store.joinsTransaction) wrapped.joinsTransaction = () => store.joinsTransaction!();
+    if (store.transaction) wrapped.transaction = (fn) => store.transaction!(fn);
     if (store.listItems) wrapped.listItems = (...args) => store.listItems!(...args);
     if (store.prune) wrapped.prune = (olderThanMs) => store.prune!(olderThanMs);
     if (store.writeSource) {
@@ -360,6 +361,35 @@ export class WorkflowRuntime {
     return cancelled === true;
   }
 
+  async pause(id: string): Promise<boolean> {
+    const paused = await this.store.update(id, {}, ({ workflow }) => {
+      if (
+        ENDED.includes(workflow.status) ||
+        workflow.status === "cancelling" ||
+        workflow.status === "paused"
+      ) {
+        return { result: false };
+      }
+      return { result: true, workflow: { status: "paused" } };
+    });
+    return paused === true;
+  }
+
+  async resume(id: string): Promise<boolean> {
+    const resumed = await this.store.update(id, {}, ({ workflow }) => {
+      if (workflow.status !== "paused") return { result: false };
+      // `wakeAt` forgotten, so the pass schedules its own wake-up: one
+      // scheduled before the pause may have come and gone.
+      return {
+        result: true,
+        workflow: { status: "running", wakeAt: null },
+        tick: { delayMs: 0 },
+      };
+    });
+    if (resumed) this.queue.claimSoon();
+    return resumed === true;
+  }
+
   async find(id: string): Promise<WorkflowStatus | null> {
     const state = await this.store.find(id);
     if (!state) return null;
@@ -443,7 +473,8 @@ export class WorkflowRuntime {
           if (!(error instanceof WorkflowLeaseLostError)) throw error;
         });
 
-    if (ENDED.includes(workflow.status)) return letGo();
+    // Paused: the tick ends here, and `resume` queues the next one.
+    if (ENDED.includes(workflow.status) || workflow.status === "paused") return letGo();
 
     const Class = this.registry[workflow.name];
     if (!Class) return this.unknown(workflow, job, letGo);
@@ -489,6 +520,10 @@ export class WorkflowRuntime {
       scheduled: () => this.queue.claimSoon(),
       cancelCheckMs: CANCEL_CHECK_MS,
       durable: this.queue.durable,
+      throttle: {
+        hit: (name, limit, windowMs) => this.queue.locks.store.hit(name, limit, windowMs),
+        refund: (name) => this.queue.locks.store.refund(name),
+      },
     });
 
     try {
@@ -570,6 +605,13 @@ export class WorkflowRuntime {
     }
 
     const suspension = step.suspension ?? { status: "waiting" as const, wakes: [] };
+    if (!cancelling && (current.status === "paused" || suspension.status === "paused")) {
+      // Paused: no tick until `resume`. Stopped for a pause that `resume`
+      // has already undone: go on at once.
+      return current.status === "paused"
+        ? { ...change, workflow: { currentStep: step.current ?? current.currentStep } }
+        : { ...change, workflow: { status: "running" }, tick: { delayMs: 0 } };
+    }
     const next: WorkflowChange<undefined> = {
       ...change,
       workflow: {

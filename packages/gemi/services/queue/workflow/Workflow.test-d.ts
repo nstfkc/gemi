@@ -3,7 +3,7 @@ import { describe, expectTypeOf, test } from "vitest";
 import type { BatchStatus } from "../batch";
 import { Job } from "../Job";
 import type { SourceRef } from "./ItemSource";
-import type { EachProblem, EachSummary, ItemContext, Step } from "./Step";
+import type { ChunkContext, EachProblem, EachSummary, ItemContext, Step } from "./Step";
 import { Workflow, type WorkflowStatus } from "./Workflow";
 
 class BuildPage extends Job {
@@ -48,6 +48,24 @@ class ImportSite extends Workflow {
     expectTypeOf(rows).toEqualTypeOf<SourceRef<{ line: number; name: string }>>();
     await step.each("from-source", { source: rows }, (row) => {
       expectTypeOf(row).toEqualTypeOf<{ line: number; name: string }>();
+    });
+    await step.each(
+      "chunked",
+      {
+        source: rows,
+        chunk: 25,
+        transaction: true,
+        throttle: [{ key: "images", limit: 20, window: "1s" }],
+        maxFailures: { ratio: 0.5, after: 20 },
+      },
+      (batch, ctx) => {
+        expectTypeOf(batch).toEqualTypeOf<Array<{ line: number; name: string }>>();
+        expectTypeOf(ctx).toEqualTypeOf<ChunkContext>();
+        ctx.skip(0, "no name");
+      },
+    );
+    await step.each("released", { count: 1, item: () => 1, maxFailures: 3 }, (_n, ctx) => {
+      expectTypeOf(ctx.release).returns.toEqualTypeOf<never>();
     });
     // @ts-expect-error a source and a count are two ways of saying the same thing
     await step.each("both", { source: rows, count: 1 }, () => {});

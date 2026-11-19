@@ -111,7 +111,7 @@ function server(name: string, dialect: Dialect, url: string): Backend {
         async dispose() {
           await first.unsafe(`DROP TABLE IF EXISTS ${quoted}`);
           await first.unsafe(`DROP TABLE IF EXISTS ${quoteTable(dialect, `${table}_batches`)}`);
-          for (const suffix of ["_workflows", "_workflow_steps"]) {
+          for (const suffix of ["_workflows", "_workflow_steps", "_workflow_items", "_workflow_sources"]) {
             await first.unsafe(`DROP TABLE IF EXISTS ${quoteTable(dialect, `${table}${suffix}`)}`);
           }
           await Promise.all(clients.map((client) => client.close()));
@@ -831,6 +831,60 @@ describe.each(backends)("DatabaseQueueDriver on $name", (backend) => {
     expect(await queue.workflows.find(rolledBack)).toBeNull();
     expect(ran).toEqual([1]);
   });
+
+  (backend.dialect === "sqlite" ? test.skip : test)(
+    "step.each with transaction: true commits an item's writes and its end together, or neither",
+    async () => {
+      const { application } = await database();
+      const { sql, driver } = application();
+      const table = `wf_tx_${crypto.randomUUID().replaceAll("-", "").slice(0, 10)}`;
+      await sql.unsafe(`CREATE TABLE ${table} (idx INTEGER NOT NULL, attempt INTEGER NOT NULL)`);
+      try {
+        class Products extends Workflow {
+          static name = "Products";
+          async run(step: Step) {
+            return step.each(
+              "rows",
+              { count: 6, item: (i) => i, transaction: true, concurrency: 2, attempts: 3 },
+              async (index, ctx) => {
+                const tx = currentTransaction()!;
+                await tx.unsafe(`INSERT INTO ${table} (idx, attempt) VALUES (${index}, ${ctx.attempt})`);
+                if (index === 4 && ctx.attempt === 1) throw new Error("after the insert");
+              },
+            );
+          }
+        }
+        const queue = worker(driver, [], { workflows: [Products] });
+        // The third item's end is written, and then its commit fails: both
+        // roll back, and the item runs again.
+        const store = queue.workflows.store;
+        const update = store.update.bind(store);
+        let joined = 0;
+        store.update = (async (id: string, options: { joinTransaction?: boolean }, decide: never) => {
+          const result = await update(id, options, decide);
+          if (options.joinTransaction && ++joined === 3) throw new Error("the commit failed");
+          return result;
+        }) as typeof store.update;
+        queue.start();
+        const id = await queue.workflows.start(Products, []);
+        await until(async () => (await queue.workflows.find(id))?.status === "completed", 15_000);
+
+        const found = await queue.workflows.find(id);
+        // Counted once each: the end that rolled back was not counted.
+        expect(found!.result).toMatchObject({ total: 6, succeeded: 6, failed: 0 });
+        const rows = (await sql.unsafe(`SELECT idx, attempt FROM ${table} ORDER BY idx`)) as Array<{
+          idx: number;
+          attempt: number;
+        }>;
+        // One row per item: the attempts that rolled back left nothing.
+        expect(rows.map((row) => Number(row.idx))).toEqual([0, 1, 2, 3, 4, 5]);
+        expect(rows.find((row) => Number(row.idx) === 4)!.attempt).toBe(2);
+        expect(rows.filter((row) => Number(row.attempt) === 2)).toHaveLength(2);
+      } finally {
+        await sql.unsafe(`DROP TABLE IF EXISTS ${table}`);
+      }
+    },
+  );
 
   test("ended workflows are pruned with their steps", async () => {
     const { driver } = await database();

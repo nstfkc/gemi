@@ -1,3 +1,23 @@
+# 0.222.0
+
+## Pause, resume, and control over `step.each` (#1309)
+
+**New API (minor version).** See [Pausing](docs/workflows.md#pausing) and [`step.each`](docs/workflows.md#stepeachkey-options-fn-long-lists-item-by-item).
+
+- `Workflow.pause(id)` and `Workflow.resume(id)`. A new workflow status, `paused`: no new step starts, a `step.each` lets its items in flight finish, and the workflow holds no queue slot until it is resumed. It can still be cancelled.
+- `step.each` options:
+  - `throttle: { key, limit, window }` (or a list): at most `limit` items start per window, across processes, in the queue's lock store.
+  - `transaction: true`: each item runs in an ORM transaction that also records its end (database driver on Postgres or MySQL; elsewhere it runs without one and warns once).
+  - `chunk: n`: `fn` gets up to `n` inputs at once and a `ChunkContext` (`items`, `skip(position, reason, data?)`, `release`).
+  - `maxFailures: n | { ratio, after? }`: fails the step, with a `StepFailedError` whose new `summary` field holds the summary.
+- `ctx.release(delayMs)` on `ItemContext`: puts the item back without using an attempt, and holds the step for that long.
+- New types: `ChunkContext`, `EachThrottle`. `WorkflowStore` gains an optional `transaction(fn)` and an `UpdateOptions.joinTransaction`, for custom stores.
+
+What to check:
+
+- **Code that switches over `WorkflowRunStatus`** (or `useWorkflow`'s `status`): there is a new value, `paused`. It is not final: `workflowEnded("paused")` is `false`.
+- **`throttle` on the database driver** counts in the `gemi_locks` table, as job throttles do: create it (the `GemiLock` model, or the lock store's `createTable()`) if the app has not yet.
+
 # 0.220.0
 
 ## Item sources: `step.source` and `ItemSource` (#1309)

@@ -1,7 +1,7 @@
 import type { SQL, TransactionSQL } from "bun";
 
 import type { Dialect } from "../../../database/dialect";
-import { commitDependsOn } from "../../../orm/context";
+import { commitDependsOn, withTransaction } from "../../../orm/context";
 import type { EnqueueBatch, EnqueueJob } from "../QueueDriver";
 import {
   type AcquireResult,
@@ -9,6 +9,7 @@ import {
   type ItemRecord,
   type ItemRunStatus,
   type StepRecord,
+  type UpdateOptions,
   type StepRunStatus,
   WORKFLOW_TICK_JOB,
   type WorkflowChange,
@@ -79,7 +80,16 @@ export class DatabaseWorkflowStore implements WorkflowStore {
     this.stepTable = options.stepTable;
     this.itemTable = options.itemTable;
     this.sourceTable = options.sourceTable;
+    // As `joinsTransaction`: only a named connection the ORM can recognise
+    // its transaction on, and never SQLite (see `DatabaseQueueDriver.transaction`).
+    const connection = db.connection;
+    if (db.dialect !== "sqlite" && connection !== undefined) {
+      this.transaction = (fn) => withTransaction(db.sql, () => fn(), { connection });
+    }
   }
+
+  /** See `WorkflowStore.transaction`: Postgres and MySQL on a named connection. */
+  transaction?: <T>(fn: () => Promise<T>) => Promise<T>;
 
   joinsTransaction(): boolean {
     return this.db.transaction() !== undefined;
@@ -169,10 +179,10 @@ export class DatabaseWorkflowStore implements WorkflowStore {
 
   update<T>(
     id: string,
-    options: { owner?: string; key?: string; allSteps?: boolean; items?: string },
+    options: UpdateOptions,
     decide: (snapshot: WorkflowSnapshot) => WorkflowChange<T>,
   ): Promise<T | undefined> {
-    return this.db.atomically(async (q) => {
+    const body = async (q: SQL) => {
       const workflow = await this.lock(q, id);
       if (!workflow) return undefined;
       if (options.owner !== undefined && workflow.lockedBy !== options.owner) {
@@ -224,7 +234,9 @@ export class DatabaseWorkflowStore implements WorkflowStore {
       if (change.tick) await tick(change.tick.delayMs);
       if (unlock && workflow.retick) await tick(0);
       return change.result;
-    });
+    };
+    const tx = options.joinTransaction ? this.db.transaction() : undefined;
+    return tx ? body(tx) : this.db.atomically(body);
   }
 
   async listItems(

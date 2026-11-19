@@ -8,6 +8,7 @@
  * - `running`: a tick is running it, or one is queued to.
  * - `sleeping`: waiting for a `step.sleep` or a step's retry backoff.
  * - `waiting`: waiting for a signal (`step.waitFor`) or a batch (`step.batch`).
+ * - `paused`: `Workflow.pause` stopped it; nothing runs until `Workflow.resume`.
  * - `cancelling`: `cancel` was accepted, and `onCancel` has not finished yet.
  * - `completed`, `failed`, `cancelled`: final.
  */
@@ -15,6 +16,7 @@ export type WorkflowRunStatus =
   | "running"
   | "sleeping"
   | "waiting"
+  | "paused"
   | "completed"
   | "failed"
   | "cancelling"

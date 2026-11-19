@@ -4,11 +4,18 @@ import type { BatchStatus } from "../batch";
 import { Job } from "../Job";
 import type { QueueDriver } from "../QueueDriver";
 import { QueueManager } from "../QueueManager";
-import { type EachSummary, type Step, StepFailedError, WaitTimeoutError } from "./Step";
+import {
+  type EachSummary,
+  resetEachWarnings,
+  type Step,
+  StepFailedError,
+  WaitTimeoutError,
+} from "./Step";
 import { Workflow, type WorkflowClass } from "./Workflow";
 import { ITEM_SOURCE_ITEM_LIMIT, writeSource } from "./ItemSource";
 import type { WorkflowUpdate } from "./wire";
 import { WORKFLOW_TICK_JOB, WorkflowLeaseLostError } from "./WorkflowStore";
+import { currentTransaction } from "../../../orm/context";
 
 /**
  * What workflows promise on every driver that keeps them, as a suite a
@@ -992,6 +999,246 @@ export function workflowContract(
     );
   });
 
+
+
+  describe(`${name} — control`, () => {
+    test(
+      "pause lets the items in flight finish and takes no more; resume goes on where it stopped",
+      withQueue(async ({ worker }) => {
+        const handled: number[] = [];
+        class Pausable extends Workflow {
+          static name = "Pausable";
+          async run(step: Step) {
+            const summary = await step.each(
+              "rows",
+              { count: 60, item: (i) => i, concurrency: 2 },
+              async (index) => {
+                await sleep(5);
+                handled.push(index);
+              },
+            );
+            await step.run("after", () => "after");
+            return summary;
+          }
+        }
+        const queue = worker([Pausable]);
+        const id = await queue.workflows.start(Pausable, []);
+        await until(() => handled.length >= 10);
+        expect(await queue.workflows.pause(id)).toBe(true);
+        expect(await queue.workflows.pause(id)).toBe(false);
+        // The items in flight finish, and are recorded.
+        await until(async () => {
+          const found = await queue.workflows.find(id);
+          return found?.status === "paused" && found.steps[0]?.items?.done === handled.length;
+        });
+        await sleep(100);
+        const atPause = handled.length;
+        expect((await queue.workflows.find(id))!.steps[0]!.items!.done).toBe(atPause);
+        expect(atPause).toBeLessThan(60);
+        await sleep(300);
+        expect(handled.length).toBe(atPause);
+        expect(await status(queue, id)).toBe("paused");
+
+        expect(await queue.workflows.resume(id)).toBe(true);
+        expect(await queue.workflows.resume(id)).toBe(false);
+        await until(async () => (await status(queue, id)) === "completed");
+        expect([...handled].sort((a, b) => a - b)).toEqual(Array.from({ length: 60 }, (_, i) => i));
+        expect((await queue.workflows.find(id))!.result).toMatchObject({ total: 60, succeeded: 60 });
+      }),
+    );
+
+    test(
+      "a paused workflow stays paused past its sleep, keeps a signal, and can be cancelled",
+      withQueue(async ({ worker }) => {
+        const ran: string[] = [];
+        class Sleepy extends Workflow {
+          static name = "Sleepy";
+          async run(step: Step) {
+            await step.sleep("nap", 100);
+            const payload = await step.waitFor<string>("go");
+            await step.run("after", () => ran.push(`after:${payload}`));
+          }
+          async onCancel(step: Step) {
+            await step.run("undo", () => ran.push("undo"));
+          }
+        }
+        const queue = worker([Sleepy]);
+        const id = await queue.workflows.start(Sleepy, []);
+        await until(async () => (await status(queue, id)) === "sleeping");
+        expect(await queue.workflows.pause(id)).toBe(true);
+        await queue.workflows.signal(id, "go", "now");
+        await sleep(400);
+        expect(await status(queue, id)).toBe("paused");
+        expect(ran).toEqual([]);
+        expect(await queue.workflows.resume(id)).toBe(true);
+        await until(async () => (await status(queue, id)) === "completed");
+        expect(ran).toEqual(["after:now"]);
+
+        const other = await queue.workflows.start(Sleepy, []);
+        await until(async () => (await status(queue, other)) === "sleeping");
+        await queue.workflows.pause(other);
+        expect(await queue.workflows.cancel(other)).toBe(true);
+        await until(async () => (await status(queue, other)) === "cancelled");
+        expect(ran).toEqual(["after:now", "undo"]);
+        expect(await queue.workflows.resume(other)).toBe(false);
+      }),
+    );
+
+    test(
+      "maxFailures fails the step with its summary, as a count and as a ratio",
+      withQueue(async ({ worker }) => {
+        class Strict extends Workflow {
+          static name = "Strict";
+          async run(step: Step, policy: number | { ratio: number; after?: number }) {
+            try {
+              await step.each(
+                "rows",
+                { count: 100, item: (i) => i, attempts: 1, maxFailures: policy },
+                (index) => {
+                  if (index % 4 === 0) throw new Error(`bad ${index}`);
+                },
+              );
+              return { failed: false };
+            } catch (error) {
+              if (!(error instanceof StepFailedError)) throw error;
+              return { failed: true, message: error.message, summary: error.summary };
+            }
+          }
+        }
+        const queue = worker([Strict]);
+        const counted = await queue.workflows.start(Strict, [3]);
+        await until(async () => (await status(queue, counted)) === "completed");
+        const byCount = (await queue.workflows.find(counted))!.result as {
+          failed: boolean;
+          message: string;
+          summary: EachSummary;
+        };
+        expect(byCount.failed).toBe(true);
+        expect(byCount.message).toContain("more than maxFailures (3)");
+        expect(byCount.summary.failed).toBe(4);
+        expect(byCount.summary.done).toBeLessThan(100);
+        expect(byCount.summary.problems[0]).toMatchObject({ index: 0, status: "failed", reason: "bad 0" });
+        expect((await queue.workflows.find(counted))!.steps[0]!.status).toBe("failed");
+
+        const ratio = await queue.workflows.start(Strict, [{ ratio: 0.2, after: 10 }]);
+        await until(async () => (await status(queue, ratio)) === "completed");
+        const byRatio = (await queue.workflows.find(ratio))!.result as { failed: boolean; summary: EachSummary };
+        expect(byRatio.failed).toBe(true);
+        expect(byRatio.summary.done).toBe(10);
+        expect(byRatio.summary.failed).toBe(3);
+
+        const lenient = await queue.workflows.start(Strict, [{ ratio: 0.3 }]);
+        await until(async () => (await status(queue, lenient)) === "completed");
+        expect((await queue.workflows.find(lenient))!.result).toEqual({ failed: false });
+      }),
+    );
+
+    test(
+      "throttle starts at most limit items per window, and ctx.release holds the step without using an attempt",
+      withQueue(async ({ worker }) => {
+        const starts: number[] = [];
+        const attempts: number[] = [];
+        let released = 0;
+        class Throttled extends Workflow {
+          static name = "Throttled";
+          async run(step: Step, mode: "throttle" | "release") {
+            if (mode === "throttle") {
+              return step.each(
+                "rows",
+                {
+                  count: 12,
+                  item: (i) => i,
+                  concurrency: 12,
+                  throttle: { key: `contract-${Math.random()}`, limit: 4, window: 300 },
+                },
+                () => void starts.push(Date.now()),
+              );
+            }
+            return step.each("rows", { count: 3, item: (i) => i }, (index, ctx) => {
+              if (index === 1) attempts.push(ctx.attempt);
+              if (index === 1 && released++ === 0) ctx.release(150);
+            });
+          }
+        }
+        const queue = worker([Throttled]);
+        // The database driver's lock table, which only locks need.
+        await (queue.locks.store as { createTable?(): Promise<void> }).createTable?.();
+        const id = await queue.workflows.start(Throttled, ["throttle"]);
+        await until(async () => {
+          const found = await queue.workflows.find(id);
+          if (found?.status === "failed") throw new Error(found.error ?? "failed");
+          return found?.status === "completed";
+        });
+        expect(starts).toHaveLength(12);
+        // Three windows of four: the last four start at least two windows in.
+        expect(starts[11]! - starts[0]!).toBeGreaterThanOrEqual(2 * 300 - 50);
+
+        const begun = Date.now();
+        const other = await queue.workflows.start(Throttled, ["release"]);
+        await until(async () => (await status(queue, other)) === "completed");
+        expect(Date.now() - begun).toBeGreaterThanOrEqual(140);
+        expect(attempts).toEqual([1, 1]);
+        expect((await queue.workflows.find(other))!.result).toMatchObject({ succeeded: 3, failed: 0 });
+      }),
+    );
+
+    test(
+      "chunk hands fn the inputs in chunks, retries a chunk together and skips one item of it",
+      withQueue(async ({ worker }) => {
+        const calls: Array<{ inputs: number[]; attempt: number }> = [];
+        class Chunky extends Workflow {
+          static name = "Chunky";
+          async run(step: Step) {
+            return step.each(
+              "rows",
+              { count: 23, item: (i) => i * 10, chunk: 5, key: (input) => `k${input}` },
+              (inputs, ctx) => {
+                calls.push({ inputs, attempt: ctx.attempt });
+                expect(ctx.items.map((item) => item.key)).toEqual(inputs.map((input) => `k${input}`));
+                if (inputs[0] === 50 && ctx.attempt === 1) throw new Error("chunk failed");
+                if (inputs[0] === 0) ctx.skip(1, "no name", { line: 2 });
+              },
+            );
+          }
+        }
+        const queue = worker([Chunky]);
+        const id = await queue.workflows.start(Chunky, []);
+        await until(async () => (await status(queue, id)) === "completed");
+        expect(calls.map((call) => call.inputs.length)).toEqual([5, 5, 5, 5, 5, 3]);
+        expect(calls.filter((call) => call.inputs[0] === 50).map((call) => call.attempt)).toEqual([1, 2]);
+        expect((await queue.workflows.find(id))!.result).toMatchObject({
+          total: 23,
+          succeeded: 22,
+          skipped: 1,
+          problems: [{ index: 1, key: "k10", status: "skipped", reason: "no name", data: { line: 2 } }],
+        });
+      }),
+    );
+
+    test(
+      "transaction: true runs each item in a transaction where the store has one, and runs it plainly where it has none",
+      withQueue(async ({ worker }) => {
+        resetEachWarnings();
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const seen: boolean[] = [];
+        class Transactional extends Workflow {
+          static name = "Transactional";
+          async run(step: Step) {
+            return step.each("rows", { count: 6, item: (i) => i, transaction: true, concurrency: 2 }, () => {
+              seen.push(currentTransaction() !== undefined);
+            });
+          }
+        }
+        const queue = worker([Transactional]);
+        const id = await queue.workflows.start(Transactional, []);
+        await until(async () => (await status(queue, id)) === "completed");
+        expect((await queue.workflows.find(id))!.result).toMatchObject({ succeeded: 6 });
+        const joins = queue.workflows.store.transaction !== undefined;
+        expect(seen).toEqual(Array(6).fill(joins));
+        expect(warn.mock.calls.some((call) => String(call[0]).includes("without a transaction"))).toBe(!joins);
+      }),
+    );
+  });
 
   describe(`${name} — item sources`, () => {
     test(

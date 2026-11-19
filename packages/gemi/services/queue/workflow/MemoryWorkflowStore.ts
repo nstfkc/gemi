@@ -4,6 +4,7 @@ import {
   type ItemRecord,
   type ItemRunStatus,
   type StepRecord,
+  type UpdateOptions,
   WORKFLOW_TICK_JOB,
   type WorkflowChange,
   WorkflowLeaseLostError,
@@ -103,7 +104,7 @@ export class MemoryWorkflowStore implements WorkflowStore {
 
   async update<T>(
     id: string,
-    options: { owner?: string; key?: string; allSteps?: boolean; items?: string },
+    options: UpdateOptions,
     decide: (snapshot: {
       workflow: WorkflowRecord;
       step: StepRecord | null;

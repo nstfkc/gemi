@@ -195,6 +195,20 @@ export class WorkflowLeaseLostError extends Error {
   }
 }
 
+/** What `update` reads and how it writes. */
+export type UpdateOptions = {
+  /** Refuse the change with a `WorkflowLeaseLostError` unless this tick holds the workflow. */
+  owner?: string;
+  /** The step to read. */
+  key?: string;
+  /** Read every step. */
+  allSteps?: boolean;
+  /** Read the open item rows of this `step.each`. */
+  items?: string;
+  /** Write on the transaction `transaction` opened, when one is open. */
+  joinTransaction?: boolean;
+};
+
 export interface WorkflowStore {
   /**
    * Records a new workflow and enqueues its first tick, in one atomic step.
@@ -221,6 +235,15 @@ export interface WorkflowStore {
   renew(id: string, owner: string, leaseMs: number): Promise<boolean>;
 
   /**
+   * Runs `fn` in an ORM transaction on the store's own connection, in which
+   * an `update` with `joinTransaction` writes, so `fn`'s writes and that
+   * change commit or roll back together (`step.each` with `transaction:
+   * true`). A store that cannot (memory, SQLite, a bare connection) leaves
+   * it out.
+   */
+  transaction?<T>(fn: () => Promise<T>): Promise<T>;
+
+  /**
    * Reads the workflow (and the step `key`, or every step with `allSteps`)
    * while holding it exclusively, calls `decide`, and writes what it returns,
    * all in one atomic step. With `owner`, the write is refused with a
@@ -229,7 +252,7 @@ export interface WorkflowStore {
    */
   update<T>(
     id: string,
-    options: { owner?: string; key?: string; allSteps?: boolean; items?: string },
+    options: UpdateOptions,
     decide: (snapshot: WorkflowSnapshot) => WorkflowChange<T>,
   ): Promise<T | undefined>;
 
