@@ -979,7 +979,7 @@ export function workflowContract(
         const progress = seen.map((update) => update.progress);
         expect([...progress].sort((a, b) => a - b)).toEqual(progress);
         const times = seen.map((update) => update.updatedAt);
-        expect(times.toSorted((a, b) => a - b)).toEqual(times);
+        expect([...times].sort((a, b) => a - b)).toEqual(times);
 
         // An ended workflow yields once and ends; an unknown one yields nothing.
         const after: WorkflowUpdate[] = [];
