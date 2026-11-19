@@ -379,6 +379,7 @@ export class ApiRouteDispatcher {
         const match = pattern.exec({ pathname: routePath });
         if (match) {
           const decoded = decodePathParams(match.pathname.groups);
+          // The first matching route owns the request, even if its captures are malformed.
           if (!decoded) break;
           path = _path;
           params = decoded;

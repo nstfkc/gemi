@@ -1,3 +1,24 @@
+# 0.223.0
+
+## API path parameters are decoded once (#1306)
+
+**Behaviour change (minor version).** API handlers, including those invoked through MCP,
+now receive decoded values in `req.params`. For `/notes/:id`, a request ending in
+`a%2Fb` gives the handler `a/b`. Gemi matches the route before decoding. A malformed
+escape in a matched parameter returns 404.
+
+- Remove manual `decodeURIComponent(req.params.x)` calls. For a literal ID of
+  `100%25`, Gemi already turns the wire value `100%2525` back into `100%25`.
+  Another decode changes the ID to `100%`. Calling the decoder on a bare `%`
+  can throw a `URIError`.
+- Check handlers that use a parameter as a filesystem path or an S3 key. Decoded
+  values can contain `/` and `..`. Validate the resulting path or key against
+  the directory or prefix the caller may access. With the local filesystem driver,
+  a name that resolves outside the storage folder is refused. Stream routes that
+  read such a name return 404.
+- View loaders and client-side navigation still receive raw captures. A view at
+  `/notes/:id` sees `a%2Fb` for the same ID. [View routing follow-up](https://github.com/nstfkc/gemi/issues/1322).
+
 # 0.222.1
 
 ## `worker = true` jobs run again (#1318)

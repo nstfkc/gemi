@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
+import { FileNotFoundError } from "../../../http/errors";
 import { FileSystemDriver } from "./FileSystemDriver";
 
 /**
@@ -65,6 +66,24 @@ describe("the default storage folder", () => {
   test("including when ROOT_DIR is set, so the override is not merely a fallback", () => {
     process.env.ROOT_DIR = "/real/project";
     expect(folderOf(new FileSystemDriver("/tmp/my-bucket"))).toBe("/tmp/my-bucket");
+  });
+});
+
+describe("FileSystemDriver object paths", () => {
+  test("refuses reads, metadata lookups and writes outside the storage folder", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gemi-fs-path-"));
+    try {
+      const driver = new FileSystemDriver(join(root, "storage"));
+      for (const name of ["../outside.txt", join(root, "outside.txt")]) {
+        await expect(driver.read(name)).rejects.toBeInstanceOf(FileNotFoundError);
+        await expect(driver.fetch({ name })).rejects.toBeInstanceOf(FileNotFoundError);
+        await expect(driver.size(name)).rejects.toBeInstanceOf(FileNotFoundError);
+        await expect(driver.put({ name, body: new Blob(["x"]) })).rejects.toThrow(/outside the storage folder/);
+      }
+      expect(existsSync(join(root, "outside.txt"))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
