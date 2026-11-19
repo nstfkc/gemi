@@ -14,6 +14,21 @@ What to check:
 - `CorsMiddleware` no longer sends `Access-Control-Allow-Credentials` to `Origin: null`, even under an explicit `"null"` key. If you relied on that, move the caller to a token.
 - A test that compares `app.staticFiles(req)` with `toEqual` now sees an `assetCors` key.
 
+## Expiring agent threads (#1312)
+
+**New API (minor version).** See [AI Thread Store: expiring threads](docs/ai-thread-store.md#expiring-threads).
+
+- `new DatabaseAgentStore(connection, { ttlMs, slidingTtl? })`: threads expire `ttlMs` after creation (or after their last append with `slidingTtl: true`). `createThread({ ttlMs })` sets one thread's (`null` keeps it), and `createThread({ expiresAt })` a fixed time. An expired thread is `null` from `loadThread` and `getThread` (the controller answers 404), left out of `listThreads`, and refused by `appendMessages`.
+- `store.sweepExpired({ now?, limit? })` deletes expired threads with their messages and summaries and answers `{ deleted }`. Run it from a `CronJob` next to `sweepAttachments()`.
+- `MemoryAgentStore` takes the same `createThread({ ttlMs, expiresAt })`, drops an expired thread as soon as it is read, has `sweepExpired()`, and gains `slidingTtl` (default `true`, as before).
+- New exported types `CreateThreadParams` and `ThreadSweepResult`. `AgentStore.createThread` takes `CreateThreadParams`. `AgentThreadRecord.expiresAt` is set on a store with `ttlMs`.
+
+What to check:
+
+- **Only if you set `ttlMs` on a `DatabaseAgentStore`:** add `expiresAt BigInt? @map("expires_at")`, `ttlMs BigInt? @map("ttl_ms")` and `@@index([expiresAt])` to `GemiAgentThread` and migrate, or call `store.addExpiryColumns()` (`createTable()` does). A store without `ttlMs` never reads these columns. Threads created before have no expiry.
+- A custom `AgentStore` still compiles. It can ignore the new `createThread` fields or refuse them.
+- `MemoryAgentStore` now treats a thread as expired at exactly `ttlMs` after its last read or write, instead of one millisecond later.
+
 # 0.220.0
 
 ## Item sources: `step.source` and `ItemSource` (#1309)
