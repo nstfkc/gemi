@@ -1187,6 +1187,19 @@ describe("files", () => {
     expect(calls[0]!.body.get("file")).toBeInstanceOf(File);
   });
 
+  test("deleteFile sends DELETE /v1/files/{id} (#1165)", async () => {
+    const calls: { url: string; method?: string }[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      calls.push({ url, method: init.method });
+      return new Response(JSON.stringify({ id: "file_011abc", type: "file_deleted" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    await new TestAnthropic("claude-opus-5-5", fetchImpl).deleteFile("file_011abc");
+    expect(calls).toEqual([{ url: "https://api.anthropic.com/v1/files/file_011abc", method: "DELETE" }]);
+  });
+
   test("upload sends the workspace too", async () => {
     const calls: { headers: Record<string, string> }[] = [];
     const fetchImpl: FetchLike = async (_url, init) => {

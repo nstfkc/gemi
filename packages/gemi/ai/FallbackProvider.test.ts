@@ -612,6 +612,15 @@ describe("FallbackProvider", () => {
     expect(b.uploads).toHaveLength(0);
   });
 
+  test("deleteFile goes to the first leg, where upload sent the file", async () => {
+    const a = leg("a");
+    const b = leg("b");
+    const chain = FallbackProvider.chain([{ provider: a }, { provider: b }]);
+    await chain.deleteFile("file_1");
+    expect((a as any).deletedFiles).toEqual(["file_1"]);
+    expect((b as any).deletedFiles).toEqual([]);
+  });
+
   test("an onUsage that throws does not break the call", async () => {
     const chain = FallbackProvider.chain(
       [{ provider: leg("a", [{ type: "text-delta", delta: "a" }, finish()]) }],

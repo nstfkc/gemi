@@ -453,6 +453,18 @@ export class RecordingProvider extends AgentProvider {
     return id;
   }
 
+  /** Deletes the live copy of a recorded upload; a replay has nothing to delete. */
+  override async deleteFile(fileId: string): Promise<void> {
+    const live = this.uploads.get(fileId);
+    if (this.live && live !== undefined) {
+      if (!this.live.deleteFile) {
+        throw new Error(`${this.live.constructor.name} cannot delete provider files: it does not implement deleteFile().`);
+      }
+      await this.live.deleteFile(live);
+      this.uploads.delete(fileId);
+    }
+  }
+
   normalizeError(error: unknown) {
     return this.live ? this.live.normalizeError(error) : super.normalizeError(error);
   }

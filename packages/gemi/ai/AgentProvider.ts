@@ -3,6 +3,7 @@ import {
   responsesEndpoint,
   streamResponses,
   uploadFile,
+  deleteFile,
   type ResponsesEndpoint,
 } from "./providers/call";
 import {
@@ -334,6 +335,19 @@ export abstract class AgentProvider {
   abstract upload(file: File): Promise<string>;
 
   /**
+   * Deletes a file `upload` sent, by the id it answered (#1165). Resolves when
+   * the file is gone, including when it was already gone (a 404), so a cleanup
+   * can be retried.
+   *
+   * Optional, so a provider written before this keeps compiling. The shipped
+   * OpenAI, Azure OpenAI and Anthropic providers implement it.
+   * `AgentController` calls it for short-lived attachments
+   * (`attachmentRetention`), and reports a provider without it as a failed
+   * deletion rather than skipping the provider's copy.
+   */
+  deleteFile?(fileId: string): Promise<void>;
+
+  /**
    * Maps a provider's error body onto the normalized codes, so an app can
    * branch on `rate_limited` without knowing whose rate limit it was.
    *
@@ -424,6 +438,11 @@ export class OpenAIProvider extends AgentProvider {
 
   upload(file: File): Promise<string> {
     return uploadFile(this.endpoint(), file);
+  }
+
+  /** `DELETE /v1/files/{id}`. */
+  override deleteFile(fileId: string): Promise<void> {
+    return deleteFile(this.endpoint(), fileId);
   }
 
   protected endpoint(): ResponsesEndpoint {
@@ -584,6 +603,11 @@ export class AnthropicProvider extends AgentProvider {
     return uploadFile(this.endpoint(), file, null);
   }
 
+  /** `DELETE /v1/files/{id}`, with the same Files API headers as `upload`. */
+  override deleteFile(fileId: string): Promise<void> {
+    return deleteFile(this.endpoint(), fileId);
+  }
+
   protected endpoint(): ResponsesEndpoint {
     return messagesEndpoint(anthropicTarget(this.config));
   }
@@ -627,6 +651,13 @@ export class AzureAnthropicProvider extends AnthropicProvider {
       new Error(
         "AzureAnthropicProvider does not upload files: the Files API is not available on Azure-hosted Foundry deployments. The file is still stored by gemi and named to the model by its attachment id.",
       ),
+    );
+  }
+
+  /** No files were uploaded here (`upload` refuses), so there are none to delete. */
+  override deleteFile(_fileId: string): Promise<void> {
+    return Promise.reject(
+      new Error("AzureAnthropicProvider does not delete files: the Files API is not available on Azure-hosted Foundry deployments."),
     );
   }
 
@@ -706,6 +737,11 @@ export class AzureOpenAIProvider extends AgentProvider {
    *  `user_data` id outright (#682). See `UploadPurpose`. */
   upload(file: File): Promise<string> {
     return uploadFile(this.endpoint(), file, "assistants");
+  }
+
+  /** `DELETE {resource}/files/{id}`, under the same api-version as `upload`. */
+  override deleteFile(fileId: string): Promise<void> {
+    return deleteFile(this.endpoint(), fileId);
   }
 
   protected deployment(): string {

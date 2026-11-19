@@ -182,6 +182,27 @@ describe("OpenAIProvider", () => {
     expect((calls[0]!.init.headers as Record<string, string>)["content-type"]).toBeUndefined();
   });
 
+  test("deleteFile sends DELETE /v1/files/{id} with the upload's credential (#1165)", async () => {
+    const calls = stubFetch(new Response(JSON.stringify({ id: "file_123", deleted: true })));
+    await OpenAIProvider.model("gpt-5.4", { apiKey: "k" }).deleteFile!("file_123");
+
+    expect(calls[0]!.url).toBe("https://api.openai.com/v1/files/file_123");
+    expect(calls[0]!.init.method).toBe("DELETE");
+    expect((calls[0]!.init.headers as Record<string, string>).authorization).toBe("Bearer k");
+  });
+
+  test("deleteFile resolves for a file that is already gone, and throws for other failures", async () => {
+    stubFetch(new Response(JSON.stringify({ error: { message: "No such File" } }), { status: 404 }));
+    await expect(
+      OpenAIProvider.model("gpt-5.4", { apiKey: "k" }).deleteFile!("file_gone"),
+    ).resolves.toBeUndefined();
+
+    stubFetch(new Response(JSON.stringify({ error: { message: "bad key" } }), { status: 401 }));
+    await expect(
+      OpenAIProvider.model("gpt-5.4", { apiKey: "k" }).deleteFile!("file_1"),
+    ).rejects.toThrow();
+  });
+
   test("normalizeError is on the instance, so an app never touches the provider's error shape", () => {
     const provider = OpenAIProvider.model("gpt-5.4");
     const normalized = provider.normalizeError(new TypeError("fetch failed"));
@@ -362,6 +383,22 @@ describe("AzureOpenAIProvider", () => {
     expect((calls[0]!.init.headers as Record<string, string>)["api-key"]).toBe("azure-key");
     // Setting content-type by hand would drop the multipart boundary.
     expect((calls[0]!.init.headers as Record<string, string>)["content-type"]).toBeUndefined();
+  });
+
+  test("deleteFile puts the id before the api-version, on both surfaces", async () => {
+    const calls = stubFetch(new Response(JSON.stringify({ deleted: true })));
+    await azure().deleteFile!("assistant-abc");
+    expect(calls[0]!.url).toBe(
+      "https://acme.openai.azure.com/openai/v1/files/assistant-abc?api-version=preview",
+    );
+    expect(calls[0]!.init.method).toBe("DELETE");
+    expect((calls[0]!.init.headers as Record<string, string>)["api-key"]).toBe("azure-key");
+
+    const dated = stubFetch(new Response(JSON.stringify({ deleted: true })));
+    await azure({ apiVersion: "2025-04-01-preview" }).deleteFile!("assistant-abc");
+    expect(dated[0]!.url).toBe(
+      "https://acme.openai.azure.com/openai/files/assistant-abc?api-version=2025-04-01-preview",
+    );
   });
 
   test("uploads follow the same fork, and are resource-scoped either way", async () => {

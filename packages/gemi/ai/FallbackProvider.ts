@@ -277,6 +277,17 @@ export class FallbackProvider extends AgentProvider {
     return this.entries[0]!.provider.upload(file);
   }
 
+  /** From the first leg, which is the only one `upload` sends a file to. */
+  override deleteFile(fileId: string): Promise<void> {
+    const first = this.entries[0]!.provider;
+    if (!first.deleteFile) {
+      return Promise.reject(
+        new Error(`${first.constructor.name} cannot delete provider files: it does not implement deleteFile().`),
+      );
+    }
+    return first.deleteFile(fileId);
+  }
+
   normalizeError(error: unknown): AgentError {
     return this.entries[0]!.provider.normalizeError(error);
   }

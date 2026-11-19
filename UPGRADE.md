@@ -1,3 +1,19 @@
+# 0.217.0
+
+## Short-lived attachments, and deleting provider files (#1307, #1165)
+
+**New API (minor version).** See [Short-lived attachments](docs/ai-controller-hooks.md#short-lived-attachments) and [AI providers](docs/ai-providers.md#deleting-an-uploaded-file).
+
+- `AgentController.attachmentRetention(req, { route, threadId, body })` (also a hook) answers `"turn"`, `{ ttlMs }` or `null` (the default, which keeps everything as before). `"turn"` deletes a turn's uploads and the files its tools made, from `Storage` and from the provider, once the turn has completed. `{ ttlMs }` stops them resolving after that time.
+- `AgentController.sweepAttachments({ now?, limit? })` deletes expired attachments and short-lived provider-only uploads, for a cron. `turnAttachmentMaxAgeMs` (one hour) is how long a `"turn"` upload waits for its turn.
+- `AgentProvider.deleteFile?(fileId)`, implemented by `OpenAIProvider`, `AzureOpenAIProvider`, `AnthropicProvider` and `FallbackProvider` (first leg). A 404 counts as deleted.
+- Optional store methods: `AttachmentStore.delete` / `expired`, `FileOwners.delete` / `expired`, `AttachmentStorage.delete`. The in-memory defaults implement them. `Attachment` and `FileOwnerRecord` gain `expiresAt` and `deleteAfterTurn`. `ScopedAttachments.withLifetime()` is new, and `ScopedAttachments.get` treats an attachment past `expiresAt` as not found.
+
+What to check:
+
+- Nothing changes unless a controller answers `attachmentRetention`. If yours does and uses custom stores, implement the store methods above, or the deletions are reported as failures through `reportHookFailure`.
+- A class that `implements AgentProvider` (rather than extending it) still compiles: `deleteFile` is optional.
+
 # 0.216.0
 
 ## Provider error type and code on the server-side run failure (#1302)

@@ -54,6 +54,13 @@ export class FakeProvider {
     return `file_${this.uploads.length}`;
   }
 
+  /** Every `deleteFile`, in order. */
+  readonly deletedFiles: string[] = [];
+
+  async deleteFile(fileId: string) {
+    this.deletedFiles.push(fileId);
+  }
+
   normalizeError(error: unknown) {
     return {
       code: "provider_error" as const,
