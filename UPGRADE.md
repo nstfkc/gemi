@@ -1,3 +1,20 @@
+# 0.222.1
+
+## `worker = true` jobs run again (#1318)
+
+**Fix (patch version).** See [Worker-thread jobs](docs/jobs-and-queues.md#worker-thread-jobs--worker--true).
+
+A `worker = true` job used to hang: its thread imported `app/bootstrap.ts` (`dist/server/bootstrap.mjs` in production), which no template has and no build emitted, and a thread that failed to load never settled the job. Now:
+
+- The thread boots from `app/kernel/Kernel.ts` when the app has no `app/bootstrap.ts`. An app that has one keeps using it, and `gemi build` now emits `dist/server/bootstrap.mjs` from it.
+- A thread that fails to load or throws outside the job fails the attempt, and the thread is ended after every job.
+- `run` gets its arguments spread (`run(a, b)`), as on the main thread. It used to get them as one array (`run([a, b])`).
+- `QueueManager.dispatchJob(name, args)` throws for a name nothing is registered under, instead of returning `undefined`.
+
+What to check:
+
+- **A worker job written for the array shape** (`run(args)` reading `args[0]`): take the arguments as declared instead. Queued listeners with `worker = true` handle both shapes and need nothing.
+
 # 0.222.0
 
 ## Pause, resume, and control over `step.each` (#1309)

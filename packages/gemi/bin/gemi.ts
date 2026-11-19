@@ -30,6 +30,7 @@ import { runUpgrade } from "./upgrade";
 import { SKILL_NAME, installSkill } from "./install-skill";
 import { spawnForwardingSignals } from "./forwardSignals";
 import { runStats } from "../stats/run";
+import { buildServerEntries } from "./buildServer";
 
 // `bun --preload` args for the app's optional `app/preload.ts`. Preloaded (after
 // gemi's own runtime plugin) before the server entry runs — so it executes
@@ -232,35 +233,12 @@ withStatsOptions(
     build: { ssr: true, outDir: "dist/server" },
   });
 
-  // Runnable server entry. `start` imports `dist/server/server.mjs`, so emit
-  // exactly that file. `packages: "external"` keeps node_modules deps (sharp,
-  // prisma's engine, vite/rolldown) resolving at runtime instead of being
-  // bundled — bundling them breaks native addons and bloats the output. CSS is
-  // loaded as opaque `text` so the bundler neither resolves `url(...)` assets
-  // nor leaves a dangling runtime `import` ("Cannot find module ./main.css").
-  const serverBuild = await Bun.build({
-    entrypoints: ["./app/server.ts"],
-    outdir: "./dist/server",
-    naming: "[name].mjs",
-    target: "bun",
-    minify: true,
-    // Emit a linked `.map` (with a `sourceMappingURL` comment) so Bun maps
-    // production server stack traces back to the app's source.
-    sourcemap: "linked",
-    // Apply the custom-request transform (plus any app-declared Bun plugins from
-    // gemi.config.ts) to controllers/routes that end up bundled into the server
-    // entry. With `packages: "external"` the app's own code (imported via
-    // `@/app/*`) is currently kept external and transformed at runtime by the
-    // `--preload` plugin in `start` instead — so these only fire if app code is
-    // ever bundled here. Kept as a safety net for that case.
-    plugins: [gemiPlugin(), ...(config.bun?.plugins ?? [])],
-    // Keep everything in node_modules external — resolved at runtime from the
-    // app's node_modules. This avoids bundling native/dev-only deps (sharp,
-    // prisma's engine, vite/rolldown) that break or bloat the server bundle.
-    packages: "external",
-    // App-local CSS is still bundled, so load it as opaque text (see above).
-    loader: { ".css": "text" },
-  });
+  // Runnable server entry, and the worker thread's bootstrap when the app has
+  // one; see `buildServerEntries`.
+  const serverBuild = await buildServerEntries(rootDir, [
+    gemiPlugin(),
+    ...(config.bun?.plugins ?? []),
+  ]);
 
   if (!serverBuild.success) {
     for (const message of serverBuild.logs) console.error(message);

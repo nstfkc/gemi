@@ -1,4 +1,5 @@
 import { AsyncResource } from "node:async_hooks";
+import { existsSync } from "node:fs";
 import { isMainThread } from "node:worker_threads";
 
 import type { Application } from "../../foundation/Application";
@@ -42,20 +43,57 @@ export { backoffFor };
  * path can have it, instead of being lost with the promise. And `destroy()` now
  * runs after the job rather than under it, so the cloned kernel — its database
  * connections included — outlives the work it was cloned for.
+ *
+ * ### Where the thread finds the application (#1318)
+ *
+ * The thread boots its own copy of the application. It used to import it from
+ * `app/bootstrap.ts` (`dist/server/bootstrap.mjs` in production), a file no
+ * template has and no build had emitted since the server moved to `Bun.build`,
+ * so the import failed inside the thread and the job hung. Now an app's own
+ * bootstrap is used when it exists, and otherwise the thread does what
+ * `gemi queue:work` does: `new App({ kernel })` from `app/kernel/Kernel.ts`,
+ * with `App` resolved from the application's own gemi, the copy its kernel
+ * extends.
  */
-function createWorker() {
-  const APP_DIR = process.env.APP_DIR;
-  const ROOT_DIR = process.env.ROOT_DIR;
+export function workerEntry(env: Record<string, string | undefined> = process.env): {
+  bootstrap: string | undefined;
+  kernel: string;
+  app: string;
+} {
+  const rootDir = env.ROOT_DIR ?? process.cwd();
+  const appDir = env.APP_DIR ?? `${rootDir}/app`;
+  const bootstrap =
+    env.NODE_ENV === "production"
+      ? `${rootDir}/dist/server/bootstrap.mjs`
+      : `${appDir}/bootstrap.ts`;
+  let app: string;
+  try {
+    app = Bun.resolveSync("gemi/app", rootDir);
+  } catch {
+    // Run from outside a project (a test, a script): this copy's own,
+    // through the package's reference to itself.
+    app = Bun.resolveSync("gemi/app", __dirname);
+  }
+  return {
+    bootstrap: existsSync(bootstrap) ? bootstrap : undefined,
+    kernel: `${appDir}/kernel/Kernel.ts`,
+    app,
+  };
+}
 
-  const appPath =
-    process.env.NODE_ENV === "production"
-      ? `${ROOT_DIR}/dist/server/bootstrap.mjs`
-      : `${APP_DIR}/bootstrap.ts`;
+function createWorker() {
+  const entry = workerEntry();
+  const load = entry.bootstrap
+    ? `const { app } = await import(${JSON.stringify(entry.bootstrap)});`
+    : `const { App } = await import(${JSON.stringify(entry.app)});
+      const { default: Kernel } = await import(${JSON.stringify(entry.kernel)});
+      const app = new App({ kernel: Kernel });
+      await app.waitForBoot();`;
 
   const file = new File(
     [
       `
-      import { app } from "${appPath}"
+      ${load}
       self.onmessage = async (event) => {
         const clone = app.clone()
         let result = null;
@@ -72,6 +110,7 @@ function createWorker() {
           self.postMessage({result});
         }
       };
+      self.postMessage({ ready: true });
     `,
     ],
     "worker.ts",
@@ -80,20 +119,46 @@ function createWorker() {
   return new Worker(url);
 }
 
-// TODO: terminate worker after the job is done
+/**
+ * Runs one job in a thread of its own, and ends the thread after it.
+ *
+ * The thread posts `ready` once it has loaded the application, and only then
+ * is it handed the job: a message posted earlier would reach a thread whose
+ * top-level `await` has not set `onmessage` yet. A thread that fails to load
+ * (a missing kernel, a syntax error in the app) or throws outside the job
+ * rejects with that error, so the job fails and retries like any other one.
+ * It used to listen for `message` alone, and a thread that never posted left
+ * the job unsettled, holding its slot for good (#1318).
+ */
 async function runInWorker(jobName: string, args: string) {
   const worker = createWorker();
-  worker.postMessage({ jobName, args });
-  return await new Promise((resolve, reject) => {
-    worker.onmessage = (e) => {
-      const data = e.data;
-      if ("error" in data) {
-        reject(data.error);
-      } else {
-        resolve(data.result);
-      }
-    };
-  });
+  try {
+    return await new Promise((resolve, reject) => {
+      worker.onmessage = (e) => {
+        const data = e.data;
+        if (data && "ready" in data) {
+          worker.postMessage({ jobName, args });
+        } else if ("error" in data) {
+          reject(data.error);
+        } else {
+          resolve(data.result);
+        }
+      };
+      worker.onerror = (event) => {
+        const error = (event as ErrorEvent).error ?? (event as ErrorEvent).message ?? event;
+        reject(
+          error instanceof Error
+            ? error
+            : new Error(`The worker thread for ${jobName} failed: ${String(error)}`),
+        );
+      };
+      worker.addEventListener("close", () => {
+        reject(new Error(`The worker thread for ${jobName} exited before the job finished.`));
+      });
+    });
+  } finally {
+    worker.terminate();
+  }
 }
 
 /**
@@ -384,11 +449,24 @@ export class QueueManager {
     return [...this.config.jobs];
   }
 
+  /**
+   * Runs a job's `run` here and now, with no queue around it: what a
+   * `worker = true` job's thread calls. Throws for a name nothing is
+   * registered under, which in a thread means it booted a different build of
+   * the application; returning `undefined` there reported success for work
+   * that never ran.
+   */
   dispatchJob(jobName: string, args: string) {
-    if (this.jobs[jobName]) {
-      const job = new this.jobs[jobName]();
-      return job.run(JSON.parse(args));
+    const Class = this.jobs[jobName];
+    if (!Class) {
+      throw new Error(
+        `No job is registered under the name "${jobName}" in this thread, so it ` +
+          `did not run. The thread boots the application from app/kernel/Kernel.ts ` +
+          `(or app/bootstrap.ts); check that the job is discovered there.`,
+      );
     }
+    // Spread, as `run` is called everywhere else (#1318).
+    return new Class().run(...(JSON.parse(args) as unknown[]));
   }
 
   /**
