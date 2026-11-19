@@ -191,7 +191,7 @@ function kotlinType(type: TypeRef, spell: Spell = (name) => name): string {
  * would start a template — and `$ref`, `$type` are ordinary JSON keys — and
  * Kotlin has no `\f`.
  */
-function kotlinString(value: string): string {
+export function kotlinString(value: string): string {
   return JSON.stringify(value).replace(/\\\\|\\f|\$/g, (match) =>
     match === "$" ? "\\$" : match === "\\f" ? "\\u000C" : match,
   );
@@ -208,7 +208,13 @@ function renderType(type: NamedType, parent: string | undefined): string[] {
   }
 }
 
-function renderClass(name: string, properties: Property[], parent: string | undefined): string[] {
+export function renderClass(
+  name: string,
+  properties: Property[],
+  parent: string | undefined,
+  literalDefaults?: ReadonlySet<string>,
+  imports?: Set<string>,
+): string[] {
   const implemented = parent ? ` : ${parent}` : "";
   if (properties.length === 0) {
     return ["@Serializable", `public data object ${name}${implemented}`];
@@ -225,16 +231,22 @@ function renderClass(name: string, properties: Property[], parent: string | unde
     // Optional: absent unless set, so it defaults to `null` and `GemiJson`
     // leaves it out. Required but nullable: no default, so it is always
     // written — as `null` when it is — because the server needs the key.
+    if (renamed) imports?.add("kotlinx.serialization.SerialName");
     const base = kotlinType(property.type);
     const type = property.optional && !base.endsWith("?") ? `${base}?` : base;
-    const fallback = property.optional ? " = null" : "";
-    lines.push(`  ${renamed}public val ${escape(field)}: ${type}${fallback},`);
+    const requiredLiteral = !property.optional && literalDefaults?.has(base);
+    // @Required keeps the key mandatory for decoding and writes it even with encodeDefaults=false.
+    if (requiredLiteral) imports?.add("kotlinx.serialization.Required");
+    const fallback = property.optional ? " = null" : requiredLiteral ? ` = ${base}` : "";
+    lines.push(
+      `  ${renamed}${requiredLiteral ? "@Required " : ""}public val ${escape(field)}: ${type}${fallback},`,
+    );
   });
   lines.push(`)${implemented}`);
   return lines;
 }
 
-function renderEnum(name: string, values: string[]): string[] {
+export function renderEnum(name: string, values: string[]): string[] {
   const names = uniqueNames(values.map(pascalCase));
   const lines = ["@Serializable", `public enum class ${name} {`];
   values.forEach((value, index) => {
@@ -244,26 +256,31 @@ function renderEnum(name: string, values: string[]): string[] {
   return lines;
 }
 
-function renderUnion(
+export function renderUnion(
   name: string,
   discriminant: string,
-  variants: { value: string; type: TypeRef }[],
+  variants: { value: string | boolean; type: TypeRef }[],
+  strictTagType = false,
 ): string[] {
   const lines = [
     `@Serializable(with = ${name}.Serializer::class)`,
     `public sealed interface ${name} {`,
     `  public object Serializer : JsonContentPolymorphicSerializer<${name}>(${name}::class) {`,
     `    override fun selectDeserializer(element: JsonElement): DeserializationStrategy<${name}> =`,
-    `      when (val value = element.jsonObject[${kotlinString(discriminant)}]?.jsonPrimitive?.contentOrNull) {`,
+    `      when (val value = element.jsonObject[${kotlinString(discriminant)}]${strictTagType ? "" : "?.jsonPrimitive?.contentOrNull"}) {`,
   ];
   for (const variant of variants) {
-    lines.push(`        ${kotlinString(variant.value)} -> ${variantClass(variant)}.serializer()`);
+    const literal =
+      typeof variant.value === "boolean" ? String(variant.value) : kotlinString(variant.value);
+    lines.push(
+      `        ${strictTagType ? `JsonPrimitive(${literal})` : literal} -> ${variantClass(variant)}.serializer()`,
+    );
   }
-  // The discriminant is wire text inside the message; `$value` is the one
-  // template in it.
-  const unknown = kotlinString(`Unknown ${discriminant} "`).slice(0, -1);
+  const unknown = kotlinString(`Unknown ${discriminant} `).slice(0, -1);
+  // A JsonElement already renders string tags with their JSON quotes.
+  const displayValue = strictTagType ? '${value ?: "missing"}' : '\\"$value\\"';
   lines.push(
-    `        else -> throw SerializationException(${unknown}$value\\"")`,
+    `        else -> throw SerializationException(${unknown}${displayValue}")`,
     "      }",
     "  }",
     "}",
@@ -274,8 +291,8 @@ function renderUnion(
 /** The class a union variant decodes to: its named type, or — for one that
  *  could not be mapped, a recursive one, say — its wire tag, as before the
  *  model carried a TypeRef. */
-function variantClass(variant: { value: string; type: TypeRef }): string {
-  return variant.type.kind === "named" ? variant.type.name : variant.value;
+function variantClass(variant: { value: string | boolean; type: TypeRef }): string {
+  return variant.type.kind === "named" ? variant.type.name : String(variant.value);
 }
 
 function uniqueNames(names: string[], taken = new Set<string>()): string[] {
