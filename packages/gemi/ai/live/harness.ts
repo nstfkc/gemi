@@ -131,6 +131,11 @@ export class RecordingProvider implements AgentProvider {
     return this.inner.upload(file);
   }
 
+  deleteFile(fileId: string): Promise<void> {
+    if (!this.inner.deleteFile) return Promise.reject(new Error("The live provider has no deleteFile()."));
+    return this.inner.deleteFile(fileId);
+  }
+
   normalizeError(error: unknown) {
     return this.inner.normalizeError(error);
   }

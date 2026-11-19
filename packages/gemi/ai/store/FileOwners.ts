@@ -23,6 +23,14 @@ export type FileOwnerRecord = {
   mimeType?: string;
   size?: number;
   createdAt: string;
+  /**
+   * For a short-lived upload that went to the provider alone (#1307): when
+   * `AgentController.sweepAttachments` deletes the provider's file. An upload
+   * gemi also stored carries this on its attachment record instead.
+   */
+  expiresAt?: string;
+  /** Deleted once the turn that names it has completed. See `Attachment.deleteAfterTurn`. */
+  deleteAfterTurn?: boolean;
 };
 
 /**
@@ -39,6 +47,14 @@ export type FileOwnerRecord = {
 export interface FileOwners {
   record(fileId: string, record: FileOwnerRecord): Promise<void>;
   get(fileId: string): Promise<FileOwnerRecord | null>;
+  /** Forgets an id whose file was deleted (#1307). Optional. */
+  delete?(fileId: string): Promise<void>;
+  /**
+   * Up to `limit` ids whose record's `expiresAt` is at or before `now` (#1307).
+   * Optional; without it `sweepAttachments` cannot find short-lived
+   * provider-only uploads that no turn deleted.
+   */
+  expired?(now: Date, limit: number): Promise<string[]>;
 }
 
 /**
@@ -68,6 +84,19 @@ export class MemoryFileOwners implements FileOwners {
   async get(fileId: string): Promise<FileOwnerRecord | null> {
     const record = this.records.get(fileId);
     return record ? { ...record } : null;
+  }
+
+  async delete(fileId: string): Promise<void> {
+    this.records.delete(fileId);
+  }
+
+  async expired(now: Date, limit: number): Promise<string[]> {
+    const found: string[] = [];
+    for (const [fileId, record] of this.records) {
+      if (found.length >= limit) break;
+      if (record.expiresAt && Date.parse(record.expiresAt) <= now.getTime()) found.push(fileId);
+    }
+    return found;
   }
 }
 

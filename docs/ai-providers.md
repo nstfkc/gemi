@@ -17,6 +17,18 @@ export const support = Agent.create({ name: "support", instructions: "Be brief."
 
 `provider.capabilities` says what the model supports (`reasoning`, `structuredOutput`, `fileInput`, `parallelToolCalls`, `toolSearch`). The agent drops anything the provider can't do instead of sending a request the vendor would refuse.
 
+### Deleting an uploaded file
+
+`provider.deleteFile(fileId)` deletes a file `provider.upload()` sent, by the id it answered: `DELETE /files/{id}` on the same host, credential and api-version as the upload. A file that is already gone (a 404) counts as deleted. `OpenAIProvider`, `AzureOpenAIProvider` and `AnthropicProvider` implement it, and a `FallbackProvider` deletes from its first leg, where it uploads. `AzureAnthropicProvider` has no Files API and refuses. The method is optional on `AgentProvider`, so a custom provider without it still compiles.
+
+```typescript
+const fileId = await openai.upload(screenshot);
+// ... show it to a judge model once ...
+await openai.deleteFile?.(fileId);
+```
+
+The agent controller calls it for short-lived attachments (see [Short-lived attachments](./ai-controller-hooks.md#short-lived-attachments)).
+
 ### Retries
 
 A call that fails before the vendor starts answering (a network error, a timeout, a 429 that isn't a spent quota, a 408, 409 or 5xx) is sent again up to `maxRetries` times (default 2), with exponential backoff and jitter starting at 0.5 s. A `Retry-After` header is honoured, capped at 20 s.

@@ -1,5 +1,6 @@
 import { ToolError } from "../redact";
 import type {
+  DeleteFileParams,
   PutFileParams,
   ReadFileParams,
   ReadResult,
@@ -114,7 +115,35 @@ export type Attachment = {
   size: number;
   createdAt: string;
   destination: AttachmentDestination;
+  /**
+   * When this attachment stops resolving and `AgentController.sweepAttachments`
+   * may delete it (#1307). Absent for an attachment that is kept, which is
+   * every attachment unless `attachmentRetention` answers otherwise.
+   */
+  expiresAt?: string;
+  /**
+   * Deleted, with its provider copy, once the turn that names it (or, for a
+   * tool's output, the turn that made it) has completed. Set by
+   * `attachmentRetention` answering `"turn"`; `expiresAt` is then the
+   * fallback for a turn that never comes.
+   */
+  deleteAfterTurn?: boolean;
 };
+
+/**
+ * How long a turn's uploads and tool-made attachments live (#1307). What
+ * `AgentController.attachmentRetention` answers; `null` keeps them.
+ *
+ * - `"turn"`: deleted from storage and from the provider once the turn has
+ *   completed (after `onStreamComplete`). An upload no turn names is deleted by
+ *   the sweep after `AgentController.turnAttachmentMaxAgeMs`.
+ * - `{ ttlMs }`: kept for that long, then no longer resolves and is deleted by
+ *   `AgentController.sweepAttachments()`.
+ */
+export type AttachmentRetention = "turn" | { ttlMs: number };
+
+/** The fields a short-lived attachment carries. See `Attachment.expiresAt`. */
+export type AttachmentLifetime = { expiresAt: string; deleteAfterTurn?: boolean };
 
 /**
  * Where attachment *records* live. The bytes are in `AttachmentStorage`; this
@@ -143,6 +172,20 @@ export interface AttachmentStore {
    * `AttachmentNotFoundError`.
    */
   find(scope: AttachmentScope, id: string): Promise<Attachment | null>;
+  /**
+   * Removes the record (#1307). Optional, so a store written before this keeps
+   * compiling; short-lived attachments (`attachmentRetention`) need it, and
+   * without it their records outlive their bytes. Scoped like `find`: the
+   * clause is `WHERE id = ? AND scope_key = ?`.
+   */
+  delete?(scope: AttachmentScope, id: string): Promise<void>;
+  /**
+   * Up to `limit` records whose `expiresAt` is at or before `now`, across every
+   * scope (#1307). Only `AgentController.sweepAttachments` calls it, with no
+   * model or request anywhere near it; it is the one unscoped read, and it
+   * exists to delete. Index `expires_at`.
+   */
+  expired?(now: Date, limit: number): Promise<Attachment[]>;
 }
 
 /**
@@ -156,6 +199,8 @@ export interface AttachmentStore {
 export interface AttachmentStorage {
   put(params: PutFileParams | Blob): Promise<string>;
   read(params: ReadFileParams | string): Promise<ReadResult>;
+  /** Needed for short-lived attachments (#1307). The `Storage` facade has it. */
+  delete?(params: DeleteFileParams | string): Promise<void>;
 }
 
 /**
@@ -234,8 +279,19 @@ export class ScopedAttachments {
     private readonly store: AttachmentStore,
     private readonly storage: AttachmentStorage,
     private readonly scope: AttachmentScope,
+    private readonly lifetime: ScopedLifetime | null = null,
   ) {
     assertScope(scope);
+  }
+
+  /**
+   * The same scope, with every `put` made short-lived (#1307): each record
+   * gets `lifetime.next()`'s fields and is handed to `lifetime.onPut`, which is
+   * how a turn collects what its tools made so it can delete them. Reads are
+   * unchanged.
+   */
+  withLifetime(lifetime: ScopedLifetime): ScopedAttachments {
+    return new ScopedAttachments(this.store, this.storage, this.scope, lifetime);
   }
 
   /**
@@ -264,7 +320,7 @@ export class ScopedAttachments {
    */
   async get(id: string): Promise<Attachment> {
     const record = await this.store.find(this.scope, id);
-    if (!record || record.scopeKey !== this.scope.key) {
+    if (!record || record.scopeKey !== this.scope.key || isExpired(record, Date.now())) {
       throw new AttachmentNotFoundError(id);
     }
     return record;
@@ -388,10 +444,97 @@ export class ScopedAttachments {
       // so the id is passed in rather than produced.
       destination: params.fileId ? "both" : "storage",
       ...(params.fileId ? { fileId: params.fileId } : {}),
+      ...(this.lifetime ? this.lifetime.next() : {}),
     };
     await this.store.put(this.scope, record);
+    this.lifetime?.onPut?.(record);
     return record;
   }
+}
+
+/** What `ScopedAttachments.withLifetime` takes. */
+export type ScopedLifetime = {
+  /** The lifetime fields for a record stored now. */
+  next(): AttachmentLifetime;
+  /** Told about each record stored. */
+  onPut?(attachment: Attachment): void;
+};
+
+/** Whether `attachment` has passed its `expiresAt`. */
+export function isExpired(attachment: { expiresAt?: string }, now: number): boolean {
+  if (!attachment.expiresAt) return false;
+  const at = Date.parse(attachment.expiresAt);
+  return Number.isFinite(at) && at <= now;
+}
+
+/**
+ * The lifetime fields for something stored now under `retention`, or `null`
+ * for one that is kept. `turnMaxAgeMs` is how long a `"turn"` attachment may
+ * wait for a turn to delete it before the sweep does.
+ */
+export function attachmentLifetime(
+  retention: AttachmentRetention | null | undefined,
+  turnMaxAgeMs: number,
+  now = Date.now(),
+): AttachmentLifetime | null {
+  if (retention === null || retention === undefined) return null;
+  if (retention === "turn") {
+    return { expiresAt: new Date(now + turnMaxAgeMs).toISOString(), deleteAfterTurn: true };
+  }
+  const ttlMs = (retention as { ttlMs?: unknown })?.ttlMs;
+  if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+    throw new Error(
+      `attachmentRetention() must answer "turn", { ttlMs } with a positive number of milliseconds, or null; it answered ${JSON.stringify(retention)}.`,
+    );
+  }
+  return { expiresAt: new Date(now + ttlMs).toISOString() };
+}
+
+/** What `deleteAttachment` deletes from. */
+export type AttachmentDeletionTargets = {
+  store: AttachmentStore;
+  storage: AttachmentStorage;
+  /** The provider the file was uploaded to, for `fileId`. */
+  provider?: { deleteFile?(fileId: string): Promise<void> };
+  /** Forgets the provider file's owner record once it is deleted. */
+  fileOwners?: { delete?(fileId: string): Promise<void> };
+};
+
+/**
+ * Deletes every copy of one attachment (#1307): the stored bytes, then the
+ * provider's file, then the record. In that order so a failure leaves the
+ * record behind, and the sweep (or the next attempt) finds it and tries again.
+ * Throws on the first copy it cannot delete, including when `storage` or the
+ * provider has no way to delete at all: a privacy deletion that skips a copy
+ * must not look like one that succeeded.
+ */
+export async function deleteAttachment(
+  attachment: Attachment,
+  targets: AttachmentDeletionTargets,
+): Promise<void> {
+  if (attachment.objectName) {
+    if (!targets.storage.delete) {
+      throw new Error(
+        `Cannot delete attachment ${attachment.id}: the controller's attachmentStorage has no delete().`,
+      );
+    }
+    await targets.storage.delete({ name: attachment.objectName });
+  }
+  if (attachment.fileId) {
+    if (!targets.provider?.deleteFile) {
+      throw new Error(
+        `Cannot delete the provider copy of attachment ${attachment.id}: the agent's provider has no deleteFile().`,
+      );
+    }
+    await targets.provider.deleteFile(attachment.fileId);
+    await targets.fileOwners?.delete?.(attachment.fileId);
+  }
+  if (!targets.store.delete) {
+    throw new Error(
+      `Cannot delete attachment ${attachment.id}: the controller's attachment store has no delete().`,
+    );
+  }
+  await targets.store.delete({ key: attachment.scopeKey }, attachment.id);
 }
 
 /**
@@ -601,6 +744,23 @@ export class MemoryAttachmentStore implements AttachmentStore {
       return null;
     }
     return row;
+  }
+
+  async delete(scope: AttachmentScope, id: string): Promise<void> {
+    assertScope(scope);
+    const row = this.rows.get(id);
+    if (row && row.scopeKey === scope.key) {
+      this.rows.delete(id);
+    }
+  }
+
+  async expired(now: Date, limit: number): Promise<Attachment[]> {
+    const found: Attachment[] = [];
+    for (const row of this.rows.values()) {
+      if (found.length >= limit) break;
+      if (isExpired(row, now.getTime())) found.push(row);
+    }
+    return found;
   }
 
   /** Test and dev affordance: how many rows are held, across every scope. */
