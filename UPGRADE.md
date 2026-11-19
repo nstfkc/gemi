@@ -13,7 +13,29 @@ A `worker = true` job used to hang: its thread imported `app/bootstrap.ts` (`dis
 
 What to check:
 
-- **A worker job written for the array shape** (`run(args)` reading `args[0]`): take the arguments as declared instead. Queued listeners with `worker = true` handle both shapes and need nothing.
+- **Breaking for every app with `worker = true` jobs, even though this is a patch release.** `run` now gets its arguments spread, as on the main thread. Before, it got the whole argument list as one array, so a worker job that ran (through an app's own `app/bootstrap.ts`) had to unpack it. Rewrite such a job to take its arguments as declared:
+
+  ```ts
+  // Dispatched as ResizeImage.dispatch(imageId, 800)
+
+  // Before 0.222.1: the thread passed the list as one array.
+  class ResizeImage extends Job {
+    static name = "ResizeImage";
+    worker = true;
+    run(args: [string, number]) {
+      const [imageId, width] = args;
+    }
+  }
+
+  // From 0.222.1: spread, like every other job.
+  class ResizeImage extends Job {
+    static name = "ResizeImage";
+    worker = true;
+    run(imageId: string, width: number) {}
+  }
+  ```
+
+  Jobs without `worker = true` are not affected. Queued listeners with `worker = true` accept both shapes and need nothing.
 
 # 0.222.0
 
