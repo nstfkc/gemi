@@ -704,3 +704,46 @@ describe("removeApiGroupSegments", () => {
     expect(removeApiGroupSegments(input)).toBe(expected);
   });
 });
+
+describe("createFlatApiRoutes - CORS policies (#913)", () => {
+  class ChatController extends AgentController {
+    agent = { name: "stub", tools: [], provider: {} } as any;
+  }
+
+  class Widget extends ApiRouter {
+    cors = { origins: "*" };
+    routes = {
+      "/chat": this.agent(ChatController),
+      "/files": this.stream(() => new Blob([])),
+      "/own": this.post(() => ({})).cors({ origins: "https://shop.example" }),
+      "/off": this.post(() => ({})).cors(false),
+    };
+  }
+
+  class Root extends ApiRouter {
+    routes = {
+      "/widget": Widget,
+      "/plain": this.post(() => ({})),
+    };
+  }
+
+  const routes = createFlatApiRoutes({ "/": Root });
+
+  test("a router's policy reaches its agent route's paths and a stream's HEAD", () => {
+    for (const path of ["/widget/chat", "/widget/chat/attach", "/widget/chat/stop", "/widget/chat/files"]) {
+      expect(routes[path].POST.cors?.origins, path).toBe("*");
+    }
+    expect(routes["/widget/files"].GET.cors?.origins).toBe("*");
+    expect(routes["/widget/files"].HEAD.cors?.origins).toBe("*");
+  });
+
+  test("a route's own policy, or false, replaces it", () => {
+    expect(routes["/widget/own"].POST.cors?.origins).toEqual(["https://shop.example"]);
+    expect(routes["/widget/off"].POST.cors).toBeUndefined();
+  });
+
+  test("a route outside the router has none, and neither does OPTIONS", () => {
+    expect(routes["/plain"].POST.cors).toBeUndefined();
+    expect(routes["/widget/chat"].OPTIONS.cors).toBeUndefined();
+  });
+});

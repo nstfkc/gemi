@@ -1,3 +1,19 @@
+# 0.221.0
+
+## CORS for api routes and island assets in sandboxed frames (#913, #1311)
+
+**New API (minor version).** See [Routing: CORS for API routes](docs/routing.md#cors-for-api-routes) and [Static views: embedding in a sandboxed frame](docs/static-views-and-islands.md#embedding-in-a-sandboxed-frame).
+
+- `.cors(policy)` on an api route (`this.get/post/...`, `this.file`, `this.stream`, `this.proxy`) and `cors = policy` on an `ApiRouter` (covering its routes and the routers it mounts, `this.agent()` included). `CorsPolicy` is `{ origins: "*" | origin | origin[], methods?, headers?, exposeHeaders?, credentials?, maxAge? }`, exported from `gemi/http`. With one, gemi answers the route's preflight itself (before any middleware) and puts the CORS headers on every response it sends, middleware refusals included. `false` turns an inherited policy off. Opt-in only: nothing changes for a route without a policy.
+- `Origin: null` (a sandboxed frame) is admitted by `"*"` or `"null"` in a list, and never gets `Access-Control-Allow-Credentials`. `credentials: true` with `"*"` or `"null"` is refused when the routes are built. Authenticate such callers with a signed token in a header or the body.
+- `route.view.assetCors` (and a `route.domains` group's `view.assetCors`), default `false`: `true` sends the build's `/assets/*` files (and asset-fallback files) with `Access-Control-Allow-Origin: *` on those hosts, so islands hydrate in a sandboxed frame. `App.staticFiles()` answers `assetCors` too.
+- In `gemi dev`, `/refresh.js` and the dev entry are always sent with `Access-Control-Allow-Origin: *`.
+
+What to check:
+
+- `CorsMiddleware` no longer sends `Access-Control-Allow-Credentials` to `Origin: null`, even under an explicit `"null"` key. If you relied on that, move the caller to a token.
+- A test that compares `app.staticFiles(req)` with `toEqual` now sees an `assetCors` key.
+
 # 0.220.0
 
 ## Item sources: `step.source` and `ItemSource` (#1309)

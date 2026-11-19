@@ -28,6 +28,7 @@ import {
 import { RangeNotSatisfiableError } from "./errors";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
+import { normalizeCorsPolicy, type CorsPolicy, type NormalizedCorsPolicy } from "./corsPolicy";
 import { withheldFromUpstream } from "./requestDomain";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -193,6 +194,23 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
     this.middlewares = toMiddlewareList(middlewareList);
     return this;
   }
+
+  /** See `cors()`. `undefined` takes the enclosing router's. */
+  corsPolicy?: NormalizedCorsPolicy | false;
+
+  /**
+   * Answers this route's CORS preflight and puts CORS headers on every
+   * response it sends, refusals included (#913). `false` turns off a policy
+   * the enclosing router set. See `CorsPolicy`.
+   *
+   * ```ts
+   * "/messages": this.post(WidgetController, "send").cors({ origins: "*", headers: ["content-type", "authorization"] }),
+   * ```
+   */
+  cors(policy: CorsPolicy | false) {
+    this.corsPolicy = policy === false ? false : normalizeCorsPolicy(policy, `a ${this.method} route`);
+    return this;
+  }
 }
 
 /**
@@ -216,6 +234,14 @@ export class ProxyHandler {
 
   middleware(middlewareList: MiddlewareInput) {
     this.middlewares = toMiddlewareList(middlewareList);
+    return this;
+  }
+
+  /** See `RouteHandler.cors`. */
+  corsPolicy?: NormalizedCorsPolicy | false;
+
+  cors(policy: CorsPolicy | false) {
+    this.corsPolicy = policy === false ? false : normalizeCorsPolicy(policy, "a proxy route");
     return this;
   }
 
@@ -261,6 +287,9 @@ export class FileHandler {
    * does not.
    */
   declare middleware: (middlewareList: string[]) => FileHandler;
+
+  /** See `RouteHandler.cors`. */
+  declare cors: (policy: CorsPolicy | false) => FileHandler;
 
   /**
    * Types only, never set: what `CreateFileRPC` finds a file route by, so
@@ -337,6 +366,9 @@ export class StreamHandler {
    * does not.
    */
   declare middleware: (middlewareList: string[]) => StreamHandler;
+
+  /** See `RouteHandler.cors`. */
+  declare cors: (policy: CorsPolicy | false) => StreamHandler;
 
   /** Types only, never set: see `FileHandler.__fileRoute`. */
   declare readonly __fileRoute: "stream";
@@ -428,6 +460,17 @@ export class ApiRouter {
   static __brand = "ApiRouter";
   public routes: ApiRoutes = {};
   public middlewares: string[] = [];
+  /**
+   * A CORS policy for every route of this router and the routers it mounts
+   * (#913): their preflights are answered and their responses, refusals
+   * included, carry the headers. A route's `.cors()` or a nested router's own
+   * `cors` replaces it, and `false` turns it off. Unset, the enclosing
+   * router's applies; gemi has no app-wide default. See `CorsPolicy`.
+   *
+   * Typed `boolean` so `cors = false` typechecks without `as const`; `true`
+   * is no policy and is refused when the routes are built.
+   */
+  public cors?: CorsPolicy | boolean;
   public middleware(_req: HttpRequest<any, any>): MiddlewareReturnType {}
 
   public get<Input, Output, Params>(
