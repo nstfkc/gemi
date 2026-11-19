@@ -18,6 +18,44 @@ What to check:
 - **A key longer than 191 characters, a limit that isn't a whole number, or a key repeated in one list** now fails the attempt with a message that says so.
 - **A throw from `concurrency` or `throttle`** now fails the attempt like a throw from `run` (with `onFail`, retries and dead letters). It used to escape the queue's loop.
 - **A custom `QueueDriver`** keeps the old lock-based job concurrency until it implements `acquireSlots` and `releaseSlots`. A workflow with `concurrency` fails on such a driver.
+# 0.222.1
+
+## `worker = true` jobs run again (#1318)
+
+**Fix (patch version).** See [Worker-thread jobs](docs/jobs-and-queues.md#worker-thread-jobs--worker--true).
+
+A `worker = true` job used to hang: its thread imported `app/bootstrap.ts` (`dist/server/bootstrap.mjs` in production), which no template has and no build emitted, and a thread that failed to load never settled the job. Now:
+
+- The thread boots from `app/kernel/Kernel.ts` when the app has no `app/bootstrap.ts`. An app that has one keeps using it, and `gemi build` now emits `dist/server/bootstrap.mjs` from it.
+- A thread that fails to load or throws outside the job fails the attempt, and the thread is ended after every job.
+- `run` gets its arguments spread (`run(a, b)`), as on the main thread. It used to get them as one array (`run([a, b])`).
+- `QueueManager.dispatchJob(name, args)` throws for a name nothing is registered under, instead of returning `undefined`.
+
+What to check:
+
+- **Breaking for every app with `worker = true` jobs, even though this is a patch release.** `run` now gets its arguments spread, as on the main thread. Before, it got the whole argument list as one array, so a worker job that ran (through an app's own `app/bootstrap.ts`) had to unpack it. Rewrite such a job to take its arguments as declared:
+
+  ```ts
+  // Dispatched as ResizeImage.dispatch(imageId, 800)
+
+  // Before 0.222.1: the thread passed the list as one array.
+  class ResizeImage extends Job {
+    static name = "ResizeImage";
+    worker = true;
+    run(args: [string, number]) {
+      const [imageId, width] = args;
+    }
+  }
+
+  // From 0.222.1: spread, like every other job.
+  class ResizeImage extends Job {
+    static name = "ResizeImage";
+    worker = true;
+    run(imageId: string, width: number) {}
+  }
+  ```
+
+  Jobs without `worker = true` are not affected. Queued listeners with `worker = true` accept both shapes and need nothing.
 
 # 0.222.0
 

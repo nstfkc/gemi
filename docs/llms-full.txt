@@ -21549,6 +21549,15 @@ An attempt whose process died before it finished still counts. With a driver tha
 | `backoff` | `number \| number[]` | `0` | Milliseconds before a retry. An array gives one per retry, its last entry repeating. |
 | `worker` | `boolean` | `false` | When `true`, `run` executes in a separate Worker thread (a fresh cloned app instance) instead of the main event loop — use for CPU-bound work you want off the main thread. |
 
+### Worker-thread jobs — `worker = true`
+
+A job with `worker = true` runs `run` in a Worker thread of its own, which boots its own copy of the application and is ended after the job. Use it for CPU-bound work you want off the main event loop.
+
+- **The thread boots from `app/kernel/Kernel.ts`**, as `gemi queue:work` does, so the job needs nothing beyond the kernel the server uses. If the app has an `app/bootstrap.ts` that exports `app` (an `App` from `gemi/app`), the thread uses that instead: from source under `gemi dev`, and from `dist/server/bootstrap.mjs` in production, which `gemi build` emits when `app/bootstrap.ts` exists.
+- **`run` gets its arguments spread**, as for any other job.
+- **A thread that cannot load the application**, or a job name the thread's registry doesn't have, fails the attempt with the error. The job then retries and dead-letters like any other.
+- `release`, `fail` and batches are not available, because `run` happens in another thread.
+
 ## Dispatching
 
 Call the static `dispatch` method with exactly the arguments your `run` method takes — the call is fully typed against `run`'s signature.
@@ -21836,7 +21845,7 @@ A deployment that splits web and worker runs the same build with the same config
 - **The driver has to be one every process can reach**, such as `"database"`. With the memory driver a worker is pointless: a dispatch never leaves the process that made it, so a worker never sees a job. `gemi queue:work` refuses to start on the memory driver and exits `1`. A server ignores `GEMI_QUEUE_CLAIM=off` on the memory driver, with a warning at boot, because nothing else could run its jobs.
 - **Each worker claims up to `concurrency` jobs at once**, so total job capacity is workers × `concurrency`. Pick `visibilityTimeout` and `concurrency` for the worker; the web process no longer uses them when it does not claim.
 - **The cron scheduler does not start in a worker**, so adding workers does not add a copy of every cron job. `gemi queue:work` sets `GEMI_NO_SCHEDULE=1` unless the environment already sets it; set `GEMI_NO_SCHEDULE=0` to run the schedule in a worker instead.
-- **`NODE_ENV` is inherited**, as for `gemi run`, not forced to production as for `gemi start`. Set `NODE_ENV=production` in the worker's deployment. A `worker = true` job loads `dist/server/bootstrap.mjs` in production, so the worker needs the same `gemi build` output as the server.
+- **`NODE_ENV` is inherited**, as for `gemi run`, not forced to production as for `gemi start`. Set `NODE_ENV=production` in the worker's deployment. A `worker = true` job's thread boots the application from the same files as the worker (see [Worker-thread jobs](#worker-thread-jobs--worker--true)), so the worker needs the same `gemi build` output and `app/` source as the server.
 
 `SIGTERM` or `SIGINT` drains a worker the way it drains a server (see [Graceful shutdown](./configuration.md#graceful-shutdown)). The worker stops claiming at once and leaves waiting jobs to other workers. It waits up to `GEMI_SHUTDOWN_TIMEOUT` (20 seconds) for the jobs it is running, where a server waits for its requests, and then runs every provider's `shutdown()` within `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` (5 seconds). In that step the queue waits for any job still running and names it. The exit code is `0` if no job was left running and every provider finished in time, and `1` otherwise. `GEMI_SHUTDOWN_DELAY` is not used, because no load balancer routes to a worker. A job cut off by the exit is retried once its lease runs out, as it is for a server.
 
