@@ -403,3 +403,54 @@ describe("step.each on a queue that keeps nothing across restarts", () => {
     expect(String(warn.mock.calls[0]![0])).toContain("memory driver");
   });
 });
+
+describe("Workflow.stream", () => {
+  test("an SSE response of the workflow's updates, from a cursor", async () => {
+    class Waits extends Workflow {
+      static name = "Waits";
+      async run(step: Step, secret: string) {
+        await step.waitFor("go");
+        return secret;
+      }
+    }
+    const { queue, inApp } = await booted([Waits]);
+    queue.start();
+    try {
+      const id = await inApp(() => Waits.start("hidden"));
+      await until(async () => (await queue.workflows.find(id))?.status === "waiting");
+      await sleep(300);
+      expect(await inApp(() => Workflow.channel(id))).toBe(`gemi:workflow:${id}`);
+      const cursor = await inApp(() => Workflow.cursor(id));
+      const abort = new AbortController();
+      const response = inApp(() =>
+        Workflow.stream(new Request("http://app.test/progress", { signal: abort.signal }), id, {
+          cursor,
+        }),
+      );
+      expect(response.headers.get("content-type")).toContain("text/event-stream");
+      await inApp(() => Workflow.signal(id, "go"));
+
+      const reader = response.body!.getReader();
+      let text = "";
+      while (!text.includes('"status":"completed"')) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += new TextDecoder().decode(value);
+      }
+      abort.abort();
+      const updates = text
+        .split("\n\n")
+        .map((frame) => frame.split("\n").find((line) => line.startsWith("data: ")))
+        .filter((line): line is string => line !== undefined)
+        .map((line) => JSON.parse(line.slice(6)))
+        .filter((message) => message.type === "change")
+        .map((message) => message.data);
+      expect(updates.at(-1)).toMatchObject({ id, status: "completed", progress: 1 });
+      // Never the arguments or the result.
+      expect(text).not.toContain("hidden");
+    } finally {
+      await queue.drain(1_000);
+      await queue.workflows.close();
+    }
+  });
+});

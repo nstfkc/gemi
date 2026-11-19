@@ -22269,6 +22269,52 @@ const [profile, invoices] = await Promise.all([
 
 If one of them suspends the workflow (a sleep, say), the others still finish and store their results in that pass.
 
+## Following a workflow: `Workflow.stream` and `useWorkflow`
+
+Every change to a workflow (a step starting or ending, an item of a `step.each`, a sleep, a signal, the end) is published to its [change feed](./change-feed.md) channel, `gemi:workflow:<id>` (`Workflow.channel(id)`). Publishes are coalesced: at most one per workflow every 250 ms, each carrying the workflow as it is then, so the last change is always published. What is published is a `WorkflowUpdate`: the status `Workflow.find` returns without `args` and `result`, which can hold what a browser must not see.
+
+On the server, `Workflow.subscribe(id, { signal? })` yields the workflow as it is now, then each newer update, and ends after the one that ended it:
+
+```typescript
+for await (const update of Workflow.subscribe(workflowId, { signal })) {
+  console.log(update.status, update.progress);
+}
+```
+
+In the browser, a route answers with `Workflow.stream(req, id)`, an SSE response. Authorise the read first, as for any route:
+
+```typescript
+// app/http/routes/api.ts
+"/imports/:importId/progress": this.get(async (req: HttpRequest<{}, { importId: string }>) => {
+  const record = await ProductImport.findFirst({ where: { id: req.params.importId, userId: (await Auth.user()).id } });
+  if (!record) return new Response(null, { status: 404 });
+  return Workflow.stream(req, record.workflowId);
+}),
+```
+
+The view that renders the page passes the workflow and a cursor along, so the client starts from what the view showed:
+
+```typescript
+const workflow = await Workflow.find(record.workflowId);
+return { workflow, workflowCursor: await Workflow.cursor(record.workflowId) };
+```
+
+```tsx
+import { useWorkflow } from "gemi/client";
+
+const { workflow } = useWorkflow(
+  "/imports/:importId/progress",
+  { params: { importId } },
+  { initial: data.workflow, cursor: data.workflowCursor },
+);
+const rows = workflow?.steps.find((step) => step.key === "rows")?.items;
+// <progress value={workflow?.progress ?? 0} />, `${rows?.done} of ${rows?.total}`
+```
+
+`useWorkflow` keeps the later of two updates (by `updatedAt`), reconnects and resumes from its cursor like [`useSubscription`](./change-feed.md#following-a-route-usesubscription), and disconnects once the workflow has ended. `onReset` is called when it was away longer than the feed keeps changes; the next update brings the whole status again.
+
+The channel goes through the application's change feed, so it reaches every instance that shares it: use the feed's [database driver](./change-feed.md#the-database-driver) when the instance that runs the workflow is not the one serving the stream.
+
 ## Cancelling
 
 `Workflow.cancel(id)` marks the workflow `cancelling` and then:

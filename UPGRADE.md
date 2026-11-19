@@ -1,4 +1,4 @@
-# 0.219.0
+# 0.220.0
 
 ## CORS for api routes and island assets in sandboxed frames (#913, #1311)
 
@@ -13,6 +13,20 @@ What to check:
 
 - `CorsMiddleware` no longer sends `Access-Control-Allow-Credentials` to `Origin: null`, even under an explicit `"null"` key. If you relied on that, move the caller to a token.
 - A test that compares `app.staticFiles(req)` with `toEqual` now sees an `assetCors` key.
+
+# 0.219.0
+
+## Following a workflow: `Workflow.stream` and `useWorkflow` (#1309)
+
+**New API (minor version).** See [Following a workflow](docs/workflows.md#following-a-workflow-workflowstream-and-useworkflow).
+
+- Every change to a workflow is published to the change feed channel `gemi:workflow:<id>` (`Workflow.channel(id)`): a `WorkflowUpdate` (the `Workflow.find` status without `args` and `result`), at most one per workflow every 250 ms, the last change always included.
+- `Workflow.stream(req, id, options?)` (SSE), `Workflow.cursor(id)` and `Workflow.subscribe(id, { signal? })` on the server; `useWorkflow(route, { params }, { initial?, cursor?, enabled?, pauseWhenHidden?, onReset? })` in `gemi/client`, returning `{ workflow, status, error }`.
+- New exports: `WorkflowUpdate` (both), `workflowEnded` (`gemi/services`), `UseWorkflowConfig`, `WorkflowStepStatus` and `EachProgress` (`gemi/client`). `WorkflowStatus` is now `WorkflowUpdate & { args, result }`: the same fields as before.
+
+What to check:
+
+- Workflows now write to the application's change feed. On the feed's database driver that is one row per publish (at most four a second per running workflow), pruned like any other change; nothing else changes.
 
 # 0.218.0
 

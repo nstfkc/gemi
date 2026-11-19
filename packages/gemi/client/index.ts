@@ -34,6 +34,13 @@ export type { FetchedBlob, FetchedText, FetchFileOptions, FilePath } from "./fet
 export { useSetQueryData } from "./useSetQueryData";
 export type { QueryTarget, QueryUpdate } from "./useSetQueryData";
 export { useSubscription } from "./useSubscription";
+export { useWorkflow } from "./useWorkflow";
+export type {
+  EachProgress,
+  UseWorkflowConfig,
+  WorkflowStepStatus,
+  WorkflowUpdate,
+} from "./useWorkflow";
 export { useChannel, useChannelInvalidate } from "./useChannel";
 export type {
   ChannelPattern,
