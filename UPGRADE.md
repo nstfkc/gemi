@@ -18,6 +18,7 @@ What to check:
 - **A key longer than 191 characters, a limit that isn't a whole number, or a key repeated in one list** now fails the attempt with a message that says so.
 - **A throw from `concurrency` or `throttle`** now fails the attempt like a throw from `run` (with `onFail`, retries and dead letters). It used to escape the queue's loop.
 - **A custom `QueueDriver`** keeps the old lock-based job concurrency until it implements `acquireSlots` and `releaseSlots`. A workflow with `concurrency` fails on such a driver.
+
 # 0.222.1
 
 ## `worker = true` jobs run again (#1318)
