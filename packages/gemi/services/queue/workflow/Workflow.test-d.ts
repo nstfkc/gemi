@@ -2,6 +2,7 @@ import { describe, expectTypeOf, test } from "vitest";
 
 import type { BatchStatus } from "../batch";
 import { Job } from "../Job";
+import type { SourceRef } from "./ItemSource";
 import type { EachProblem, EachSummary, ItemContext, Step } from "./Step";
 import { Workflow, type WorkflowStatus } from "./Workflow";
 
@@ -41,6 +42,15 @@ class ImportSite extends Workflow {
       },
     );
     expectTypeOf(summary).toEqualTypeOf<EachSummary>();
+    const rows = await step.source("source", async function* () {
+      yield { line: 1, name: "a" };
+    });
+    expectTypeOf(rows).toEqualTypeOf<SourceRef<{ line: number; name: string }>>();
+    await step.each("from-source", { source: rows }, (row) => {
+      expectTypeOf(row).toEqualTypeOf<{ line: number; name: string }>();
+    });
+    // @ts-expect-error a source and a count are two ways of saying the same thing
+    await step.each("both", { source: rows, count: 1 }, () => {});
     // @ts-expect-error a key is a string or a number
     await step.each("bad-key", { count: 1, item: () => 1, key: () => ({}) }, () => {});
     await step.sleep("settle", "30s");

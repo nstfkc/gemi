@@ -246,8 +246,36 @@ export interface WorkflowStore {
   ): Promise<ItemRecord[]>;
 
   /**
+   * Adds rows to the item source `sourceId` (`ItemSource`, `step.source`),
+   * owned by `workflowId` (deleted with it by `prune`) or by nobody. A store
+   * that has it supports item sources, with `readSource` and `deleteSource`.
+   */
+  writeSource?(
+    sourceId: string,
+    workflowId: string | null,
+    rows: Array<{ index: number; payload: string }>,
+  ): Promise<void>;
+
+  /** The rows of `sourceId` whose index is from `from` up to, not including, `to`, by index. */
+  readSource?(
+    sourceId: string,
+    from: number,
+    to: number,
+  ): Promise<Array<{ index: number; payload: string }>>;
+
+  /** Deletes the rows of `sourceId`, and resolves to how many there were. */
+  deleteSource?(sourceId: string): Promise<number>;
+
+  /**
+   * Deletes the sources that belong to no workflow and were written more
+   * than `olderThanMs` ago, and resolves to how many rows.
+   */
+  pruneSources?(olderThanMs: number): Promise<number>;
+
+  /**
    * Deletes workflows that ended (completed, failed or cancelled) more than
-   * `olderThanMs` ago, with their steps and items, and resolves to how many.
+   * `olderThanMs` ago, with their steps, items and item sources, and resolves
+   * to how many.
    */
   prune?(olderThanMs: number): Promise<number>;
 }
