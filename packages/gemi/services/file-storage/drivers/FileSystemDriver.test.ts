@@ -74,7 +74,7 @@ describe("FileSystemDriver object paths", () => {
     const root = await mkdtemp(join(tmpdir(), "gemi-fs-path-"));
     try {
       const driver = new FileSystemDriver(join(root, "storage"));
-      for (const name of ["../outside.txt", join(root, "outside.txt")]) {
+      for (const name of ["../outside.txt", join(root, "outside.txt"), join(root, "storage-sibling", "x")]) {
         await expect(driver.read(name)).rejects.toBeInstanceOf(FileNotFoundError);
         await expect(driver.fetch({ name })).rejects.toBeInstanceOf(FileNotFoundError);
         await expect(driver.size(name)).rejects.toBeInstanceOf(FileNotFoundError);
@@ -84,6 +84,17 @@ describe("FileSystemDriver object paths", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test("refuses NUL bytes in object names for every file operation", async () => {
+    const driver = new FileSystemDriver();
+    const name = "a\0b";
+    await expect(driver.read(name)).rejects.toBeInstanceOf(FileNotFoundError);
+    await expect(driver.fetch(name)).rejects.toBeInstanceOf(FileNotFoundError);
+    await expect(driver.size(name)).rejects.toBeInstanceOf(FileNotFoundError);
+    await expect(driver.put({ name, body: new Blob() })).rejects.toThrow(/NUL byte/);
+    await expect(driver.putStream({ name, body: new Blob().stream() })).rejects.toThrow(/NUL byte/);
+    await expect(driver.delete(name)).rejects.toThrow(/NUL byte/);
   });
 });
 

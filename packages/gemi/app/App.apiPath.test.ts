@@ -101,7 +101,7 @@ describe("App.fetch routes by the /api segment", () => {
     expect(await res.json()).toEqual({ route: "/users/:id", id: "1" });
   });
 
-  test("a stream route serves nested assets and refuses names outside its storage folder", async () => {
+  test("a stream route serves nested assets and refuses invalid storage names", async () => {
     const root = await mkdtemp(join(tmpdir(), "gemi-api-assets-"));
     try {
       const driver = new FileSystemDriver(join(root, "assets"));
@@ -118,9 +118,11 @@ describe("App.fetch routes by the /api segment", () => {
       expect(await valid.text()).toBe("notes");
 
       const openFile = vi.spyOn(Bun, "file");
-      const refused = await requestAsset("../outside.txt");
-      expect(refused.status).toBe(404);
-      expect((await refused.json()).error.kind).toBe("not_found");
+      for (const invalidName of ["../outside.txt", "a\0b"]) {
+        const refused = await requestAsset(invalidName);
+        expect(refused.status).toBe(404);
+        expect((await refused.json()).error.kind).toBe("not_found");
+      }
       expect(openFile).not.toHaveBeenCalled();
     } finally {
       await rm(root, { recursive: true, force: true });

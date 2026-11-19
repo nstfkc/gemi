@@ -58,8 +58,10 @@ export class FileSystemDriver extends FileStorageDriver {
     const root = resolve(this.folderPath);
     const path = resolve(root, name);
     const rel = relative(root, path);
-    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    const hasNul = name.includes("\0");
+    if (hasNul || !rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       if (operation === "read") throw new FileNotFoundError(name);
+      if (hasNul) throw new Error(`Refusing to ${operation} an object name containing a NUL byte`);
       throw new Error(`Refusing to ${operation} "${name}": it is outside the storage folder`);
     }
     return path;
