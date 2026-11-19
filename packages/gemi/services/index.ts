@@ -216,7 +216,9 @@ export {
   type WorkflowClass,
   type WorkflowStatus,
   type WorkflowStepStatus,
+  type WorkflowUpdate,
 } from "./queue/workflow/Workflow";
+export { workflowEnded } from "./queue/workflow/wire";
 export {
   Step,
   StepFailedError,
