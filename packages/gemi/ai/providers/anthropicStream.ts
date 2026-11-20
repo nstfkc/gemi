@@ -25,6 +25,12 @@ import { emptyUsage, sseMessages } from "./stream";
 type ParseOptions = {
   /** The agent asked for an `output` schema, so text is the answer's JSON. */
   structuredOutput?: boolean;
+  /**
+   * Told the usage so far each time the stream reports it (`message_start`,
+   * `message_delta`), so a caller that stops reading before `message_stop`
+   * (a tool call that ran away in white space, #1334) still has it.
+   */
+  onUsage?: (usage: Usage) => void;
 };
 
 type OpenBlock = { type: string; id?: string; name?: string; args: string; signature: string };
@@ -64,6 +70,7 @@ export async function* parseMessagesStream(
         const start = payload.message ?? {};
         if (typeof start.model === "string" && start.model) model = start.model;
         usage = mergeUsage(usage, start.usage);
+        options.onUsage?.(toAnthropicUsage(usage));
         break;
       }
 
@@ -152,6 +159,7 @@ export async function* parseMessagesStream(
         if (typeof payload.delta?.stop_reason === "string") stopReason = payload.delta.stop_reason;
         if (payload.delta?.stop_details) stopDetails = payload.delta.stop_details;
         usage = mergeUsage(usage, payload.usage);
+        options.onUsage?.(toAnthropicUsage(usage));
         break;
       }
 

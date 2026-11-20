@@ -1,4 +1,4 @@
-# 0.225.0
+# 0.226.0
 
 ## View route parameters are decoded once (#1322)
 
@@ -17,6 +17,30 @@ status 404 on a page load, and on an in-app navigation too.
 - IDs that encoding leaves alone, such as `42` or `my-note`, are unchanged.
 - `<Page params>` in `gemi/testing` takes decoded values, as `useParams()`
   returns them.
+
+# 0.225.1
+
+## A tool call that runs away in white space ends at once (#1334)
+
+**Fix (patch version). Nothing to change in an existing app.** See [Timeouts](docs/ai-providers.md#timeouts).
+
+- New provider option `maxToolArgumentWhitespace` (default 1 000, `0` turns it off) on every provider that streams tool arguments: OpenAI, Azure OpenAI, Anthropic and Azure Anthropic. When a tool call's arguments end in a longer run of white space outside strings, the call ends at once instead of streaming until `streamMaxDurationMs`.
+- Arguments that are already whole JSON: the call is finished as written (trimmed) and the answer ends with finish reason `stop`, with the usage the stream had reported so far (zeros on the OpenAI and Azure OpenAI streams, which report usage only at their end).
+- Arguments that are not: the call is cut like one past `maxToolArgumentChars`. It is retried under `maxRetries`, then fails the run with `toolArgumentsTooLong` or, under `onToolArgumentsTooLong: { toolError: n }`, goes back to the model as that tool's error. `ToolArgumentsTooLong` and `ToolArgumentsTooLongError` gain an optional `whitespace` field (the length of the run), and the error message names `maxToolArgumentWhitespace`.
+- Either way one warning is logged (`Log.warning`, or `console.warn` outside an app).
+- An app that wraps a provider to stop such streams itself can remove the wrapper.
+
+# 0.225.0
+
+## Prefilled queries and invalidation by key (#1329)
+
+**New API (minor version). Nothing to change in an existing app.** See [Data the handler already has](docs/data-fetching.md#data-the-handler-already-has-queryprefill) and [Saying what a mutation changes](docs/data-fetching.md#saying-what-a-mutation-changes-invalidates).
+
+- `Query.prefill(path, options, data)` in a view or layout handler hands the page data the handler already resolved, under the query's key. The client's `useQuery` with the same path, params and search renders it during SSR and hydrates it with no request. The route's handler is not run.
+- `invalidates` on `useMutation`, `usePost`/`usePut`/`usePatch`/`useDelete` and `useUpload` names the queries a successful mutation makes out of date: a path (`"/posts"`, every search variant), one variant (`"/posts?status=open"`) or a prefix (`"/posts/*"`). Mounted readers refetch, the rest are marked stale.
+- `Query.invalidate(...keys)` in an API handler names them from the server, in the `x-gemi-invalidate` response header. The mutation hooks honour it on every answer. A proxy or CORS setup that filters response headers has to let it through (same-origin `/api` requests need nothing).
+- `useInvalidate()` does the same from anywhere on the client.
+- Code that builds a `QueryManagerContext` value by hand needs the new `allResources` member.
 
 # 0.224.0
 

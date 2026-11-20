@@ -2327,6 +2327,8 @@ export class ToolArgumentsTooLongError extends AgentRunError {
   declare readonly toolCallId: string;
   readonly limit: number;
   readonly chars: number;
+  /** See `ToolArgumentsTooLong.whitespace` (#1334). */
+  readonly whitespace?: number;
 
   constructor(
     result: AgentRunResult<ToolShapes, unknown> & {
@@ -2340,6 +2342,7 @@ export class ToolArgumentsTooLongError extends AgentRunError {
     this.toolCallId = cut.toolCallId;
     this.limit = cut.limit;
     this.chars = cut.chars;
+    if (cut.whitespace !== undefined) this.whitespace = cut.whitespace;
   }
 }
 
@@ -4355,7 +4358,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       status: "error",
       error: {
         code: "invalid_tool_input",
-        message: `The arguments for "${cut.tool}" were cut off after more than ${cut.limit} characters, so the call did not run. Split the work over smaller calls.`,
+        message:
+          cut.whitespace !== undefined
+            ? `The arguments for "${cut.tool}" ran into more than ${cut.limit} characters of white space before they were complete, so the call did not run. Write the arguments again as compact JSON.`
+            : `The arguments for "${cut.tool}" were cut off after more than ${cut.limit} characters, so the call did not run. Split the work over smaller calls.`,
         toolCallId: part.toolCallId,
         retryable: true,
       },

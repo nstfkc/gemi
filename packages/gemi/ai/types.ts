@@ -194,6 +194,12 @@ export type ToolArgumentsTooLong = {
   toolCallId: string;
   limit: number;
   chars: number;
+  /**
+   * Set when the call was cut because its arguments ran away in white space
+   * (#1334) rather than at `maxToolArgumentChars`: the length of the run of
+   * white space it ended in. `limit` is then `maxToolArgumentWhitespace`.
+   */
+  whitespace?: number;
 };
 
 /**
