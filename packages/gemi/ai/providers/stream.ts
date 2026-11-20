@@ -90,6 +90,9 @@ type ParseOptions = {
    * final answer in the other, and only the caller knows which it asked for.
    */
   structuredOutput?: boolean;
+  /** See the Messages parser's. Never called here: a Responses stream reports
+   *  its usage only on its terminal frame. */
+  onUsage?: (usage: Usage) => void;
 };
 
 type PendingCall = { callId: string; name: string; namespace?: string; done: boolean };

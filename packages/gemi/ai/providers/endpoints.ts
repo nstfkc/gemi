@@ -50,6 +50,16 @@ export type ProviderConfig = {
    * legitimate call gets depends entirely on the app's tools.
    */
   maxToolArgumentChars?: number;
+  /**
+   * The longest run of white space, outside strings, that one tool call's
+   * arguments may end in while they stream (#1334), in characters. Past it the
+   * call is a runaway: whole JSON is finished as written (trimmed) and the
+   * answer ends there; otherwise the call is cut like one past
+   * `maxToolArgumentChars` (retried, then answered with the tool's error under
+   * `onToolArgumentsTooLong`). Default `DEFAULT_MAX_TOOL_ARGUMENT_WHITESPACE`
+   * (1,000); `0` turns it off. White space inside strings never counts.
+   */
+  maxToolArgumentWhitespace?: number;
   maxRetries?: number;
   /**
    * A patience budget for retryable failures, beyond the quick `maxRetries`
@@ -109,6 +119,8 @@ export type ProviderTarget = {
   streamMaxDurationMs: number;
   /** See `ProviderConfig.maxToolArgumentChars`. `0` is off. */
   maxToolArgumentChars: number;
+  /** See `ProviderConfig.maxToolArgumentWhitespace`. `0` is off. */
+  maxToolArgumentWhitespace: number;
   maxRetries: number;
   /** See `ProviderConfig.retry`. */
   retry?: ProviderRetryPolicy;
@@ -163,6 +175,20 @@ export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000;
  * reasoning effort, small tools) can set it much lower.
  */
 export const DEFAULT_STREAM_MAX_DURATION_MS = 300_000;
+
+/**
+ * How much white space a tool call's arguments may end in, outside strings,
+ * before the call counts as a runaway (#1334).
+ *
+ * Seen on an Azure deployment: a call wrote its arguments whole (1,764 and
+ * 6,287 characters) and then streamed about 150,000 characters of line breaks
+ * and spaces, an event every 0.1–0.5 s, so neither the idle limit nor anything
+ * but `streamMaxDurationMs` ended it, five minutes later. Real JSON, even
+ * pretty-printed and deeply nested, has a few dozen characters of white space
+ * between two tokens; white space inside strings (code, prose) is not counted
+ * at all, so 1,000 is far from anything a legitimate call writes.
+ */
+export const DEFAULT_MAX_TOOL_ARGUMENT_WHITESPACE = 1_000;
 
 export function env(name: string): string | undefined {
   return typeof process === "undefined" ? undefined : process.env?.[name];
@@ -264,6 +290,7 @@ export function openAITarget(
     streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     streamMaxDurationMs: config.streamMaxDurationMs ?? DEFAULT_STREAM_MAX_DURATION_MS,
     maxToolArgumentChars: config.maxToolArgumentChars ?? 0,
+    maxToolArgumentWhitespace: config.maxToolArgumentWhitespace ?? DEFAULT_MAX_TOOL_ARGUMENT_WHITESPACE,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
     ...retryPolicy(config),
   };
@@ -306,6 +333,7 @@ export function azureTarget(config: AzureConfig, defaults: TargetDefaults = {}):
     streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     streamMaxDurationMs: config.streamMaxDurationMs ?? DEFAULT_STREAM_MAX_DURATION_MS,
     maxToolArgumentChars: config.maxToolArgumentChars ?? 0,
+    maxToolArgumentWhitespace: config.maxToolArgumentWhitespace ?? DEFAULT_MAX_TOOL_ARGUMENT_WHITESPACE,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
     ...retryPolicy(config),
   };
@@ -416,6 +444,7 @@ function messagesTarget(
     streamIdleTimeoutMs: config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     streamMaxDurationMs: config.streamMaxDurationMs ?? DEFAULT_STREAM_MAX_DURATION_MS,
     maxToolArgumentChars: config.maxToolArgumentChars ?? 0,
+    maxToolArgumentWhitespace: config.maxToolArgumentWhitespace ?? DEFAULT_MAX_TOOL_ARGUMENT_WHITESPACE,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
     ...retryPolicy(config),
   };

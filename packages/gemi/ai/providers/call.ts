@@ -1,3 +1,4 @@
+import { Log } from "../../facades/Log";
 import type { ProviderEvent } from "../AgentProvider";
 import type { ProviderTarget } from "./endpoints";
 import {
@@ -7,6 +8,7 @@ import {
   ProviderStreamDurationError,
   ProviderStreamIdleError,
   ProviderTimeoutError,
+  ProviderToolArgumentsRunawayError,
   ProviderToolArgumentsTooLongError,
 } from "./errors";
 import {
@@ -54,6 +56,8 @@ export type ResponsesEndpoint = {
   streamMaxDurationMs?: number;
   /** See `ProviderConfig.maxToolArgumentChars`. Absent or `0` is off. */
   maxToolArgumentChars?: number;
+  /** See `ProviderConfig.maxToolArgumentWhitespace`. Absent or `0` is off. */
+  maxToolArgumentWhitespace?: number;
   maxRetries: number;
   /** See `ProviderConfig.retry`. */
   retry?: ProviderRetryPolicy;
@@ -84,6 +88,7 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
     streamIdleTimeoutMs: target.streamIdleTimeoutMs,
     streamMaxDurationMs: target.streamMaxDurationMs,
     maxToolArgumentChars: target.maxToolArgumentChars,
+    maxToolArgumentWhitespace: target.maxToolArgumentWhitespace,
     maxRetries: target.maxRetries,
     ...(target.retry ? { retry: target.retry } : {}),
   };
@@ -124,6 +129,17 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
  * `maxToolArgumentChars` bounds the argument text of one unfinished tool call.
  * Both abort the attempt with a retryable error, like the idle limit.
  *
+ * A CALL THAT RUNS AWAY IN WHITE SPACE ENDS AT ONCE (#1334). With
+ * `maxToolArgumentWhitespace` set, a tool call whose arguments end in a longer
+ * run of white space outside strings has stopped writing, whatever it keeps
+ * streaming. If its arguments are whole JSON, the attempt is aborted and the
+ * call is finished as written: a `tool-call` with the trimmed arguments, then
+ * a `stop` finish with the usage the stream had reported so far (none, on the
+ * Responses API, where it comes with the terminal frame). Otherwise it is cut
+ * like a call past `maxToolArgumentChars`, with a
+ * `ProviderToolArgumentsRunawayError` whose detail carries `whitespace`.
+ * Either way one warning is logged.
+ *
  * AN ATTEMPT THAT STREAMED ONLY UNFINISHED TOOL-CALL ARGUMENTS IS NOT
  * COMMITTED (#1169). `tool-call-delta` is yielded as it arrives, so a UI can
  * show a call filling in, but until a text, reasoning, output, tool-search or
@@ -153,7 +169,7 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
      */
     parse?: (
       chunks: AsyncIterable<string>,
-      options: { structuredOutput: boolean },
+      options: { structuredOutput: boolean; onUsage?: (usage: Usage) => void },
     ) => AsyncIterable<ProviderEvent>;
   },
 ): AsyncGenerator<ProviderEvent> {
@@ -179,6 +195,7 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
   const idleMs = endpoint.streamIdleTimeoutMs ?? 0;
   const maxMs = endpoint.streamMaxDurationMs ?? 0;
   const maxArgs = endpoint.maxToolArgumentChars ?? 0;
+  const maxSpace = endpoint.maxToolArgumentWhitespace ?? 0;
   const now = endpoint.now ?? Date.now;
   const startedAt = now();
 
@@ -280,7 +297,11 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
     // The tool calls this attempt has yielded argument deltas for, with how
     // much text each has streamed. Before `committed`, these are the only
     // things the consumer has seen, and a retry discards them.
-    const partial = new Map<string, number>();
+    const partial = new Map<string, ArgumentScan>();
+    // The usage the stream reported so far, for a call ended as a runaway.
+    let usageSoFar: Usage | undefined;
+    // A runaway call whose arguments were whole JSON, finished as written.
+    let finished: Extract<ProviderEvent, { type: "tool-call" }> | undefined;
     try {
       const body = boundedBody(
         response.body,
@@ -300,10 +321,38 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
       );
       for await (const event of parse(decodeChunks(body), {
         structuredOutput: params.structuredOutput,
+        onUsage: (usage) => (usageSoFar = usage),
       })) {
         if (event.type === "tool-call-delta") {
-          const chars = (partial.get(event.toolCallId) ?? 0) + event.argsDelta.length;
-          partial.set(event.toolCallId, chars);
+          let scan = partial.get(event.toolCallId);
+          if (!scan) partial.set(event.toolCallId, (scan = newScan()));
+          scanArguments(scan, event.argsDelta, maxSpace > 0);
+          const chars = scan.chars;
+          if (maxSpace > 0 && scan.space > maxSpace) {
+            const args = scan.text.trimEnd();
+            const whole = isJson(args);
+            warnRunaway(event.name, event.toolCallId, chars, scan.space, maxSpace, whole);
+            if (!whole) {
+              const error = new ProviderToolArgumentsRunawayError(
+                maxSpace,
+                event.name,
+                event.toolCallId,
+                chars,
+                scan.space,
+              );
+              attempt.abort(error);
+              throw error;
+            }
+            partial.delete(event.toolCallId);
+            finished = {
+              type: "tool-call",
+              toolCallId: event.toolCallId,
+              name: event.name,
+              args,
+              ...(event.namespace ? { namespace: event.namespace } : {}),
+            };
+            break;
+          }
           if (maxArgs > 0 && chars > maxArgs) {
             const error = new ProviderToolArgumentsTooLongError(
               maxArgs,
@@ -331,6 +380,9 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
         if (event.type === "error") failure = event.error;
         held.push(event);
       }
+      // Let go of the runaway's body (the loop released its lock), so the
+      // provider stops sending whatever the fetch does with the abort below.
+      if (finished) await body?.cancel().catch(() => {});
     } catch (error) {
       streamTimedOut = error instanceof ProviderTimeoutError;
       const normalized = normalizeProviderError(error);
@@ -352,6 +404,18 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
         { type: "error", error: normalized, ...(cut ? { toolArgumentsTooLong: cut } : {}) },
         { type: "finish", reason: "error", usage: emptyUsage() },
       );
+    }
+    if (finished) {
+      // The runaway call, finished as written: content, so it commits the
+      // attempt, and the answer ends with it. Calls still streaming beside it
+      // never finished and are taken back. The loop has let go of the body;
+      // the abort releases the connection.
+      attempt.abort();
+      if (!committed) yield* held.splice(0);
+      yield finished;
+      if (partial.size > 0) yield { type: "tool-call-discard", toolCallIds: [...partial.keys()] };
+      yield closing({ type: "finish", reason: "stop", usage: usageSoFar ?? emptyUsage() });
+      return;
     }
     if (committed) return;
 
@@ -413,6 +477,74 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
     for (const event of held) yield event.type === "finish" ? closing(event) : event;
     return;
   }
+}
+
+/** One tool call's arguments as they stream in, read just far enough to tell
+ *  white space inside a string from white space between tokens (#1334). */
+type ArgumentScan = {
+  chars: number;
+  /** The arguments so far; kept only while `maxToolArgumentWhitespace` is on. */
+  text: string;
+  inString: boolean;
+  escaped: boolean;
+  /** The run of white space outside strings the arguments end in. */
+  space: number;
+};
+
+function newScan(): ArgumentScan {
+  return { chars: 0, text: "", inString: false, escaped: false, space: 0 };
+}
+
+function scanArguments(scan: ArgumentScan, delta: string, track: boolean): void {
+  scan.chars += delta.length;
+  if (!track) return;
+  scan.text += delta;
+  for (const ch of delta) {
+    if (scan.inString) {
+      if (scan.escaped) scan.escaped = false;
+      else if (ch === "\\") scan.escaped = true;
+      else if (ch === '"') scan.inString = false;
+    } else if (ch === " " || ch === "\n" || ch === "\r" || ch === "\t") {
+      scan.space++;
+      continue;
+    } else if (ch === '"') {
+      scan.inString = true;
+    }
+    scan.space = 0;
+  }
+}
+
+function isJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** One structured warning per runaway call, through the app's logger when
+ *  there is one, as the agent's own warnings are. */
+function warnRunaway(
+  tool: string,
+  toolCallId: string,
+  chars: number,
+  whitespace: number,
+  limit: number,
+  whole: boolean,
+): void {
+  const message = `[gemi/ai] tool call "${tool}" ran away in white space (more than ${limit} characters, maxToolArgumentWhitespace); ${
+    whole ? "its arguments were whole JSON, so it was finished as written" : "its arguments were not whole JSON, so it was cut"
+  }`;
+  const metadata = { tool, toolCallId, chars, whitespace, limit, whole };
+  let logged = false;
+  try {
+    Log.warning(message, metadata);
+    logged = true;
+  } catch {
+    // No application to resolve a logger from.
+  }
+  if (!logged || process.env.NODE_ENV === "development") console.warn(message, metadata);
 }
 
 /**
