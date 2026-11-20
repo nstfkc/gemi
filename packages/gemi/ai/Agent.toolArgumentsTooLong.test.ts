@@ -173,6 +173,70 @@ test("calls that finished in the same step still run", async () => {
   ]);
 });
 
+test("a call cut after the response's text goes back to the model too (#1326)", async () => {
+  const provider = fakeProvider(
+    [{ type: "text-delta", delta: "Writing it now." }, ...cut("c1")],
+    [{ type: "text-delta", delta: "I'll split it." }, finish()],
+  );
+  const agent = Agent.create({
+    name: "writer",
+    provider,
+    tools: [write],
+    onToolArgumentsTooLong: { toolError: 1 },
+  });
+
+  const result = await agent.stream({ messages: [], turn: { text: "write" } }).result();
+
+  expect(result.error).toBeUndefined();
+  expect(result.finishReason).toBe("stop");
+  expect(provider.calls).toHaveLength(2);
+  expect(results(result.messages)).toEqual([
+    expect.objectContaining({ toolCallId: "c1", status: "error" }),
+  ]);
+});
+
+test("a call cut on its first chunk, with no delta passed on, is answered too (#1326)", async () => {
+  const ran: string[] = [];
+  const lookup = AgentTool.create({
+    name: "lookup",
+    description: "Look up",
+    inputSchema: s.object({ q: s.string() }),
+    execute: async ({ q }) => {
+      ran.push(q);
+      return { found: q };
+    },
+  });
+  const provider = fakeProvider(
+    [
+      { type: "tool-call", toolCallId: "l1", name: "lookup", args: '{"q":"a"}' },
+      ...cut("c1").filter((event) => event.type !== "tool-call-delta"),
+    ],
+    [{ type: "text-delta", delta: "done" }, finish()],
+  );
+  const agent = Agent.create({
+    name: "writer",
+    provider,
+    tools: [write, lookup],
+    onToolArgumentsTooLong: { toolError: 1 },
+  });
+
+  const result = await agent.stream({ messages: [], turn: { text: "write" } }).result();
+
+  expect(result.error).toBeUndefined();
+  expect(ran).toEqual(["a"]);
+  const call = result.messages
+    .flatMap((message) => message.content)
+    .find((part) => part.type === "tool-call" && part.toolCallId === "c1");
+  expect(call).toMatchObject({ name: "write", input: {} });
+  expect(results(result.messages).map((part) => [part.toolCallId, part.status])).toEqual([
+    ["c1", "error"],
+    ["l1", "ok"],
+  ]);
+  // The model is asked again with the cut call and its error in the history.
+  const replayed = JSON.stringify(provider.calls[1]!.messages);
+  expect(replayed).toContain("c1");
+});
+
 test("rejects an onToolArgumentsTooLong it cannot read", () => {
   for (const value of ["tool-error", { toolError: 0 }, { toolError: 1.5 }]) {
     expect(() =>

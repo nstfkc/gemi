@@ -4333,11 +4333,16 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     detail: StepOutcome["detail"],
   ): ToolCallPart | undefined {
     const cut = detail?.toolArgumentsTooLong;
-    if (!cut || this.cutCalls >= this.config.cutCallsToModel) return undefined;
-    const part = message.content.find(
+    if (!cut || !cut.toolCallId || this.cutCalls >= this.config.cutCallsToModel) return undefined;
+    let part = message.content.find(
       (p): p is ToolCallPart => p.type === "tool-call" && p.toolCallId === cut.toolCallId,
     );
-    if (!part) return undefined;
+    // Cut on its first chunk, so no delta was passed on and the step has no
+    // part for it yet (#1326). Added here, or its error would have no call.
+    if (!part) {
+      part = { type: "tool-call", toolCallId: cut.toolCallId, name: cut.tool, input: {} } as ToolCallPart;
+      message.content.push(part);
+    }
     this.cutCalls++;
     // The cut text is not JSON, and sending it back on every later step would
     // fill the context with the runaway the limit was there to stop.
