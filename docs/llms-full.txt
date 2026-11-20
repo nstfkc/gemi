@@ -6473,6 +6473,11 @@ const { data } = useQuery("/admin/content/translations", {
   If omitted, `useQuery` inherits the current route's params automatically.
 - `search` becomes the query string. Each distinct search combination is cached
   and revalidated independently.
+- When `params` or `search` change, the query runs again for the new inputs. The
+  cache key is the resolved path plus the search with its keys sorted and
+  `null`/`undefined` ones dropped, so the same inputs are one cache entry
+  whatever object or key order they arrive in, and every component reading
+  them shares it.
 
 The `data` shape and the accepted `search` keys are both inferred from the endpoint,
 so a typo in a param or a wrong field type is a compile error.
@@ -6935,6 +6940,49 @@ import { Query } from "gemi/facades";
   it. If it resolves before the render needs it, the data ships in the document
   payload; otherwise it streams in behind the shell.
 
+### Data the handler already has: `Query.prefill`
+
+`Query.instant` and `Query.prefetch` run the route's handler. When the view
+handler has already resolved the data itself, for example an app that renders a
+page from a declarative description and runs each declared query under its own
+access rules, `Query.prefill(path, options, data)` hands it to the page under
+the query's key, and the route is not run:
+
+```typescript
+import { Query } from "gemi/facades";
+
+"/:collection": this.view("Collection", async (req) => {
+  const { collection } = req.params;
+  const search = { sort: "title", limit: 10 };
+  // Resolved here, as this request's user.
+  const records = await listRecords(collection, search);
+
+  Query.prefill("/records/:collection", { params: { collection }, search }, records);
+  return {};
+}),
+```
+
+```tsx
+// Same key, same cache entry: rendered on the server, hydrated, no request.
+const { data: records } = useQuery("/records/:collection", {
+  params: { collection },
+  search: { limit: 10, sort: "title" },
+});
+```
+
+- The key is the path with its `params` applied, plus the `search`. Search keys
+  are sorted and `null`/`undefined` ones dropped on both sides, so the order
+  they are written in does not matter.
+- `data` is typed as the route's answer. The route still has to exist: it is
+  what the client calls when the query refetches, when it is invalidated, and
+  when its `params` or `search` change to a key that was not prefilled.
+- The data lives in the request it was prefilled in, and nowhere else: another
+  request never sees it. Check access before you prefill, as the route does for
+  its own answer.
+- The first registration of a key wins. A key already prefetched or prefilled
+  in the request is left as it is.
+- Like `Query.prefetch`, it cannot be called from an API request.
+
 #### Avoiding server waterfalls
 
 `Query.prefetch` is a performance tool, not a requirement. The streaming render
@@ -7030,7 +7078,7 @@ These hooks return:
 
 Options mirror the query hooks — `{ params, search }` in the second argument (e.g.
 `usePatch("/todos/:id", { params: { id } })`), and a config object (`onSuccess`,
-`onError`, `onCanceled`, `autoInvalidate`, `concurrency`, `updates`, `timeout`) in the third.
+`onError`, `onCanceled`, `autoInvalidate`, `concurrency`, `updates`, `invalidates`, `timeout`) in the third.
 `timeout` (ms, default `queryConfig.mutationTimeout`, otherwise none) aborts a
 request with no answer in time; `onError` and `error` get a
 `RequestTimeoutError`. A mutation is never sent again on its own. `<Form>`
@@ -7304,6 +7352,79 @@ They are plain async functions, not hooks, so you can call them from an event ha
 - **Loading:** the request code loads on the first call, so a route that never downloads a file does not carry it. If that chunk cannot be loaded the call rejects with the load error.
 
 The paths come from the `FileRPC` interface, which `gemi.d.ts` fills in from your `ApiRouter` (`CreateFileRPC` from `gemi/http`). While it is empty, for example in a package without the app's types, any path compiles.
+
+## Saying what a mutation changes: `invalidates`
+
+A mutation can name the queries it makes out of date. Every mounted `useQuery`
+(and `useMultipleQuery`, `useInfiniteQuery`) reading one refetches when the
+mutation succeeds, with no `mutate()` or `refetch()` at the call site:
+
+```tsx
+import { usePost } from "gemi/client";
+
+const { trigger } = usePost(
+  "/records/:collection",
+  { params: { collection: "posts" } },
+  { invalidates: ["/records/:collection", "/setup-progress"] },
+);
+```
+
+`invalidates` is accepted by `useMutation`, `usePost`/`usePut`/`usePatch`/
+`useDelete` and `useUpload`. A key is one of:
+
+| Key | Matches |
+| --- | --- |
+| `"/records/posts"` | every search variant of that path |
+| `"/records/posts?status=draft"` | that one variant |
+| `"/records/*"` | every query whose path starts with `/records/` |
+
+- `:param` segments are filled from the mutation's `params` and the route's,
+  so `"/records/:collection"` above is `"/records/posts"`.
+- A matching query that is on screen refetches now, in the background: its data
+  stays on screen until the new answer lands. One that is cached but not
+  mounted is marked stale and refetches the next time it is read, even under
+  `staleTime: Infinity`.
+- A query matched by several keys refetches once.
+- Nothing is invalidated when the mutation fails.
+
+### From the server: `Query.invalidate`
+
+The handler often knows better than the caller what it wrote. `Query.invalidate`
+names the keys in the answer, and the mutation hook that made the request
+honours them, together with its own `invalidates`:
+
+```typescript
+import { Query } from "gemi/facades";
+
+async create(req: HttpRequest<{ title: string }, { collection: string }>) {
+  const record = await saveRecord(req.params.collection, await req.input());
+  // Computed from what was written.
+  Query.invalidate(`/records/${req.params.collection}`, "/setup-progress");
+  return record;
+}
+```
+
+- The keys have the same three forms, with the params already applied (the
+  server does not know the client's route).
+- They travel in the `x-gemi-invalidate` response header. Calls add up, and the
+  header is honoured whatever the status, since the handler names what it
+  changed before it answers.
+- Only the tab that made the request sees the header. To refresh other tabs or
+  users, use a `live` query or [broadcasting](./broadcasting.md).
+
+### From anywhere on the client: `useInvalidate`
+
+For a change that did not come from a mutation hook, such as an event on a
+stream or a chat turn that wrote data:
+
+```tsx
+import { useInvalidate } from "gemi/client";
+
+const invalidate = useInvalidate();
+
+// Later, in a handler or an effect:
+invalidate("/setup-progress", "/records/*");
+```
 
 ## Updating queries from elsewhere: `useMutate`
 

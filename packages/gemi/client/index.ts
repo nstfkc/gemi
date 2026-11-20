@@ -27,8 +27,9 @@ export type {
   RetryDelayOption,
 } from "./retryPolicy";
 export { useMutation, useDelete, usePatch, usePost, usePut, useUpload } from "./useMutation";
-export type { MutationCallConfig, MutationConcurrency } from "./useMutation";
+export type { InvalidationKey, MutationCallConfig, MutationConcurrency } from "./useMutation";
 export { useMutate } from "./useMutate";
+export { useInvalidate } from "./useInvalidate";
 export { fetchBlob, fetchText } from "./fetchFile";
 export type { FetchedBlob, FetchedText, FetchFileOptions, FilePath } from "./fetchFile";
 export { useSetQueryData } from "./useSetQueryData";

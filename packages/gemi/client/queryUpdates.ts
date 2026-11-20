@@ -4,7 +4,7 @@ import { applyParams } from "../utils/applyParams";
 import { toVariantKey } from "../utils/variantKey";
 
 // The cache writes behind a mutation's `updates` and `useSetQueryData()`
-// (#897). Loaded with the hooks' other extras when one mounts (see
+// (#897), and invalidation by key (#1329). Loaded with the hooks' other extras when one mounts (see
 // `./mutationModules`), so no route's entry chunk carries it (#915).
 
 type Resolve = (key: string) => QueryResource;
@@ -80,5 +80,45 @@ export function applyQueryUpdates(
       update,
       data ? { update: (current) => data(answer, current) } : { value: answer },
     );
+  }
+}
+
+/**
+ * Invalidates every cached query a key matches: one a mounted reader is
+ * rendering refetches now, any other is marked stale and revalidates when next
+ * read. A key is a resolved path (`"/posts"`, every search variant of it), a
+ * single variant (`"/posts?status=open"`), or a prefix ending in `*`
+ * (`"/posts/*"`).
+ */
+export function invalidateQueries(
+  resources: Iterable<QueryResource>,
+  keys: ReadonlyArray<string>,
+) {
+  if (keys.length === 0) return;
+  const all = [...resources];
+  // Collected first, so a variant two keys match refetches once.
+  const matched = new Map<QueryResource, Set<string>>();
+  const add = (resource: QueryResource, variantKeys: string[]) => {
+    const set = matched.get(resource) ?? new Set<string>();
+    for (const variantKey of variantKeys) set.add(variantKey);
+    matched.set(resource, set);
+  };
+  for (const key of keys) {
+    const at = key.indexOf("?");
+    const path = at === -1 ? key : key.slice(0, at);
+    if (path.endsWith("*")) {
+      const prefix = path.slice(0, -1);
+      for (const resource of all) {
+        if (resource.key.startsWith(prefix)) add(resource, resource.variantKeys());
+      }
+      continue;
+    }
+    for (const resource of all) {
+      if (resource.key !== path) continue;
+      add(resource, at === -1 ? resource.variantKeys() : [toVariantKey(key.slice(at + 1))]);
+    }
+  }
+  for (const [resource, variantKeys] of matched) {
+    for (const variantKey of variantKeys) resource.invalidate(variantKey);
   }
 }

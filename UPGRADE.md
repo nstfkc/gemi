@@ -1,3 +1,15 @@
+# 0.225.0
+
+## Prefilled queries and invalidation by key (#1329)
+
+**New API (minor version). Nothing to change in an existing app.** See [Data the handler already has](docs/data-fetching.md#data-the-handler-already-has-queryprefill) and [Saying what a mutation changes](docs/data-fetching.md#saying-what-a-mutation-changes-invalidates).
+
+- `Query.prefill(path, options, data)` in a view or layout handler hands the page data the handler already resolved, under the query's key. The client's `useQuery` with the same path, params and search renders it during SSR and hydrates it with no request. The route's handler is not run.
+- `invalidates` on `useMutation`, `usePost`/`usePut`/`usePatch`/`useDelete` and `useUpload` names the queries a successful mutation makes out of date: a path (`"/posts"`, every search variant), one variant (`"/posts?status=open"`) or a prefix (`"/posts/*"`). Mounted readers refetch, the rest are marked stale.
+- `Query.invalidate(...keys)` in an API handler names them from the server, in the `x-gemi-invalidate` response header. The mutation hooks honour it on every answer. A proxy or CORS setup that filters response headers has to let it through (same-origin `/api` requests need nothing).
+- `useInvalidate()` does the same from anywhere on the client.
+- Code that builds a `QueryManagerContext` value by hand needs the new `allResources` member.
+
 # 0.224.0
 
 ## API path parameters are decoded once (#1306)

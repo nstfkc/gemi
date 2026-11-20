@@ -275,6 +275,9 @@ describe("every hook hands them over", () => {
       }
       open() {}
       send() {}
+      getResponseHeader() {
+        return null;
+      }
       abort() {}
       respond(status: number, body: string) {
         this.status = status;

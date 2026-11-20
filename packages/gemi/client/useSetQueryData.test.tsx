@@ -272,6 +272,9 @@ describe("useUpload updates", () => {
       }
       open() {}
       send() {}
+      getResponseHeader() {
+        return null;
+      }
       respond(status: number, body: string) {
         this.status = status;
         this.responseText = body;
