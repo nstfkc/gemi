@@ -1,3 +1,27 @@
+# 0.225.0
+
+## The local storage driver refuses symbolic links inside the store (#1324)
+
+**Behaviour change (minor version).** See [File Storage: symbolic links](docs/file-storage.md#symbolic-links).
+
+`FileSystemDriver` now checks every existing entry between its storage folder
+and the object. A link at the object's name or in any parent directory is
+refused, whether its target is inside the store, outside it, or missing.
+
+- `read()`, `fetch()` and `size()` reject with `FileNotFoundError`, so a stream
+  route answers 404. Before, a link such as `covers/latest.jpg` was served even
+  though `objects()` never listed it.
+- `put()`, `putStream()` and `delete()` reject. Nothing is written or removed
+  through the link, and the link itself is left in place.
+- `objects()` still skips links. A prefix whose directory is or passes through
+  a link now lists nothing, and `deletePrefix()` refuses it. Links found inside a
+  prefix are left in place, with their targets.
+- The storage folder itself may still be a link, for example a `storage` link to
+  a directory shared between releases. Use that layout instead of links inside
+  the store. Replace aliases inside the store with copies.
+- `fetch()` of a missing object now rejects with `FileNotFoundError`. Before, it
+  answered `200` and the body failed once it was read.
+
 # 0.224.0
 
 ## API path parameters are decoded once (#1306)

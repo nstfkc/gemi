@@ -12,7 +12,7 @@ import type {
 } from "./types";
 import { FileStorageDriver, assertDeletablePrefix } from "./FileStorageDriver";
 import { abortableBody } from "./abortableBody";
-import { mkdir, open, readdir, rename, rmdir, stat, unlink } from "fs/promises";
+import { lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink } from "fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveRange } from "../../../http/range";
 import { FileNotFoundError, RangeNotSatisfiableError } from "../../../http/errors";
@@ -51,20 +51,69 @@ export class FileSystemDriver extends FileStorageDriver {
     return this.configured ?? `${projectRoot()}/storage`;
   }
 
-  private resolveObjectPath(name: string, operation: "read" | "write" | "delete"): string {
+  /**
+   * The storage folder with every symbolic link in its own path resolved, so
+   * a folder that is itself a link (a directory shared between releases) is
+   * used as the directory it points to. A folder that does not exist yet is
+   * created for a write and left alone otherwise: nothing below it exists, so
+   * there is nothing to check.
+   */
+  private async realRoot(operation: "read" | "write" | "delete"): Promise<string> {
+    const root = resolve(this.folderPath);
+    try {
+      return await realpath(root);
+    } catch (err: any) {
+      if (err?.code !== "ENOENT") throw err;
+      if (operation !== "write") return root;
+    }
+    await mkdir(root, { recursive: true });
+    return realpath(root);
+  }
+
+  /**
+   * Whether an entry from `root` down to `root/rel` is a symbolic link. Only
+   * the components that exist are checked; the first missing one ends the
+   * walk, since nothing below it can be a link.
+   */
+  private async passesThroughLink(root: string, rel: string): Promise<boolean> {
+    if (!rel) return false;
+    let current = root;
+    for (const part of rel.split(sep)) {
+      current = `${current}${sep}${part}`;
+      try {
+        if ((await lstat(current)).isSymbolicLink()) return true;
+      } catch (err: any) {
+        if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return false;
+        throw err;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Resolves an object name to its path inside the storage folder and refuses
+   * it when it climbs out of the folder, contains a NUL byte, or is or passes
+   * through a symbolic link below the folder. A refused read is reported like
+   * a missing object; a refused write or delete rejects and touches nothing.
+   */
+  private async resolveObjectPath(name: string, operation: "read" | "write" | "delete"): Promise<string> {
     if (!name) {
       throw new Error("Object name has to be specified");
     }
-    const root = resolve(this.folderPath);
-    const path = resolve(root, name);
-    const rel = relative(root, path);
+    const lexicalRoot = resolve(this.folderPath);
+    const rel = relative(lexicalRoot, resolve(lexicalRoot, name));
     const hasNul = name.includes("\0");
     if (hasNul || !rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       if (operation === "read") throw new FileNotFoundError(name);
       if (hasNul) throw new Error(`Refusing to ${operation} an object name containing a NUL byte`);
       throw new Error(`Refusing to ${operation} "${name}": it is outside the storage folder`);
     }
-    return path;
+    const root = await this.realRoot(operation);
+    if (await this.passesThroughLink(root, rel)) {
+      if (operation === "read") throw new FileNotFoundError(name);
+      throw new Error(`Refusing to ${operation} "${name}": it is or passes through a symbolic link`);
+    }
+    return `${root}${sep}${rel}`;
   }
 
   async put(params: PutFileParams | Blob, { signal }: PutFileOptions = {}) {
@@ -81,7 +130,7 @@ export class FileSystemDriver extends FileStorageDriver {
       name = params.name;
     }
 
-    const path = this.resolveObjectPath(name, "write");
+    const path = await this.resolveObjectPath(name, "write");
     const buffer =
       body instanceof Buffer
         ? body
@@ -102,6 +151,10 @@ export class FileSystemDriver extends FileStorageDriver {
    * into place once the stream has ended, so an error or an abort halfway
    * leaves no file, and a reader never sees a half-written one. Memory stays
    * at one chunk however large the file.
+   *
+   * The name is checked for symbolic links before the temporary file is
+   * created and again before the rename, so a link that appeared at the name
+   * or in a parent while the stream ran is refused rather than replaced.
    */
   async putStream(
     { name, body }: PutStreamParams,
@@ -111,7 +164,7 @@ export class FileSystemDriver extends FileStorageDriver {
     let partial: string | null = null;
     try {
       signal?.throwIfAborted();
-      const path = this.resolveObjectPath(name, "write");
+      const path = await this.resolveObjectPath(name, "write");
 
       await mkdir(dirname(path), { recursive: true });
       partial = `${path}.${Bun.randomUUIDv7()}.partial`;
@@ -131,6 +184,9 @@ export class FileSystemDriver extends FileStorageDriver {
         await file.close();
       }
       signal?.throwIfAborted();
+      if ((await this.resolveObjectPath(name, "write")) !== path) {
+        throw new Error(`Refusing to write "${name}": the storage folder moved during the write`);
+      }
       await rename(partial, path);
       return name;
     } catch (error) {
@@ -149,7 +205,12 @@ export class FileSystemDriver extends FileStorageDriver {
     signal?.throwIfAborted();
 
     const name = typeof params === "string" ? params : params.name;
-    const file = Bun.file(this.resolveObjectPath(name, "read"));
+    const file = Bun.file(await this.resolveObjectPath(name, "read"));
+    // Checked here for the same reason as in `read()`: a lazy `Bun.file()`
+    // would otherwise answer 200 and fail only once the body is pulled.
+    if (!(await file.exists())) {
+      throw new FileNotFoundError(name);
+    }
     // The disk read has no signal of its own. The body is wrapped instead, so
     // an abort stops the stream and closes the file mid-read.
     const result = abortableBody(file.stream(), signal);
@@ -170,7 +231,7 @@ export class FileSystemDriver extends FileStorageDriver {
     const params = typeof input === "string" ? { name: input } : input;
     const { name, range = null } = params;
 
-    const file = Bun.file(this.resolveObjectPath(name, "read"));
+    const file = Bun.file(await this.resolveObjectPath(name, "read"));
 
     // `Bun.file()` is lazy. Without this the response commits with a 200 and
     // the ENOENT only surfaces once the stream is pulled, as an unhandled
@@ -205,7 +266,7 @@ export class FileSystemDriver extends FileStorageDriver {
 
   async size(params: ReadFileParams | string) {
     const name = typeof params === "string" ? params : params.name;
-    const file = Bun.file(this.resolveObjectPath(name, "read"));
+    const file = Bun.file(await this.resolveObjectPath(name, "read"));
     if (!(await file.exists())) {
       throw new FileNotFoundError(name);
     }
@@ -215,7 +276,9 @@ export class FileSystemDriver extends FileStorageDriver {
   async delete(params: DeleteFileParams | string) {
     const name = typeof params === "string" ? params : params.name;
 
-    const path = this.resolveObjectPath(name, "delete");
+    // A link at the name or in a parent is refused, so neither the link nor
+    // its target is removed.
+    const path = await this.resolveObjectPath(name, "delete");
 
     try {
       await unlink(path);
@@ -232,34 +295,40 @@ export class FileSystemDriver extends FileStorageDriver {
    * Resolves `prefix` against the storage folder and returns the directory to
    * walk plus the normalized prefix every match must start with. A prefix
    * that climbs out of the folder (`../x`, `a/../../b`) is refused, as in
-   * `delete()`.
+   * `delete()`. `linked` is true when the directory to walk is, or passes
+   * through, a symbolic link below the storage folder.
    */
-  private resolvePrefix(prefix: string) {
-    const root = resolve(this.folderPath);
+  private async resolvePrefix(prefix: string) {
+    const lexicalRoot = resolve(this.folderPath);
     const slash = prefix.lastIndexOf("/");
     const dirPart = slash === -1 ? "" : prefix.slice(0, slash);
     const namePart = slash === -1 ? prefix : prefix.slice(slash + 1);
-    const dir = resolve(root, dirPart);
-    const rel = relative(root, dir);
+    const rel = relative(lexicalRoot, resolve(lexicalRoot, dirPart));
     if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       throw new Error(`Refusing to list "${prefix}": it is outside the storage folder`);
     }
+    const root = await this.realRoot("read");
+    const dir = rel ? `${root}${sep}${rel}` : root;
+    const linked = await this.passesThroughLink(root, rel);
     const dirRel = rel.split(sep).join("/");
-    return { root, dir, match: dirRel ? `${dirRel}/${namePart}` : namePart };
+    return { root, dir, linked, match: dirRel ? `${dirRel}/${namePart}` : namePart };
   }
 
   /**
    * Walks the storage folder recursively and yields regular files whose path
    * (relative to the folder, `/`-separated) starts with `prefix`, sorted by
-   * name like an S3 listing. Symlinks are not followed, so a link cannot lead
-   * the walk out of the folder. A missing directory lists nothing.
+   * name like an S3 listing. Symbolic links are skipped, never followed, so a
+   * link cannot lead the walk out of the folder and the listing names only
+   * objects that `read()` serves. A missing directory lists nothing, and so
+   * does a prefix whose directory is or passes through a link.
    */
   async *objects(
     prefix: string,
     { signal }: ListObjectsOptions = {},
   ): AsyncIterable<StoredObject> {
     signal?.throwIfAborted();
-    const { root, dir, match } = this.resolvePrefix(prefix);
+    const { root, dir, linked, match } = await this.resolvePrefix(prefix);
+    if (linked) return;
 
     const files: string[] = [];
     const walk = async (current: string): Promise<void> => {
@@ -291,28 +360,36 @@ export class FileSystemDriver extends FileStorageDriver {
       signal?.throwIfAborted();
       let info;
       try {
-        info = await stat(`${root}/${name}`);
+        info = await lstat(`${root}/${name}`);
       } catch (err: any) {
         // Removed between the walk and now: not there to list.
         if (err?.code === "ENOENT") continue;
         throw err;
       }
+      // Replaced by a link (or anything else) since the walk.
+      if (!info.isFile()) continue;
       yield { name, size: info.size, lastModified: info.mtime };
     }
   }
 
   /**
    * Unlinks every file under `prefix`, then removes the directories that
-   * leaves empty (never the storage folder itself).
+   * leaves empty (never the storage folder itself). Symbolic links found
+   * during the walk are left in place and their targets untouched, so a
+   * directory holding one is not removed. A prefix whose directory is or
+   * passes through a link is refused, as `delete()` refuses such a name.
    */
   async deletePrefix(
     prefix: string,
     options: DeletePrefixOptions = {},
   ): Promise<number> {
     assertDeletablePrefix(prefix);
-    const { root, match } = this.resolvePrefix(prefix);
+    const { root, linked, match } = await this.resolvePrefix(prefix);
     // `a/..` passes the generic check but resolves to the folder itself.
     assertDeletablePrefix(match);
+    if (linked) {
+      throw new Error(`Refusing to delete by prefix "${prefix}": it passes through a symbolic link`);
+    }
 
     const deleted = await super.deletePrefix(prefix, options);
 
