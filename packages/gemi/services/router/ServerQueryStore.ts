@@ -323,6 +323,33 @@ export class ServerQueryStore {
   }
 
   /**
+   * Registers a query as already resolved: `data` is what the request ships
+   * for it, and the fetcher never runs. For a handler that produced the data
+   * itself, under its own access rules (`Query.prefill`). Like `ensure`, the
+   * first registration of a key wins: one already prefetched or prefilled is
+   * left as it is.
+   */
+  prefill(patternPath: string, options: ServerQueryOptions, data: unknown): ServerQueryEntry {
+    const { path, variantKey, key } = this.locate(patternPath, options);
+    const existing = this.entries.get(key);
+    if (existing) return existing;
+    const now = this.elapsed();
+    const entry: ServerQueryEntry = {
+      path,
+      patternPath,
+      variantKey,
+      status: "resolved",
+      data,
+      promise: Promise.resolve(),
+      source: "prefetch",
+      startedAt: now,
+      settledAt: now,
+    };
+    this.entries.set(key, entry);
+    return entry;
+  }
+
+  /**
    * Everything currently registered, settled — including entries added while
    * waiting. The non-streaming paths (`.json` route data responses) sit on
    * this to keep their all-data-in-one-payload contract.
