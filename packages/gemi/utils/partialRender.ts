@@ -1,5 +1,4 @@
 import { applyParams } from "./applyParams";
-import { encodePathParams } from "./pathParams";
 
 /**
  * Route the client is currently rendering, sent on `.json` navigations so the
@@ -32,8 +31,6 @@ export function initialRenderedRoute(route: {
 }) {
   // `applyParams` strips the trailing slash, so the root route resolves to the
   // empty string — which the server reads as "no header" and renders in full.
-  // The params arrive decoded (#1322), so they are encoded again: `a/b` has to
-  // stay one `:id` segment for the server to resolve the same route.
-  const pathname = applyParams(route.pathname ?? "/", encodePathParams(route.params ?? {})) || "/";
+  const pathname = applyParams(route.pathname ?? "/", route.params ?? {}) || "/";
   return `${pathname}${route.search ?? ""}`;
 }

@@ -4,6 +4,7 @@ import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
+import { encodeParam } from "../utils/applyParams";
 import { ClientRouterContext } from "./ClientRouterContext";
 import {
   isObject,
@@ -40,8 +41,13 @@ type Methods = {
 function applyParams(url: string, params: Record<string, any> = {}) {
   let out = url;
 
+  // Encoded like every other route URL, so a decoded `useParams()` value such
+  // as `a/b` stays in its segment (#1322).
   for (const [key, value] of Object.entries(params)) {
-    out = out.replace(`:${key}?`, value).replace(`:${key}`, value);
+    out = out
+      .replace(`:${key}*`, encodeParam(value, true))
+      .replace(`:${key}?`, encodeParam(value))
+      .replace(`:${key}`, encodeParam(value));
   }
   return out;
 }

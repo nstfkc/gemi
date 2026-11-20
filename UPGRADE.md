@@ -15,6 +15,15 @@ status 404 on a page load, and on an in-app navigation too.
   changes the ID to `/`. For `100%` (URL `/notes/100%25`) it throws a
   `URIError`.
 - IDs that encoding leaves alone, such as `42` or `my-note`, are unchanged.
+- Route URLs built from params now encode each value into its segment:
+  `Link`, `useNavigate`, `usePrefetch`, `Redirect.to`, `Url`, `useQuery`,
+  `useMutation`, `Query.prefetch` and `Query.prefill` (their cache keys too, on
+  the server and the client alike). `<Link href="/notes/:id/edit">` on
+  `/notes/a%2Fb` points at `/notes/a%2Fb/edit`. A wildcard (`:path*`) keeps its
+  `/`s and encodes each segment. **Pass plain values.** A call that encoded a
+  value itself, such as `params: { id: encodeURIComponent(id) }`, now encodes
+  it twice: drop the manual encoding. A value with a space or `%` used to go
+  into the URL raw and now goes in as `%20` or `%25`.
 - `<Page params>` in `gemi/testing` takes decoded values, as `useParams()`
   returns them.
 

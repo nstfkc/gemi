@@ -21,7 +21,7 @@ import { PrefetchCache } from "./PrefetchCache";
 import { routeDataUrl } from "./helpers/routeDataUrl";
 import { splitLocalePrefix } from "../i18n/localePrefix";
 import { applyParams } from "../utils/applyParams";
-import { decodePathParams, encodePathParams } from "../utils/pathParams";
+import { decodePathParams } from "../utils/pathParams";
 import { readSettledRoutePayload } from "./helpers/readRoutePayload";
 import { loadViewModule } from "./ComponentContext";
 import { otherBuild } from "./chunkLoadRecovery";
@@ -156,7 +156,7 @@ export const ClientRouterProvider = (
         currentPath || is404
           ? splitLocalePrefix(currentPath || "/", urlLocaleSegment ? [urlLocaleSegment] : [])
               .pathname
-          : applyParams(pathname ?? "/", encodePathParams(params ?? {})) || "/",
+          : applyParams(pathname ?? "/", params ?? {}) || "/",
       hash: "",
       action: null as Action | null,
       key: typeof window === "undefined" ? undefined : currentEntryKey(),

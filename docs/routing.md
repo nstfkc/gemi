@@ -45,7 +45,15 @@ const note = await findNote(req.params.id);
 const { id } = useParams();
 ```
 
-Do not call `decodeURIComponent` on route parameters. A second decode changes
+The inverse holds wherever Gemi builds a URL from a route and its params:
+`Link`, `useNavigate`, `usePrefetch`, `Redirect`, the `Url` facade, `useQuery`,
+`useMutation` and `Query.prefetch`/`Query.prefill` encode each value into its
+segment, as `apiUrl` does. `<Link href="/notes/:id/edit">` on `/notes/a%2Fb`
+points at `/notes/a%2Fb/edit`. A wildcard keeps its `/`s and encodes each
+segment: `{ src: "a/b c" }` fills `/files/:src*` as `/files/a/b%20c`.
+
+Do not call `decodeURIComponent` on route parameters, and do not encode values
+before passing them as `params`. A second decode changes
 the literal ID `%2F` to `/`, and throws a `URIError` for `100%`. A decoded value
 can contain `/` and `..`. When building a filesystem path or an S3 key, validate
 the result against the directory or key prefix the caller may access.
