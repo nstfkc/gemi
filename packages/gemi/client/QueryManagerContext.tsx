@@ -157,6 +157,8 @@ export interface QueryManagerContextValue {
    * that don't suspend leave out while hydrating (`peekForHydration`).
    */
   hydrate: (prefetchedData?: PrefetchedData | null, streamed?: boolean) => void;
+  /** Every resource in the cache: what invalidation by key walks (#1329). */
+  allResources: () => Iterable<QueryResource>;
   clearErrors: () => void;
 }
 
@@ -165,6 +167,7 @@ export const QueryManagerContext = createContext<QueryManagerContextValue>({
     return new QueryResource(key, initialState);
   },
   hydrate: () => {},
+  allResources: () => [],
   clearErrors: () => {},
 });
 
@@ -201,6 +204,7 @@ function createQueryManager(): QueryManagerContextValue {
         resource.hydrate(initialState, streamed);
       }
     },
+    allResources: () => resources.values(),
     // Used by the route-level error boundary's reset: without this, the
     // retried render would read the stored failure back out of the cache and
     // re-throw.

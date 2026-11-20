@@ -20,6 +20,7 @@ import type { QueryUpdate } from "./useSetQueryData";
 import { loadLazy } from "./lazyModule";
 import { mutationExtras, preloadMutationExtras } from "./mutationModules";
 import { readResponseBody } from "./helpers/readResponseBody";
+import { INVALIDATE_HEADER, decodeInvalidationKeys } from "../utils/invalidation";
 
 type Methods = {
   POST: {
@@ -88,7 +89,45 @@ type Config<T, E = never> = {
    * from it and what is cached (#897).
    */
   updates?: ReadonlyArray<QueryUpdate<T>>;
+  /**
+   * The queries a successful answer makes out of date (#1329). Every mounted
+   * `useQuery` reading one refetches; a cached one that is not on screen is
+   * marked stale. A key is a query's path (`"/posts"`, every search variant
+   * of it), one variant (`"/posts?status=open"`), or a prefix ending in `*`
+   * (`"/posts/*"`). `:param` segments are filled from the mutation's params
+   * and the route's.
+   *
+   * The server can name them too, with `Query.invalidate()` in the handler:
+   * both are honoured.
+   */
+  invalidates?: ReadonlyArray<InvalidationKey>;
 };
+
+type GetPaths = {
+  [K in keyof RPC as K extends `GET:${infer P}` ? P : never]: true;
+};
+
+/** A query's path, a `path?search` variant, or a prefix ending in `*`. */
+export type InvalidationKey = keyof GetPaths | (string & {});
+
+// The keys a settled request invalidates: the hook's own `invalidates` when it
+// succeeded, and the ones the server named in the answer either way, since it
+// knows what it wrote.
+function invalidatedKeys(
+  ok: boolean,
+  invalidates: ReadonlyArray<string> | undefined,
+  params: Record<string, any>,
+  header: string | null,
+) {
+  const own = ok
+    ? (invalidates ?? []).map((key) => {
+        const at = key.indexOf("?");
+        const path = at === -1 ? key : key.slice(0, at);
+        return applyParams(path, params) + (at === -1 ? "" : key.slice(at));
+      })
+    : [];
+  return [...own, ...decodeInvalidationKeys(header)];
+}
 
 /**
  * Callbacks for one `trigger` call. They run after the hook's own, and only
@@ -156,7 +195,7 @@ export function useMutation<
   // A write may have moved the data behind any page warmed ahead of a click,
   // and a prefetched payload is committed wholesale — into the query cache too.
   const { clearPrefetchCache } = useContext(ClientRouterContext);
-  const { getResource } = useContext(QueryManagerContext);
+  const { getResource, allResources } = useContext(QueryManagerContext);
   const appTimeout = useContext(QueryConfigContext)?.mutationTimeout;
   const [state, setState] = useState<State<T, E>>({
     data: null,
@@ -299,6 +338,12 @@ export function useMutation<
 
       const data = await readResponseBody(response);
       timeout.clear();
+      const invalidated = invalidatedKeys(
+        response.ok,
+        options.invalidates,
+        params,
+        response.headers?.get(INVALIDATE_HEADER) ?? null,
+      );
       // `data.error` rather than the envelope around it: `onError` is typed
       // `(error: MutationError) => void`, and the envelope has no `kind` to
       // branch on. A body without one — an app's own `HttpResponse.json` —
@@ -308,7 +353,10 @@ export function useMutation<
         : await withErrorHelpers<MutationError | E>(mutationErrorFromBody(data, response.status));
       // Loaded before the check below, so a request superseded while it waits
       // for the module writes nothing.
-      const extras = response.ok && options.updates ? await loadOrNull() : null;
+      const extras =
+        (response.ok && options.updates) || invalidated.length > 0 ? await loadOrNull() : null;
+      // Before the superseded check: the write happened either way.
+      extras?.invalidateQueries(allResources(), invalidated);
 
       // A superseded request has nothing left to say: a newer submit is what
       // the user is waiting on, and its state is the state on screen.
@@ -484,7 +532,7 @@ export function useUpload<
   const [progress, setProgress] = useState(0);
   const _params = useParams();
   const { clearPrefetchCache } = useContext(ClientRouterContext);
-  const { getResource } = useContext(QueryManagerContext);
+  const { getResource, allResources } = useContext(QueryManagerContext);
   const abortRef = useRef<VoidFunction | null>(null);
 
   const [inputs = {}, options = defaultOptions] = args ?? [];
@@ -587,6 +635,16 @@ export function useUpload<
       // `cancel()` has already reported it and put the state back to idle.
       if (outcome.type === "abort") {
         return;
+      }
+
+      const invalidated = invalidatedKeys(
+        outcome.status >= 200 && outcome.status <= 299,
+        options.invalidates,
+        params,
+        xhr.getResponseHeader(INVALIDATE_HEADER),
+      );
+      if (invalidated.length > 0) {
+        (await loadOrNull())?.invalidateQueries(allResources(), invalidated);
       }
 
       if (outcome.status < 200 || outcome.status > 299) {

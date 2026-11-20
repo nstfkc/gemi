@@ -228,6 +228,7 @@ export function createStaticRenderCollector(
         return resource;
       },
       hydrate() {},
+      allResources: () => resources.values(),
       clearErrors() {},
     };
   };

@@ -25,8 +25,14 @@ class FakeXHR extends EventTarget {
     FakeXHR.last = this;
   }
 
+  responseHeaders: Record<string, string> = {};
+
   open() {
     this.readyState = 1;
+  }
+
+  getResponseHeader(name: string) {
+    return this.responseHeaders[name.toLowerCase()] ?? null;
   }
 
   send() {
