@@ -38,6 +38,7 @@ import { liveModule } from "../client/realtime/loader";
 import { RealtimeContext } from "../client/realtime/RealtimeContext";
 import type { Breadcrumb } from "../client/useBreadcrumbs";
 import { applyParams } from "../utils/applyParams";
+import { encodePathParams } from "../utils/pathParams";
 import { Subject } from "../utils/Subject";
 import { toVariantKey } from "../utils/variantKey";
 
@@ -423,7 +424,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
       ),
     [props.supportedLocales, defaultLocale, locale],
   );
-  const pathname = applyParams(routePath, params) || "/";
+  const pathname = applyParams(routePath, encodePathParams(params)) || "/";
   // `root` defaults to the host minus its first label, so a tenant subdomain
   // needs only its host; `origin` to https on that host. Either can be given
   // outright when the test is about the other.

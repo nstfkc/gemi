@@ -1,4 +1,7 @@
 import { API_PREFIX } from "../services/router/apiPath";
+import { decodePathParams } from "./pathParams";
+
+export { decodePathParams };
 
 type ParamValue = string | number | readonly (string | number)[] | undefined;
 
@@ -49,17 +52,4 @@ export function matchApiUrl(key: string, url: string): Record<string, string> | 
   }
   const groups = pattern.exec({ pathname })?.pathname.groups;
   return groups ? decodePathParams(groups) : null;
-}
-
-/** Decode captures after matching, so an encoded slash stays in its parameter. */
-export function decodePathParams(groups: Record<string, string | undefined>): Record<string, string> | null {
-  const params: [string, string][] = [];
-  try {
-    for (const [name, value] of Object.entries(groups)) {
-      if (value !== undefined) params.push([name, decodeURIComponent(value)]);
-    }
-  } catch {
-    return null;
-  }
-  return Object.fromEntries(params);
 }

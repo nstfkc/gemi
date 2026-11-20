@@ -1,6 +1,7 @@
 // @ts-ignore
 import { URLPattern } from "urlpattern-polyfill/urlpattern";
 import type { FlatViewRoutes } from "./createFlatViewRoutes";
+import { decodePathParams } from "../../utils/pathParams";
 
 export interface ViewRouteMatch {
   routePath: string;
@@ -11,6 +12,11 @@ export interface ViewRouteMatch {
 /**
  * First route whose pattern matches `pathname`. `flatViewRoutes` is ordered
  * least-specific-first, so this is insertion order, not a best match.
+ *
+ * The encoded pathname is matched, so `/notes/a%2Fb` is one `:id` segment,
+ * and each capture is then decoded once: `params.id` is `a/b`, as an API
+ * handler sees it (#1322). A capture that is not a valid escape is no match
+ * at all, rather than a broader route's: the request is a 404.
  */
 export function matchViewRoute(
   flatViewRoutes: FlatViewRoutes,
@@ -18,12 +24,11 @@ export function matchViewRoute(
 ): ViewRouteMatch | null {
   for (const [routePath, route] of Object.entries(flatViewRoutes)) {
     const pattern = new URLPattern({ pathname: routePath });
-    if (pattern.test({ pathname })) {
-      return {
-        routePath,
-        params: pattern.exec({ pathname })?.pathname.groups ?? {},
-        route,
-      };
+    const match = pattern.exec({ pathname });
+    if (match) {
+      const params = decodePathParams(match.pathname.groups ?? {});
+      if (!params) return null;
+      return { routePath, params, route };
     }
   }
 

@@ -1,3 +1,23 @@
+# 0.225.0
+
+## View route parameters are decoded once (#1322)
+
+**Behaviour change (minor version).** View loaders (`req.params`) and view
+components (`useParams()`) now receive path parameters decoded once after route
+matching, as API handlers have since 0.224.0. For `/notes/:id`, the page
+`/notes/a%2Fb` gives `a/b` on a direct visit, after hydration, on an in-app
+navigation and on back/forward. They used to receive the raw capture `a%2Fb`.
+A malformed escape in a matched parameter now renders the `404` view, with
+status 404 on a page load, and on an in-app navigation too.
+
+- Remove manual `decodeURIComponent(params.x)` calls in view loaders and
+  components. For the literal ID `%2F` (URL `/notes/%252F`) a second decode
+  changes the ID to `/`. For `100%` (URL `/notes/100%25`) it throws a
+  `URIError`.
+- IDs that encoding leaves alone, such as `42` or `my-note`, are unchanged.
+- `<Page params>` in `gemi/testing` takes decoded values, as `useParams()`
+  returns them.
+
 # 0.224.0
 
 ## API path parameters are decoded once (#1306)
