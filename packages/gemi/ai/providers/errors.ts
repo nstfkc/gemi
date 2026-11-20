@@ -90,6 +90,24 @@ export class ProviderToolArgumentsTooLongError extends Error {
   }
 }
 
+/**
+ * One tool call's arguments ran into more white space outside strings than
+ * `maxToolArgumentWhitespace` (#1334) before they were whole JSON: the model
+ * stopped writing the call and kept streaming spaces and line breaks, an
+ * event every fraction of a second, which no idle limit catches. A cut call
+ * like `ProviderToolArgumentsTooLongError` (the same retries, the same
+ * `toolArgumentsTooLong` on the error event), with `whitespace` on its detail
+ * and a message that names the cause.
+ */
+export class ProviderToolArgumentsRunawayError extends ProviderToolArgumentsTooLongError {
+  constructor(limit: number, toolName: string, toolCallId: string, chars: number, whitespace: number) {
+    super(limit, toolName, toolCallId, chars);
+    this.name = "ProviderToolArgumentsRunawayError";
+    this.message = `Provider streamed more than ${limit} characters of white space in the arguments for "${toolName}" before they were whole JSON (maxToolArgumentWhitespace)`;
+    this.detail.whitespace = whitespace;
+  }
+}
+
 function describeBody(body: unknown): string {
   const detail = errorBody(body);
   if (detail?.message) return detail.message;
