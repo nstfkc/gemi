@@ -338,13 +338,16 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
         yield aborted();
         return;
       }
+      if (error instanceof ProviderToolArgumentsTooLongError) cut = error.detail;
       if (committed) {
-        yield { type: "error", error: normalized };
+        // The cut call is named after earlier content too (#1326), so the agent
+        // can answer it with the tool's error. A committed attempt is never
+        // asked again, so `retryToolArgumentsTooLong` does not apply here.
+        yield { type: "error", error: normalized, ...(cut ? { toolArgumentsTooLong: cut } : {}) };
         yield closing({ type: "finish", reason: "error", usage: emptyUsage() });
         return;
       }
       failure = normalized;
-      if (error instanceof ProviderToolArgumentsTooLongError) cut = error.detail;
       held.push(
         { type: "error", error: normalized, ...(cut ? { toolArgumentsTooLong: cut } : {}) },
         { type: "finish", reason: "error", usage: emptyUsage() },
