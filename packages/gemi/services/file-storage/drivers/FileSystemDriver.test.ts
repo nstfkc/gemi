@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { FileNotFoundError } from "../../../http/errors";
 import { FileSystemDriver } from "./FileSystemDriver";
@@ -578,5 +578,83 @@ describe("FileSystemDriver symbolic links", () => {
 
   test("fetch() of a missing object rejects like read()", async () => {
     await expect(driver.fetch("real/missing.txt")).rejects.toBeInstanceOf(FileNotFoundError);
+  });
+
+  test("put() refuses a link that appears at the name while the body is read", async () => {
+    class LinkingBlob extends Blob {
+      override async arrayBuffer() {
+        await symlink(join(outside, "secret.txt"), join(store, "late.txt"));
+        return super.arrayBuffer();
+      }
+    }
+
+    await expect(driver.put({ name: "late.txt", body: new LinkingBlob(["overwritten"]) })).rejects.toThrow(
+      /symbolic link/,
+    );
+    expect((await lstat(join(store, "late.txt"))).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(outside, "secret.txt"), "utf8")).toBe("secret");
+    expect((await readdir(store)).some((entry) => entry.endsWith(".partial"))).toBe(false);
+  });
+
+  test("put() replaces an existing file through a temporary one and leaves nothing behind", async () => {
+    await driver.put({ name: "real/a.txt", body: new Blob(["replaced"]) });
+    await driver.put({ name: "real/c.txt", body: Buffer.from("buffer") });
+
+    expect(await readFile(join(store, "real", "a.txt"), "utf8")).toBe("replaced");
+    expect(await readFile(join(store, "real", "c.txt"), "utf8")).toBe("buffer");
+    expect((await readdir(join(store, "real"))).sort()).toEqual(["a.txt", "c.txt", "sub"]);
+  });
+
+  test("an aborted put() leaves neither the file nor a temporary one", async () => {
+    const controller = new AbortController();
+    class AbortingBlob extends Blob {
+      override async arrayBuffer() {
+        controller.abort();
+        return super.arrayBuffer();
+      }
+    }
+
+    await expect(
+      driver.put({ name: "aborted.txt", body: new AbortingBlob(["x"]) }, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect((await readdir(store)).sort()).toEqual(["real"]);
+  });
+
+  test("a link swapped in at the final name after the check is refused when the file is opened", async () => {
+    await symlink(join(outside, "secret.txt"), join(store, "swapped.txt"));
+    // Stands in for a swap between the per-component check and the open: the
+    // check passes, and only `O_NOFOLLOW` is left to refuse the link.
+    vi.spyOn(driver as any, "resolveObjectPath").mockResolvedValue(join(store, "swapped.txt"));
+    try {
+      await expect(driver.read("swapped.txt")).rejects.toBeInstanceOf(FileNotFoundError);
+      await expect(driver.fetch("swapped.txt")).rejects.toBeInstanceOf(FileNotFoundError);
+      await expect(driver.size("swapped.txt")).rejects.toBeInstanceOf(FileNotFoundError);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  test("fetch() streams the whole object from the opened file, with its headers", async () => {
+    const res = await driver.fetch("real/sub/b.txt");
+    expect(res.headers.get("Content-Type")).toMatch(/^text\/plain/);
+    expect(res.headers.get("Content-Length")).toBe("6");
+    expect(await res.text()).toBe("nested");
+  });
+
+  test("a storage folder that is a dangling link gets a clear error on write", async () => {
+    const current = join(base, "current");
+    await symlink(join(base, "shared-not-created"), current);
+    const dangling = new FileSystemDriver(current);
+
+    for (const write of [
+      () => dangling.put({ name: "a.txt", body: new Blob(["a"]) }),
+      () => dangling.putStream({ name: "a.txt", body: streamOf("a") }),
+    ]) {
+      await expect(write()).rejects.toThrow(
+        `The storage folder "${current}" is a symbolic link to a missing directory`,
+      );
+    }
+    await expect(dangling.read("a.txt")).rejects.toBeInstanceOf(FileNotFoundError);
+    expect(existsSync(join(base, "shared-not-created"))).toBe(false);
   });
 });

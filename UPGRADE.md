@@ -13,6 +13,12 @@ refused, whether its target is inside the store, outside it, or missing.
   though `objects()` never listed it.
 - `put()`, `putStream()` and `delete()` reject. Nothing is written or removed
   through the link, and the link itself is left in place.
+- `put()` now writes a temporary file next to the target and renames it into
+  place, as `putStream()` already did. A failed or aborted `put()` leaves the
+  previous version untouched, and replacing an object gives it a new inode.
+- A storage folder that is a link to a missing directory now fails writes with
+  `The storage folder "…" is a symbolic link to a missing directory` instead
+  of `EEXIST`.
 - `objects()` still skips links. A prefix whose directory is or passes through
   a link now lists nothing, and `deletePrefix()` refuses it. Links found inside a
   prefix are left in place, with their targets.

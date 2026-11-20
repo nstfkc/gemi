@@ -12,7 +12,8 @@ import type {
 } from "./types";
 import { FileStorageDriver, assertDeletablePrefix } from "./FileStorageDriver";
 import { abortableBody } from "./abortableBody";
-import { lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink } from "fs/promises";
+import { constants, type Stats } from "node:fs";
+import { lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink, type FileHandle } from "fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveRange } from "../../../http/range";
 import { FileNotFoundError, RangeNotSatisfiableError } from "../../../http/errors";
@@ -66,7 +67,16 @@ export class FileSystemDriver extends FileStorageDriver {
       if (err?.code !== "ENOENT") throw err;
       if (operation !== "write") return root;
     }
-    await mkdir(root, { recursive: true });
+    try {
+      await mkdir(root, { recursive: true });
+    } catch (err: any) {
+      // `mkdir` reports a dangling link as an entry that already exists,
+      // which says nothing about the missing directory behind it.
+      if (err?.code === "EEXIST" && (await lstat(root)).isSymbolicLink()) {
+        throw new Error(`The storage folder "${root}" is a symbolic link to a missing directory`);
+      }
+      throw err;
+    }
     return realpath(root);
   }
 
@@ -116,6 +126,45 @@ export class FileSystemDriver extends FileStorageDriver {
     return `${root}${sep}${rel}`;
   }
 
+  /**
+   * Writes an object through a temporary file next to the target and renames
+   * it into place, so an error or an abort halfway leaves no file and a reader
+   * never sees a half-written one.
+   *
+   * The name is checked for symbolic links before the temporary file is
+   * created and again before the rename, so a link that appeared at the name
+   * or in a parent meanwhile is refused. A link that appears at the name after
+   * that second check is replaced by the rename, never written through.
+   */
+  private async writeThroughTemporary(
+    name: string,
+    signal: AbortSignal | undefined,
+    write: (file: FileHandle) => Promise<void>,
+  ): Promise<void> {
+    let partial: string | null = null;
+    try {
+      signal?.throwIfAborted();
+      const path = await this.resolveObjectPath(name, "write");
+
+      await mkdir(dirname(path), { recursive: true });
+      partial = `${path}.${Bun.randomUUIDv7()}.partial`;
+      const file = await open(partial, "wx");
+      try {
+        await write(file);
+      } finally {
+        await file.close();
+      }
+      signal?.throwIfAborted();
+      if ((await this.resolveObjectPath(name, "write")) !== path) {
+        throw new Error(`Refusing to write "${name}": the storage folder moved during the write`);
+      }
+      await rename(partial, path);
+    } catch (error) {
+      if (partial) await unlink(partial).catch(() => {});
+      throw error;
+    }
+  }
+
   async put(params: PutFileParams | Blob, { signal }: PutFileOptions = {}) {
     signal?.throwIfAborted();
 
@@ -130,71 +179,74 @@ export class FileSystemDriver extends FileStorageDriver {
       name = params.name;
     }
 
-    const path = await this.resolveObjectPath(name, "write");
-    const buffer =
-      body instanceof Buffer
-        ? body
-        : body instanceof Blob || body instanceof File
-          ? Buffer.from(await body.arrayBuffer())
-          : "";
-
-    // `Bun.write` takes no signal, and a local write is not worth interrupting
-    // halfway, so the last chance to abort is once the body has been read.
-    signal?.throwIfAborted();
-    await Bun.write(path, buffer as any);
+    await this.writeThroughTemporary(name, signal, async (file) => {
+      const bytes =
+        body instanceof Buffer
+          ? body
+          : body instanceof Blob || body instanceof File
+            ? new Uint8Array(await body.arrayBuffer())
+            : new Uint8Array();
+      // A local write is not worth interrupting halfway, so the last chance
+      // to abort before it is once the body has been read.
+      signal?.throwIfAborted();
+      await writeAll(file, bytes);
+    });
 
     return name;
   }
 
   /**
-   * Writes the stream to a temporary file next to the target and renames it
-   * into place once the stream has ended, so an error or an abort halfway
-   * leaves no file, and a reader never sees a half-written one. Memory stays
+   * Writes the stream through a temporary file, as `put()` does. Memory stays
    * at one chunk however large the file.
-   *
-   * The name is checked for symbolic links before the temporary file is
-   * created and again before the rename, so a link that appeared at the name
-   * or in a parent while the stream ran is refused rather than replaced.
    */
   async putStream(
     { name, body }: PutStreamParams,
     { signal }: PutFileOptions = {},
   ): Promise<string> {
     const reader = body.getReader();
-    let partial: string | null = null;
     try {
-      signal?.throwIfAborted();
-      const path = await this.resolveObjectPath(name, "write");
-
-      await mkdir(dirname(path), { recursive: true });
-      partial = `${path}.${Bun.randomUUIDv7()}.partial`;
-      const file = await open(partial, "wx");
-      try {
+      await this.writeThroughTemporary(name, signal, async (file) => {
         for (;;) {
           signal?.throwIfAborted();
           const { done, value } = await reader.read();
           if (done) break;
-          // `write` may take fewer bytes than it was given.
-          for (let offset = 0; offset < value.byteLength; ) {
-            const { bytesWritten } = await file.write(value, offset);
-            offset += bytesWritten;
-          }
+          await writeAll(file, value);
         }
-      } finally {
-        await file.close();
-      }
-      signal?.throwIfAborted();
-      if ((await this.resolveObjectPath(name, "write")) !== path) {
-        throw new Error(`Refusing to write "${name}": the storage folder moved during the write`);
-      }
-      await rename(partial, path);
+      });
       return name;
     } catch (error) {
       // Also on a refusal before the first read: the source (a download) is
       // released now rather than when its own timeout runs out.
       await reader.cancel(error).catch(() => {});
-      if (partial) await unlink(partial).catch(() => {});
       throw error;
+    }
+  }
+
+  /**
+   * Opens an object for reading with `O_NOFOLLOW`, after the per-component
+   * link check, so a link swapped in at the final name since that check is
+   * refused by the kernel (`ELOOP`) and reported like a missing object, as is
+   * anything that is not a regular file. Parent directories cannot be pinned
+   * this way; the per-component check is the defence there.
+   */
+  private async openForRead(name: string): Promise<{ handle: FileHandle; info: Stats; path: string }> {
+    const path = await this.resolveObjectPath(name, "read");
+    let handle: FileHandle;
+    try {
+      handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    } catch (err: any) {
+      if (["ELOOP", "ENOENT", "ENOTDIR", "EISDIR"].includes(err?.code)) {
+        throw new FileNotFoundError(name);
+      }
+      throw err;
+    }
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new FileNotFoundError(name);
+      return { handle, info, path };
+    } catch (err) {
+      await handle.close().catch(() => {});
+      throw err;
     }
   }
 
@@ -205,21 +257,20 @@ export class FileSystemDriver extends FileStorageDriver {
     signal?.throwIfAborted();
 
     const name = typeof params === "string" ? params : params.name;
-    const file = Bun.file(await this.resolveObjectPath(name, "read"));
-    // Checked here for the same reason as in `read()`: a lazy `Bun.file()`
-    // would otherwise answer 200 and fail only once the body is pulled.
-    if (!(await file.exists())) {
-      throw new FileNotFoundError(name);
-    }
+    // Opened before the response exists, so a missing or linked object
+    // rejects here rather than answering 200 and failing once the body is
+    // pulled. The body streams from this handle, not from the path again.
+    const { handle, info, path } = await this.openForRead(name);
     // The disk read has no signal of its own. The body is wrapped instead, so
     // an abort stops the stream and closes the file mid-read.
-    const result = abortableBody(file.stream(), signal);
-    const date = new Date(file.lastModified).toUTCString();
+    const result = abortableBody(streamFromHandle(handle), signal);
+    const date = info.mtime.toUTCString();
 
     return new Response(result, {
       headers: {
-        "Content-Type": file.type,
-        "Content-Length": String(file.size),
+        // `Bun.file()` only names the type from the extension here; it opens nothing.
+        "Content-Type": Bun.file(path).type,
+        "Content-Length": String(info.size),
         "Cache-Control": "private, max-age=12000, must-revalidate",
         // TODO: fix this.
         "Last-Modified": date,
@@ -231,16 +282,20 @@ export class FileSystemDriver extends FileStorageDriver {
     const params = typeof input === "string" ? { name: input } : input;
     const { name, range = null } = params;
 
-    const file = Bun.file(await this.resolveObjectPath(name, "read"));
+    // `Bun.file()` is lazy. Without opening the object first the response
+    // commits with a 200 and the ENOENT only surfaces once the stream is
+    // pulled, as an unhandled rejection with the status already on the wire.
+    //
+    // The body is still the lazy `Bun.file(path)`, not the handle: a BunFile
+    // keeps its size through `slice()`, which is what lets Bun send a range
+    // with a real Content-Length, and `Bun.file(fd)` reads from the shared
+    // file offset and never closes the descriptor. So `O_NOFOLLOW` covers the
+    // check here, and Bun reopens the path when it sends the body.
+    const { handle, info, path } = await this.openForRead(name);
+    await handle.close();
+    const file = Bun.file(path);
 
-    // `Bun.file()` is lazy. Without this the response commits with a 200 and
-    // the ENOENT only surfaces once the stream is pulled, as an unhandled
-    // rejection with the status already on the wire.
-    if (!(await file.exists())) {
-      throw new FileNotFoundError(name);
-    }
-
-    const total = file.size;
+    const total = info.size;
     const resolved = range ? resolveRange(range, total) : null;
 
     if (range && !resolved) {
@@ -259,18 +314,16 @@ export class FileSystemDriver extends FileStorageDriver {
       total,
       partial: Boolean(resolved),
       type: file.type || "application/octet-stream",
-      lastModified: new Date(file.lastModified),
+      lastModified: info.mtime,
       name,
     };
   }
 
   async size(params: ReadFileParams | string) {
     const name = typeof params === "string" ? params : params.name;
-    const file = Bun.file(await this.resolveObjectPath(name, "read"));
-    if (!(await file.exists())) {
-      throw new FileNotFoundError(name);
-    }
-    return file.size;
+    const { handle, info } = await this.openForRead(name);
+    await handle.close();
+    return info.size;
   }
 
   async delete(params: DeleteFileParams | string) {
@@ -437,4 +490,50 @@ export class FileSystemDriver extends FileStorageDriver {
 
     return files;
   }
+}
+
+async function writeAll(file: FileHandle, bytes: Uint8Array): Promise<void> {
+  // `write` may take fewer bytes than it was given.
+  for (let offset = 0; offset < bytes.byteLength; ) {
+    const { bytesWritten } = await file.write(bytes, offset);
+    offset += bytesWritten;
+  }
+}
+
+const READ_CHUNK = 64 * 1024;
+
+/**
+ * Reads an open file from its start, one chunk per pull, and closes the
+ * handle when the stream ends, errors or is cancelled.
+ */
+function streamFromHandle(handle: FileHandle): ReadableStream<Uint8Array> {
+  let position = 0;
+  let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    await handle.close().catch(() => {});
+  };
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          const chunk = new Uint8Array(READ_CHUNK);
+          const { bytesRead } = await handle.read(chunk, 0, READ_CHUNK, position);
+          if (bytesRead === 0) {
+            await close();
+            controller.close();
+            return;
+          }
+          position += bytesRead;
+          controller.enqueue(chunk.subarray(0, bytesRead));
+        } catch (err) {
+          await close();
+          controller.error(err);
+        }
+      },
+      cancel: close,
+    },
+    { highWaterMark: 0 },
+  );
 }

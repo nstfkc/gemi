@@ -333,17 +333,21 @@ The driver refuses object names that pass through a symbolic link below the stor
 
 | Operation | A name that is or passes through a link |
 | --- | --- |
-| `read()`, `fetch()`, `size()` | Rejects with `FileNotFoundError`, as for a missing object. A stream route answers its usual 404. |
-| `put()`, `putStream()` | Rejects with an error saying the name is or passes through a symbolic link. Nothing is written through the link, and neither the link nor its target changes. `putStream()` checks before it creates its temporary file and again before it renames that file into place. |
+| `read()`, `fetch()`, `size()` | Rejects with `FileNotFoundError`, as for a missing object. A stream route answers its usual 404. The object is opened with `O_NOFOLLOW`, so a link at the final name is refused even if it appeared after the check. |
+| `put()`, `putStream()` | Rejects with an error saying the name is or passes through a symbolic link. Nothing is written through the link, and neither the link nor its target changes. Both write a temporary file next to the target and rename it into place. They check the name before creating the temporary file and again just before the rename. |
 | `delete()` | Rejects with an error saying the name is or passes through a symbolic link. Neither the link nor its target is removed. |
 | `objects(prefix)` | Skips links found during the walk. A prefix whose directory is or passes through a link lists nothing. |
 | `deletePrefix(prefix)` | Deletes only the regular files that `objects()` lists. Links found during the walk stay, with their targets. A prefix whose directory is or passes through a link is refused. |
 
-The storage folder itself may be a link. The driver resolves it, and every link in its own path, to the real directory on each operation, and treats that directory as the store. This is the supported way to share uploads between releases: make `/srv/app/current/storage` a link to `/srv/app/shared/storage` and pass `new FileSystemDriver("/srv/app/current/storage")`. Links placed inside the store, such as `covers/latest.jpg` pointing at another image, are not served. Copy the object instead, or keep the alias in your own records.
+The storage folder itself may be a link. The driver resolves it, and every link in its own path, to the real directory on each operation, and treats that directory as the store. This is the supported way to share uploads between releases: make `/srv/app/current/storage` a link to `/srv/app/shared/storage` and pass `new FileSystemDriver("/srv/app/current/storage")`. Links placed inside the store, such as `covers/latest.jpg` pointing at another image, are not served. Copy the object instead, or keep the alias in your own records. If the storage folder is a link to a directory that does not exist yet, writes fail with `The storage folder "…" is a symbolic link to a missing directory`. Create the shared directory before the first deploy.
 
 Missing parent directories are still created for a nested name. Writing `images/covers/front.jpg` into an empty store creates `images/covers/` first.
 
-The application is expected to own the storage tree. The driver checks for links when each operation starts. It does not guard against another process that adds, removes or replaces entries in the tree while an operation is running. A link created between the check and the read or write can still be followed. Do not give other users or untrusted processes write access to the storage folder.
+The application is expected to own the storage tree. The driver checks for links when each operation starts. It does not guard against another process that adds, removes or replaces entries in the tree while an operation is running. A write never goes through a link at the final name, because the rename replaces whatever entry is there. `fetch()` and `size()` read from the file they opened with `O_NOFOLLOW`. `read()` checks the same way but hands Bun the path, which Bun opens again when it sends the body, so ranges keep a real `Content-Length`. A directory in the path that is replaced by a link after the check can still be followed by any operation. Do not give other users or untrusted processes write access to the storage folder.
+
+Hard links are treated as ordinary files. A hard link cannot point at a directory or cross filesystems, and it looks like any other regular file to the driver.
+
+These rules are verified on POSIX systems (Linux and macOS). On Windows, `lstat` reports NTFS junctions as symbolic links, so the same checks should apply to them, but that is not tested.
 
 ### `S3Driver` (S3 / S3-compatible)
 
