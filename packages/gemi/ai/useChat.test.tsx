@@ -3587,7 +3587,7 @@ describe("watch (#1180)", () => {
     expect(box.api.status).toBe("idle");
   });
 
-  test("a run announced mid-stream is attached once the chat's own run ends", async () => {
+  test("a run announced mid-stream is attached beside the chat's own run", async () => {
     const watch = controlled();
     const own = controlled();
     fetchMock.mockImplementation(async (url: string) => {
@@ -3607,8 +3607,13 @@ describe("watch (#1180)", () => {
       watch.push({ seq: 1, event: { type: "run-start", runId: "run_1", threadId: "th_9" } });
       watch.push({ seq: 2, event: { type: "run-start", runId: "run_9", threadId: "th_9" } });
       await settle();
+      await settle();
     });
-    expect(urls()).not.toContain("/api/chat/attach");
+    // Runs on one thread can go at once, so the other one streams in now,
+    // beside this chat's own, which is not attached again.
+    expect(urls().filter((url) => url === "/api/chat/attach")).toHaveLength(1);
+    expect(box.api.status).toBe("streaming");
+    expect(box.api.runId).toBe("run_1");
 
     await act(async () => {
       own.push(...ANSWER.slice(2));
@@ -3616,9 +3621,11 @@ describe("watch (#1180)", () => {
       await new Promise((resolve) => setTimeout(resolve, 250));
     });
     expect(urls().filter((url) => url === "/api/chat/attach")).toHaveLength(1);
-    expect(box.api.messages.at(-1)!.content).toEqual([
+    expect(box.api.messages.map((message) => message.content)).toContainEqual([
       { type: "text", text: "The export is ready." },
     ]);
+    expect(box.api.messages.every((message) => message.role === "user" || message.finishReason)).toBe(true);
+    expect(box.api.status).toBe("idle");
   });
 
   test("does not attach again to the run it started itself", async () => {
@@ -3696,5 +3703,217 @@ describe("event messages (#1181)", () => {
     cleanup();
     const restored = mount({ threadId: "th_9", attach: false, initialMessages: [eventMessage] });
     expect(restored.box.api.messages[0]!.event?.name).toBe("job-settled");
+  });
+});
+
+describe("ifBusy: messages sent while a reply streams", () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const urls = () => calls().map((c) => c[0]);
+  const SECOND: AgentStreamFrame[] = [
+    { seq: 0, event: { type: "run-start", runId: "run_2", threadId: "th_9" } },
+    { seq: 1, event: { type: "message-start", messageId: "m2", role: "assistant" } },
+    { seq: 2, event: { type: "text-delta", messageId: "m2", delta: "It is noon." } },
+    { seq: 3, event: { type: "message-end", messageId: "m2", finishReason: "stop" } },
+    { seq: 4, event: { type: "run-end", runId: "run_2", finishReason: "stop" } },
+  ];
+  const text = (message: { content: { type: string; text?: string }[] }) =>
+    message.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+
+  test("parallel: two replies stream at once, each into its own message, each finishing on its own", async () => {
+    const first = controlled();
+    const second = controlled();
+    const answered: string[] = [];
+    let posts = 0;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/chat") return posts++ === 0 ? first.response : second.response;
+      throw new Error(`unexpected ${url}`);
+    });
+    const { box } = mount({
+      threadId: "th_9",
+      attach: false,
+      ifBusy: "parallel",
+      onFinish: (message: { id: string }) => answered.push(message.id),
+    });
+
+    await act(async () => {
+      void box.api.sendMessage("write the hero");
+      await settle();
+      first.push(ANSWER[0]!, ANSWER[1]!);
+      await settle();
+    });
+    await act(async () => {
+      void box.api.sendMessage("what time is it");
+      await settle();
+      second.push(SECOND[0]!, SECOND[1]!, SECOND[2]!);
+      await settle();
+    });
+    // Nothing was cut: no stop, and the first reply is still streaming.
+    expect(urls()).toEqual(["/api/chat", "/api/chat"]);
+    expect(rawBodyOf(1).ifBusy).toBe("parallel");
+    expect(box.api.status).toBe("streaming");
+    expect(box.api.runId).toBe("run_1");
+
+    // The second finishes first; the first is still going.
+    await act(async () => {
+      second.push(SECOND[3]!, SECOND[4]!);
+      second.close();
+      await settle();
+    });
+    expect(answered).toEqual(["m2"]);
+    expect(box.api.status).toBe("streaming");
+    expect(box.api.messages.find((m) => m.id === "m1")!.finishReason).toBeUndefined();
+
+    await act(async () => {
+      first.push(ANSWER[2]!, ANSWER[3]!, ANSWER[4]!);
+      first.close();
+      await settle();
+    });
+    expect(answered).toEqual(["m2", "m1"]);
+    expect(box.api.status).toBe("idle");
+    expect(box.api.messages.map((m) => [m.role, text(m)])).toEqual([
+      ["user", "write the hero"],
+      ["assistant", "Hi there."],
+      ["user", "what time is it"],
+      ["assistant", "It is noon."],
+    ]);
+    expect(box.api.messages.every((m) => m.role === "user" || m.finishReason === "stop")).toBe(true);
+  });
+
+  test("join: the reply keeps streaming, takes the message, and is not shown twice", async () => {
+    const first = controlled();
+    let posts = 0;
+    // The join's answer is the same run's stream, from its first frame.
+    const joinedFrames = (localId: string): AgentStreamFrame[] => [
+      ANSWER[0]!,
+      ANSWER[1]!,
+      ANSWER[2]!,
+      ANSWER[3]!,
+      {
+        seq: 5,
+        event: {
+          type: "message-id",
+          localId,
+          messageId: "msg_joined",
+          message: {
+            id: "msg_joined",
+            role: "user",
+            content: [{ type: "text", text: "and make it blue" }],
+            createdAt: new Date(0).toISOString(),
+            finishReason: "stop",
+            joined: true,
+          },
+        },
+      },
+      { seq: 6, event: { type: "message-start", messageId: "m5", role: "assistant" } },
+      { seq: 7, event: { type: "text-delta", messageId: "m5", delta: "Blue it is." } },
+      { seq: 8, event: { type: "message-end", messageId: "m5", finishReason: "stop" } },
+      { seq: 9, event: { type: "run-end", runId: "run_1", finishReason: "stop" } },
+    ];
+    const joined = controlled();
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/chat") return posts++ === 0 ? first.response : joined.response;
+      throw new Error(`unexpected ${url}`);
+    });
+    const { box } = mount({ threadId: "th_9", attach: false });
+
+    await act(async () => {
+      void box.api.sendMessage("write the hero");
+      await settle();
+      first.push(ANSWER[0]!, ANSWER[1]!, ANSWER[2]!);
+      await settle();
+    });
+    await act(async () => {
+      // Per message, over the hook's default.
+      void box.api.sendMessage("and make it blue", { ifBusy: "join" });
+      await settle();
+    });
+    const localId = rawBodyOf(1).turn.localId as string;
+    expect(rawBodyOf(1).ifBusy).toBe("join");
+    expect(urls()).toEqual(["/api/chat", "/api/chat"]);
+
+    await act(async () => {
+      const frames = joinedFrames(localId);
+      // Both connections carry the run: the first goes on, the join's replays it.
+      joined.push(...frames);
+      first.push(...frames.slice(3));
+      joined.close();
+      first.close();
+      await settle();
+    });
+    expect(box.api.status).toBe("idle");
+    expect(box.api.messages.map((m) => [m.role, text(m)])).toEqual([
+      ["user", "write the hero"],
+      ["assistant", "Hi there."],
+      ["user", "and make it blue"],
+      ["assistant", "Blue it is."],
+    ]);
+    expect(box.api.messages[2]!.id).toBe("msg_joined");
+    expect(box.api.messages[2]!.localId).toBe(localId);
+  });
+
+  test("without ifBusy a send still cuts the reply off, as before", async () => {
+    const first = controlled();
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url === "/api/chat/stop") return new Response(JSON.stringify({ stopped: true }));
+      if (url === "/api/chat") {
+        if (calls().filter((c) => c[0] === "/api/chat").length === 1) {
+          init?.signal?.addEventListener("abort", () => first.abort());
+          return first.response;
+        }
+        return streamed(SECOND);
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const { box } = mount({ threadId: "th_9", attach: false });
+    await act(async () => {
+      void box.api.sendMessage("one");
+      await settle();
+      first.push(ANSWER[0]!, ANSWER[1]!);
+      await settle();
+    });
+    await act(async () => {
+      await box.api.sendMessage("two");
+    });
+    expect(urls()).toContain("/api/chat/stop");
+    expect(rawBodyOf(2).ifBusy).toBeUndefined();
+    expect(box.api.messages.find((m) => m.id === "m1")!.finishReason).toBe("aborted");
+  });
+
+  test("stop() stops every reply streaming", async () => {
+    const first = controlled();
+    const second = controlled();
+    let posts = 0;
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url === "/api/chat/stop") return new Response(JSON.stringify({ stopped: true }));
+      if (url === "/api/chat") {
+        const stream = posts++ === 0 ? first : second;
+        init?.signal?.addEventListener("abort", () => stream.abort());
+        return stream.response;
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const { box } = mount({ threadId: "th_9", attach: false, ifBusy: "parallel" });
+    await act(async () => {
+      void box.api.sendMessage("one");
+      await settle();
+      first.push(ANSWER[0]!, ANSWER[1]!);
+      void box.api.sendMessage("two");
+      await settle();
+      second.push(SECOND[0]!, SECOND[1]!);
+      await settle();
+    });
+    await act(async () => {
+      await box.api.stop();
+    });
+    const stops = calls()
+      .map((call, index) => [call[0], index] as const)
+      .filter(([url]) => url === "/api/chat/stop")
+      .map(([, index]) => rawBodyOf(index).runId);
+    expect(stops.sort()).toEqual(["run_1", "run_2"]);
+    expect(box.api.status).toBe("idle");
+    expect(box.api.messages.filter((m) => m.role === "assistant").map((m) => m.finishReason)).toEqual([
+      "aborted",
+      "aborted",
+    ]);
   });
 });

@@ -37,7 +37,7 @@ export class ChatEditJob extends Job {
 | `user` | Who the turn runs as. It is `req.ctx().user` in `authorizeRequest`, `runOwner`, `context()`, the hooks and every tool, and what `Auth.user()` answers there. Absent or `null` is an anonymous turn. |
 | `body` | The controller's `Body`, as `useChat`'s `body` option would send it. Typed the same way. |
 | `event` | Something that happened, in place of a person's message: `{ name, text?, data? }`. Not with `text` or `turn`. See [Event turns](#event-turns). |
-| `ifBusy` | What to do when the thread has a run going: `"supersede"` (the default), `"queue"` or `"skip"`. See [A thread that is busy](#a-thread-that-is-busy). |
+| `ifBusy` | What to do when the thread has a run going: `"supersede"` (the default), `"queue"`, `"join"`, `"parallel"` or `"skip"`. See [A thread that is busy](#a-thread-that-is-busy). |
 
 It answers once the run has started:
 
@@ -64,6 +64,8 @@ By default a server turn on a thread whose run is still going stops that run and
 |---|---|
 | `"supersede"` | The default. Stops the running run, then starts. |
 | `"queue"` | Waits for the running run to end and its transcript to be stored, then starts, so the model sees that turn's messages. `startTurn` settles once the turn has started. |
+| `"join"` | Adds the message to the running turn. The run reads it at its next step. See [Joining the running turn](#joining-the-running-turn). |
+| `"parallel"` | Starts a second run beside the running one, with its own `runId` and stream. See [Runs side by side](#runs-side-by-side). |
 | `"skip"` | Starts nothing and answers `{ skipped: true, threadId }`. |
 
 ```typescript
@@ -80,6 +82,74 @@ A thread is busy while a run on it is going, or while another turn is setting up
 With `ifBusy: "skip"`, `startTurn` answers `AgentTurn | AgentTurnSkipped`; check `"skipped" in turn` first. Like the thread's lock, the policy is per process: a run going in another process does not make the thread busy here.
 
 To continue a thread when a background job settles, call `startTurn` with `ifBusy: "queue"` from an [`AgentJobs.onSettled`](./ai-background-jobs.md#continuing-the-thread-when-a-job-settles) listener.
+
+### Joining the running turn
+
+With `ifBusy: "join"` the message becomes part of the turn that is going. The run reads it at its next step: after the model call in flight, or after the tools of that step have run. A run that was about to finish makes one more model call for it. Nothing is stopped and no new run starts.
+
+```typescript
+const turn = await ChatController.startTurn({ threadId, user, text: "and make it blue", ifBusy: "join" });
+turn.joined;   // true: turn.runId is the running run's id
+await turn.result(); // that run's result
+```
+
+- The message is stored in the order it arrived, between the run's messages, with `message.joined: true`. It is not a turn start: `contextWindow` keeps it with the turn it joined, and a turn's files include the files of the messages that joined it.
+- The run sends a `message-id` frame (or a `message` frame for an event) when it takes the message, so a chat that sent it renames its copy there.
+- When the run ends before it reaches a step that reads the message (it was on its last step under `maxSteps`, it stopped, it failed, it parked on an approval), the message starts a turn of its own after the run, as `"queue"` would. That message is stored as a turn start, without `joined`. From the chat, the reply to it arrives on the same response stream; `startTurn`'s `result()` settles with the run that answered it.
+- A turn with `toolResults` (answering an approval) or with nothing in it is never joined. It waits for the run as `"queue"` would.
+- A join adds no run, so it does not count against `maxConcurrentRuns`. Only a run the caller may attach to is joined; another user's run answers `403`.
+
+### Runs side by side
+
+With `ifBusy: "parallel"` a second run starts while the first goes on. Each run has its own `runId`, stream and result.
+
+- Each run reads the thread as it was when it started, plus its own messages: the messages another run is still writing are left out. A parallel turn waits only until the runs already going have stored their opening messages.
+- Messages are stored in arrival order. Each run's messages are written by id, so runs writing at once don't overwrite each other.
+- Each run counts against `maxConcurrentRuns`. A thread takes at most `maxThreadRuns` runs at once (default `DEFAULT_MAX_THREAD_RUNS`, 3); one more answers `429` with code `too_many_runs`. Override it per thread:
+
+```typescript
+protected maxThreadRuns(req: HttpRequest, { threadId, owner, body }) {
+  return body.plan === "pro" ? 5 : 2;
+}
+```
+
+- `stop` with only a `threadId` stops every run on the thread the caller may stop. `attach` with a `runId` attaches to that run; without one, to the newest. `watch` announces each run going on the thread.
+
+### Choosing per message: `busyPolicy`
+
+The controller's `busyPolicy` hook decides what happens to each message that arrives on a busy thread, from the chat or from `startTurn`. It is called only when a run is going, and it answers one of the `ifBusy` values. The default answers what the request asked for, `"supersede"` when it asked for nothing.
+
+```typescript
+protected busyPolicy(req: HttpRequest, { running, requested, turn, source }: BusyPolicyParams<Body>) {
+  if (source === "server") return requested ?? "queue";
+  // A short follow-up refines the answer in progress; anything else gets its own run.
+  if (turn?.text && turn.text.length < 80) return "join";
+  return "parallel";
+}
+```
+
+Its parameters:
+
+| | |
+|---|---|
+| `threadId`, `body`, `owner` | The request's thread, `Body` and run owner. |
+| `running` | The runs going on the thread, oldest first: `{ runId, startedAt, owner, turn, joined }`, where `turn` is the message that started the run and `joined` the messages that joined it (`{ text?, files?, event? }`). |
+| `requested` | What the request asked for (`ifBusy` from `startTurn` or the chat), or `undefined`. |
+| `source` | `"client"` or `"server"`. |
+| `turn` | The new message. |
+
+An answer that isn't an `ifBusy` value fails the turn. `"skip"` answers a chat request `409` with code `thread_busy`. A regenerate always supersedes and does not ask. Like the other hooks, it can be passed in `defineAgentHooks`.
+
+### From the chat
+
+`useChat` sends `ifBusy` for the whole chat, or per message:
+
+```tsx
+const chat = useChat("/chat", { threadId, ifBusy: "parallel" });
+chat.sendMessage("and make it blue", { ifBusy: "join" });
+```
+
+A client can send `"supersede"`, `"queue"`, `"join"` or `"parallel"` (anything else answers `400`), and only on a thread. Without `ifBusy` a send cuts off the streaming reply, as before. With `"join"`, `"queue"` or `"parallel"` it does not: the chat follows each run on its own stream, each reply is built into its own message and finishes on its own, `status` stays `"streaming"` until the last one ends, `runId` names the oldest run going, and `stop()` stops them all.
 
 ## Event turns
 
@@ -101,7 +171,7 @@ await ChatController.startTurn({
 
 ## Showing a server turn in an open chat
 
-A chat that is open on the thread doesn't see a turn it didn't start unless it asks. `useChat({ threadId, watch: true })` follows the thread: it keeps a small SSE stream open to `POST /<path>/watch`, which announces each run that starts on the thread (from `startTurn`, another tab, voice), and the hook attaches to it as `reattach()` would. A run announced while the chat is streaming its own is attached once that ends.
+A chat that is open on the thread doesn't see a turn it didn't start unless it asks. `useChat({ threadId, watch: true })` follows the thread: it keeps a small SSE stream open to `POST /<path>/watch`, which announces each run that starts on the thread (from `startTurn`, another tab, voice), and the hook attaches to it as `reattach()` would. A run announced while the chat is streaming its own is attached at once, beside it.
 
 ```tsx
 const chat = useChat("/chat", { threadId, initialMessages, watch: true });

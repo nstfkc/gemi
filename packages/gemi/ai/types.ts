@@ -725,6 +725,18 @@ export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
    * a bubble. Only the server sets it: a client cannot send one.
    */
   event?: TurnEvent;
+  /**
+   * Set on a user message that joined a turn still going (`ifBusy: "join"`):
+   * sent while the run was answering, and read by that run at its next model
+   * call. Stored with the message.
+   *
+   * It belongs to the running turn, so it is not a turn start: `turnStarts`,
+   * `contextWindow` and `compact` keep it with the turn it joined, and a tool
+   * after it sees the turn's files and its own (`ctx.turn`). A message that
+   * came too late to join (its run had just ended) starts a turn of its own
+   * and does not carry this.
+   */
+  joined?: true;
 };
 
 /** What `AgentMessage.event` carries (#1181). */

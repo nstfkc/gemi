@@ -49,7 +49,8 @@ export function injectedMessageIds(messages: readonly AgentMessage[]): Set<strin
  *
  * A turn starts at a user message that no tool injected, and runs until the
  * next one: the assistant's steps, their tool calls with their results (which
- * are stored on the same message as the call), and any file a tool showed.
+ * are stored on the same message as the call), any file a tool showed, and
+ * any message that joined the turn while it ran (`AgentMessage.joined`).
  * Index 0 always starts a turn, so messages before the first user message (a
  * greeting, a run cut short before its turn was stored) belong to the first
  * turn rather than to none. Empty for an empty list.
@@ -60,7 +61,7 @@ export function turnStarts(messages: readonly AgentMessage[]): number[] {
   const starts = [0];
   for (let index = 1; index < messages.length; index++) {
     const message = messages[index]!;
-    if (message.role === "user" && !injected.has(message.id)) starts.push(index);
+    if (message.role === "user" && !message.joined && !injected.has(message.id)) starts.push(index);
   }
   return starts;
 }

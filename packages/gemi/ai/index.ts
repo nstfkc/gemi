@@ -121,6 +121,8 @@ export type {
   RunAgentArgs,
   AgentResultOptions,
   AgentRun,
+  AgentJoinTurn,
+  AgentRunJoin,
   AgentRunFailure,
   AgentRunResult,
   AgentStreamParams,
@@ -521,6 +523,7 @@ export {
   defineAgentHooks,
 } from "./AgentController";
 export type { AttachmentRetentionParams, AttachmentSweepResult } from "./AgentController";
+export type { LiveRunInfo } from "./store/LiveRuns";
 export type {
   VoiceMiddlewareConfig,
   VoiceRoute,
@@ -540,6 +543,10 @@ export type {
   ThreadSweepResult,
   AgentTurn,
   AgentTurnBusyPolicy,
+  AgentClientBusyPolicy,
+  AgentRunningTurn,
+  AgentRunningTurnMessage,
+  BusyPolicyParams,
   AgentTurnEvent,
   AgentTurnParams,
   AgentTurnResult,

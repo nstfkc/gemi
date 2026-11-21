@@ -66,6 +66,33 @@ const showing = (id: string, shownId: string): AgentMessage => ({
   ] as any,
 });
 
+describe("joined messages (ifBusy: \"join\")", () => {
+  test("a message that joined a running turn is not a turn start", () => {
+    const messages = [
+      msg("u0", "user", "write the hero"),
+      msg("a0", "assistant", "on it"),
+      msg("u1", "user", "make it blue", { joined: true }),
+      msg("a1", "assistant", "blue it is"),
+      msg("u2", "user", "next thing"),
+      msg("a2", "assistant", "done"),
+    ];
+    expect(turnStarts(messages)).toEqual([0, 4]);
+    expect(splitTurns(messages).map(ids)).toEqual([["u0", "a0", "u1", "a1"], ["u2", "a2"]]);
+  });
+
+  test("the window keeps a joined message with the turn it joined", () => {
+    const messages = [
+      ...thread(2),
+      msg("u9", "user", "the last turn"),
+      msg("a9", "assistant", "first half"),
+      msg("j9", "user", "and one more thing", { joined: true }),
+      msg("b9", "assistant", "second half"),
+    ];
+    const windowed = windowMessages(messages, { maxTurns: 1, note: false });
+    expect(ids(windowed.messages)).toEqual(["u9", "a9", "j9", "b9"]);
+  });
+});
+
 describe("turnStarts / splitTurns", () => {
   test("a turn starts at each user message, and index 0 always starts one", () => {
     const messages = [

@@ -1,3 +1,23 @@
+# 0.226.0
+
+## Join the running turn, or run turns side by side on one thread
+
+**New API and one behaviour change (minor version).** See [A thread that is busy](docs/ai-server-turns.md#a-thread-that-is-busy).
+
+- `ifBusy` takes two more values, on `startTurn` and now from the chat (`useChat({ ifBusy })` or `sendMessage(text, { ifBusy })`):
+  - `"join"`: the message joins the running turn and the run reads it at its next step. It is stored in arrival order with `message.joined: true`, and it is not a turn start for `contextWindow`. A run that ends before it reads the message (last step, stop, error, approval) answers it with a turn of its own after, on the same response stream. `AgentTurn.joined` says whether `startTurn` joined.
+  - `"parallel"`: a second run starts beside the first, with its own `runId` and stream. Each run reads the thread as it was when it started, plus its own messages. A thread takes at most `maxThreadRuns` runs at once (default 3, `429 too_many_runs` past it), and each run counts against `maxConcurrentRuns`.
+- New protected controller methods, also accepted as hooks: `busyPolicy(req, { threadId, running, requested, source, turn, body, owner })` decides per message on a busy thread, and `maxThreadRuns(req, { threadId, owner, body })` sets the per-thread limit. The default `busyPolicy` answers the request's `ifBusy`, `"supersede"` when there is none, so nothing changes until a request or the hook asks for more.
+- `AgentRun.join(turn)` (optional on the interface) adds a message to a running run; it answers `null` once the run can no longer take one.
+- `MemoryLiveRuns` gains `running({ threadId })` (every run going on the thread, oldest first) and `threadOf(runId)`. `attach` with a `runId` attaches to that run, `watch` announces each run going on the thread, and `stop` with only a `threadId` stops every run on it the caller may stop.
+- `useChat` follows several runs at once: each reply finishes on its own, `status` stays `"streaming"` until the last ends, and `stop()` stops them all. The reducer gains `applyRunFrame`, `markAllAborted`, `liveRunIds` and `runCursor` for clients that apply frames themselves.
+- New exported types: `AgentClientBusyPolicy`, `AgentRunningTurn`, `AgentRunningTurnMessage`, `BusyPolicyParams`, `AgentJoinTurn`, `AgentRunJoin`, `LiveRunInfo`, `ChatBusyPolicy`.
+
+What to check:
+
+- **`useChat({ watch: true })`:** a run announced while the chat streams its own is now attached at once, beside it, instead of once the chat's run ends. A UI that shows one streaming reply at a time can see two.
+- **A request body field named `ifBusy`** is now read by the controller and is no longer passed through as part of `body`. Rename an app field of that name.
+
 # 0.225.2
 
 ## `gemi/email` loads in a happy-dom test (#1336)
