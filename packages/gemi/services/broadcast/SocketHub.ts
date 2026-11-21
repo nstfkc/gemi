@@ -2,7 +2,7 @@ import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
 
 import type { Application } from "../../foundation/Application";
 import { signedInUser } from "../../http/ChannelRouter";
-import { normalizeIpEntry } from "../../http/clientAddress";
+import { addressBlock, normalizeIpEntry } from "../../http/clientAddress";
 import { HttpRequest } from "../../http/HttpRequest";
 import { type CarriedContext, RequestContext } from "../../http/requestContext";
 import { kernelContext } from "../../kernel/context";
@@ -797,14 +797,17 @@ function userIdOf(user: unknown): string | null {
 }
 
 /**
- * The client address: what the production server left in `X-Forwarded-For`
- * (see `forwardedFor.ts`), or the socket's peer.
+ * The client address `maxConnectionsPerIp` counts: what the production server
+ * left in `X-Forwarded-For` (see `forwardedFor.ts`), or the socket's peer, with
+ * an IPv6 address grouped by its /64 as `clientAddress` does, so a host cannot
+ * open another cap's worth of sockets by changing address inside its /64.
  */
 function clientIp(req: Request, server: Server<any>): string | null {
   const forwarded = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  if (forwarded) return normalizeIpEntry(forwarded) ?? forwarded;
+  if (forwarded) return addressBlock(normalizeIpEntry(forwarded) ?? forwarded);
   try {
-    return server.requestIP(req)?.address ?? null;
+    const peer = server.requestIP(req)?.address;
+    return peer ? addressBlock(peer) : null;
   } catch {
     return null;
   }
