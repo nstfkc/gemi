@@ -727,16 +727,18 @@ export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
   event?: TurnEvent;
   /**
    * Set on a user message that joined a turn still going (`ifBusy: "join"`):
-   * sent while the run was answering, and read by that run at its next model
-   * call. Stored with the message.
+   * the id of the message that started that turn. Sent while the run was
+   * answering, and read by that run at its next model call. Stored with the
+   * message.
    *
-   * It belongs to the running turn, so it is not a turn start: `turnStarts`,
-   * `contextWindow` and `compact` keep it with the turn it joined, and a tool
-   * after it sees the turn's files and its own (`ctx.turn`). A message that
-   * came too late to join (its run had just ended) starts a turn of its own
-   * and does not carry this.
+   * It belongs to the turn it names, wherever it is stored: with runs side by
+   * side (`"parallel"`) another turn's messages can come between. So it is
+   * not a turn start, `splitTurns` puts it with its turn, `contextWindow`
+   * never cuts between it and its turn, and a tool after it sees the turn's
+   * files and its own (`ctx.turn`). A message that came too late to join (its
+   * run had just ended) starts a turn of its own and does not carry this.
    */
-  joined?: true;
+  joined?: string;
 };
 
 /** What `AgentMessage.event` carries (#1181). */

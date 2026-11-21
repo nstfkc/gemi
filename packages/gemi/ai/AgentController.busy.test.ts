@@ -73,8 +73,11 @@ type Body = { pageId?: string };
  * A controller whose model calls each wait for a gate of their own:
  * `release(n)` lets the n-th call answer.
  */
+/** A model call that fails, in place of a script. */
+const FAILS = new Error("the model call failed");
+
 async function setup(
-  scripts: ProviderEvent[][],
+  scripts: (ProviderEvent[] | Error)[],
   options: {
     store?: AgentStore;
     maxSteps?: number;
@@ -86,7 +89,7 @@ async function setup(
 ) {
   const store = options.store ?? new MemoryAgentStore();
   const liveRuns = new MemoryLiveRuns();
-  const provider = fakeProvider(...scripts);
+  const provider = fakeProvider();
   const gates: { promise: Promise<void>; open: () => void }[] = [];
   const gateFor = (index: number) => {
     while (gates.length <= index) {
@@ -109,7 +112,9 @@ async function setup(
     return (async function* () {
       await gateFor(index).promise;
       // The call's own script, whichever order the gates open in.
-      yield* scripts[index] ?? [finish()];
+      const script = scripts[index] ?? [finish()];
+      if (script instanceof Error) throw script;
+      yield* script;
     })();
   };
   const asked: BusyPolicyParams<Body>[] = [];
@@ -203,7 +208,8 @@ describe.each(stores)("join ($name)", ({ make }) => {
 
     const stored = (await store.loadThread(threadId))!;
     expect(stored.map(textOf)).toEqual(["hi", "first", "and make it blue", "second"]);
-    expect(stored[2]).toMatchObject({ role: "user", joined: true });
+    // It names the turn it joined.
+    expect(stored[2]).toMatchObject({ role: "user", joined: stored[0]!.id });
     expect(stored[0]!.joined).toBeUndefined();
     // The joined message is not a turn start: the four messages are one turn.
     expect(turnStarts(stored)).toEqual([0]);
@@ -246,7 +252,7 @@ describe.each(stores)("join ($name)", ({ make }) => {
     expect((await first.result()).finishReason).toBe("stop");
 
     const second = provider.calls[1]!.messages as AgentMessage[];
-    expect(second.at(-1)).toMatchObject({ role: "user", joined: true });
+    expect(second.at(-1)).toMatchObject({ role: "user", joined: second[0]!.id });
     expect(textOf(second.at(-1)!)).toBe("then add a border");
 
     const stored = (await store.loadThread(threadId))!;
@@ -287,34 +293,203 @@ describe("join: the race with a run that is ending", () => {
     expect(turnStarts(stored)).toEqual([0, 2]);
   });
 
-  test("a message accepted by a run that then stops is answered by a turn started for it", async () => {
-    const { store, provider, Chat, release, calls } = await setup([say("first"), say("second")]);
+  test("a stop drops a joined message the run had not read: no run starts for it, nothing is stored", async () => {
+    const { store, Chat, release, calls, liveRuns } = await setup([say("first"), say("second")]);
     const { threadId } = await store.createThread({});
     const first = await Chat.startTurn({ threadId, text: "hi" });
     await until(() => calls() === 1);
 
     const joined = (await Chat.startTurn({ threadId, text: "also this", ifBusy: "join" })) as AgentTurn;
     expect(joined.joined).toBe(true);
-    // The run ends before it reached the step that would read the message.
+    // The person stops the conversation before the run read the message.
     first.stop();
     release(0);
     expect((await first.result()).finishReason).toBe("aborted");
+
+    // The joined turn's outcome is the stopped run's.
+    const result = await joined.result();
+    expect(result.runId).toBe(first.runId);
+    expect(result.finishReason).toBe("aborted");
+    await tick();
+    await tick();
+    expect(calls()).toBe(1);
+    expect(liveRuns.running({ threadId })).toEqual([]);
+    const stored = (await store.loadThread(threadId))!;
+    expect(stored.map(textOf)).toEqual(["hi", ""]);
+  });
+
+  test("a stop from the route drops it too, and the joined stream just ends", async () => {
+    const { store, Chat, release, calls } = await setup([say("first"), say("second")]);
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "hi" });
+    await until(() => calls() === 1);
+
+    const response = await new Chat().stream(
+      request("", { threadId, turn: { text: "also this", localId: "local_1" }, ifBusy: "join" }),
+    );
+    const reading = framesOf(response);
+    expect(await new Chat().stop(request("/stop", { runId: first.runId }))).toEqual({
+      stopped: true,
+    });
+    release(0);
+    const frames = await reading;
+    expect(frames.filter((frame) => frame.event.type === "run-start")).toHaveLength(1);
+    expect(frames.at(-1)!.event).toMatchObject({ type: "run-end", finishReason: "aborted" });
+    await tick();
+    expect(calls()).toBe(1);
+    expect((await store.loadThread(threadId))!.map(textOf)).toEqual(["hi", ""]);
+  });
+
+  test("a run that fails before reading the message hands it to a turn of its own", async () => {
+    const { store, provider, Chat, release, calls } = await setup([FAILS, say("second")]);
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "hi" });
+    await until(() => calls() === 1);
+
+    const joined = (await Chat.startTurn({ threadId, text: "also this", ifBusy: "join" })) as AgentTurn;
+    release(0);
+    expect((await first.result()).finishReason).toBe("error");
 
     await until(() => calls() === 2);
     release(1);
     const result = await joined.result();
     expect(result.text).toBe("second");
     expect(result.runId).not.toBe(first.runId);
-
-    const last = provider.calls[1]!.messages.at(-1) as AgentMessage;
-    expect(textOf(last)).toBe("also this");
+    expect(textOf(provider.calls[1]!.messages.at(-1) as AgentMessage)).toBe("also this");
     const stored = (await store.loadThread(threadId))!;
-    // The stopped answer had nothing yet: it is kept, cut off, before the message.
-    expect(stored.map(textOf)).toEqual(["hi", "", "also this", "second"]);
-    expect(stored[1]!.finishReason).toBe("aborted");
-    expect(stored[2]!.joined).toBeUndefined();
+    expect(stored.map(textOf).slice(-2)).toEqual(["also this", "second"]);
+    expect(stored.at(-2)!.joined).toBeUndefined();
   });
 
+  test("a message whose run was superseded joins the run that superseded it, and result() is that run's", async () => {
+    const { store, provider, Chat, release, calls } = await setup([
+      say("first"),
+      say("both answered"),
+    ]);
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "hi" });
+    await until(() => calls() === 1);
+    const joined = (await Chat.startTurn({ threadId, text: "also this", ifBusy: "join" })) as AgentTurn;
+
+    // A turn that supersedes: the run is stopped by it, not by a caller.
+    const superseding = Chat.startTurn({ threadId, text: "new topic" });
+    await tick();
+    release(0);
+    const next = await superseding;
+    expect((await first.result()).finishReason).toBe("aborted");
+
+    // The joined message tries again and joins the new run, which reads it
+    // with its own message.
+    await until(() => calls() === 2);
+    release(1);
+    const result = await joined.result();
+    expect(result.runId).toBe(next.runId);
+    expect(result.text).toBe("both answered");
+    expect(provider.calls[1]!.messages.map((m) => textOf(m as AgentMessage)).slice(-2)).toEqual([
+      "new topic",
+      "also this",
+    ]);
+    const stored = (await store.loadThread(threadId))!;
+    const also = stored.find((message) => textOf(message) === "also this")!;
+    expect(also.joined).toBe(stored.find((message) => textOf(message) === "new topic")!.id);
+  });
+
+  test("a joined message whose turn of its own is refused is stored and reported, on the stream and by result()", async () => {
+    let asks = 0;
+    const { store, Chat, release, calls } = await setup([say("first"), FAILS, FAILS], {
+      busyPolicy: ({ turn }) => {
+        if (turn?.text === "side") return "parallel";
+        // Joins the first time, and is refused (skip) when it tries again.
+        return asks++ === 0 ? "join" : "skip";
+      },
+    });
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "hi" });
+    const side = await Chat.startTurn({ threadId, text: "side" });
+    await until(() => calls() === 2);
+
+    // Joins `side`, the newest run, which then fails before reading it.
+    const response = await new Chat().stream(
+      request("", { threadId, turn: { text: "also this", localId: "local_3" } }),
+    );
+    const reading = framesOf(response);
+    release(1);
+    expect((await side.result()).finishReason).toBe("error");
+    const frames = await reading;
+    const renamed = frames.find((frame) => frame.event.type === "message-id")!.event as any;
+    expect(renamed.localId).toBe("local_3");
+    const error = frames.at(-1)!.event as any;
+    expect(error.type).toBe("error");
+    expect(error.error.message).toMatch(/not answered/);
+    // seq goes on from the run's, so the client applies both frames.
+    const seqs = frames.map((frame) => frame.seq);
+    expect(seqs.at(-1)).toBeGreaterThan(seqs.at(-3)!);
+
+    const stored = (await store.loadThread(threadId))!;
+    const kept = stored.find((message) => textOf(message) === "also this")!;
+    expect(kept.id).toBe(renamed.messageId);
+    expect(kept.joined).toBeUndefined();
+    release(0);
+    await first.result();
+  });
+
+  test("startTurn: result() rejects with the refusal of the turn started for a joined message", async () => {
+    let asks = 0;
+    const { store, Chat, release, calls } = await setup([say("first"), FAILS], {
+      busyPolicy: ({ turn }) => {
+        if (turn?.text === "side") return "parallel";
+        return asks++ === 0 ? "join" : "skip";
+      },
+    });
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "hi" });
+    const side = await Chat.startTurn({ threadId, text: "side" });
+    await until(() => calls() === 2);
+    const joined = (await Chat.startTurn({ threadId, text: "also this" })) as AgentTurn;
+    expect(joined.runId).toBe(side.runId);
+    release(1);
+    await expect(joined.result()).rejects.toMatchObject({ status: 409 });
+    const stored = (await store.loadThread(threadId))!;
+    expect(stored.some((message) => textOf(message) === "also this")).toBe(true);
+    release(0);
+    await first.result();
+  });
+
+  test("a run that continues for a joined message after a tool ended its step ends with its later step's reason", async () => {
+    let finishTool!: () => void;
+    const toolDone = new Promise<void>((resolve) => {
+      finishTool = resolve;
+    });
+    let toolStarted = false;
+    const publish = AgentTool.create({
+      name: "publish",
+      description: "Publishes the page",
+      inputSchema: s.object({}),
+      endsRun: () => "Published.",
+      execute: async () => {
+        toolStarted = true;
+        await toolDone;
+        return { ok: true };
+      },
+    });
+    const { store, Chat, release, calls } = await setup(
+      [
+        [{ type: "tool-call", toolCallId: "call_1", name: "publish", args: "{}" }, finish("tool-calls")],
+        [{ type: "text-delta", delta: "cut off" }, { ...finish(), reason: "length" } as ProviderEvent],
+      ],
+      { tools: [publish] },
+    );
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "publish it" });
+    release(0);
+    await until(() => toolStarted);
+    await Chat.startTurn({ threadId, text: "and tell me the url", ifBusy: "join" });
+    finishTool();
+    await until(() => calls() === 2);
+    release(1);
+    const result = await first.result();
+    expect(result.finishReason).toBe("length");
+  });
   test("AgentRun.join answers null once the run has ended, and for a message with nothing in it", async () => {
     const provider = fakeProvider(say("done"));
     const agent = Agent.create({ name: "joiner", provider });
@@ -325,7 +500,7 @@ describe("join: the race with a run that is ending", () => {
   });
 
   test("a client turn that finds its run ending gets the next run's stream on the same response", async () => {
-    const { store, Chat, release, calls } = await setup([say("first"), say("second")]);
+    const { store, Chat, release, calls } = await setup([FAILS, say("second")]);
     const { threadId } = await store.createThread({});
     const first = await Chat.startTurn({ threadId, text: "hi" });
     await until(() => calls() === 1);
@@ -335,7 +510,6 @@ describe("join: the race with a run that is ending", () => {
     );
     expect(response.headers.get("Content-Type")).toMatch(/text\/event-stream/);
     const reading = framesOf(response);
-    first.stop();
     release(0);
     await until(() => calls() === 2);
     release(1);
@@ -368,7 +542,7 @@ describe("join from a client turn", () => {
     expect(frames[0]!.event).toEqual({ type: "run-start", runId: first.runId, threadId });
     const renamed = frames.find((frame) => frame.event.type === "message-id")!.event as any;
     expect(renamed.localId).toBe("local_7");
-    expect(renamed.message).toMatchObject({ role: "user", joined: true });
+    expect(renamed.message).toMatchObject({ role: "user", joined: expect.any(String) });
     expect(frames.filter((frame) => frame.event.type === "run-start")).toHaveLength(1);
     expect(frames.at(-1)!.event).toMatchObject({ type: "run-end", finishReason: "stop" });
     await first.result();
@@ -565,7 +739,9 @@ describe("busyPolicy", () => {
     release(2);
     await Promise.all([first.result(), beside.result()]);
     const stored = (await store.loadThread(threadId))!;
-    expect(stored.find((message) => textOf(message) === "also make it blue")?.joined).toBe(true);
+    expect(stored.find((message) => textOf(message) === "also make it blue")?.joined).toBe(
+      stored.find((message) => textOf(message) === "write the hero")!.id,
+    );
     expect(stored.find((message) => textOf(message) === "unrelated question")?.joined).toBeUndefined();
   });
 
@@ -619,5 +795,34 @@ describe("busyPolicy", () => {
     expect(response.status).toBe(409);
     release(0);
     await first.result();
+  });
+});
+
+describe("parallel: waiting for the runs going to take their turns in", () => {
+  test("is done outside the thread's lock, so a supersede meanwhile is not held up", async () => {
+    const { store, Chat, release, calls } = await setup([say("a"), say("b"), say("c")]);
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "hi" });
+    // A run that never says it has taken its turn in (a slow tool it
+    // re-enters, a slow limiter): its frames go quiet until it ends.
+    (first.run as any).frames = () =>
+      (async function* (): AsyncGenerator<AgentStreamFrame> {
+        await first.run.result();
+        yield* [];
+      })();
+
+    const parallel = Chat.startTurn({ threadId, text: "side", ifBusy: "parallel" });
+    await tick();
+    // Superseding takes the lock and starts at once.
+    const superseding = await Chat.startTurn({ threadId, text: "replace" });
+    release(0);
+    expect((await first.result()).finishReason).toBe("aborted");
+    // The parallel turn then starts beside the run that superseded.
+    const beside = (await parallel) as AgentTurn;
+    expect(beside.runId).not.toBe(superseding.runId);
+    await until(() => calls() === 3);
+    release(1);
+    release(2);
+    await Promise.all([superseding.result(), beside.result()]);
   });
 });

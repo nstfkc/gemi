@@ -3601,7 +3601,8 @@ class ReplayMemo<R> {
 }
 
 /** The user message a turn (or a message joining one) is stored as. */
-function userTurnMessage(
+/** A user turn as the message stored for it. Internal: the controller stores a joined message no run took with it. */
+export function userTurnMessage(
   text: string | undefined,
   files: ClientTurn["files"],
   event: (TurnEvent & { text?: string }) | undefined,
@@ -4420,7 +4421,6 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // A cut call did not succeed, so the step cannot end the run.
       const closing = cut ? null : await this.closingText(message, calls, step);
       if (closing !== null) {
-        this.finishReason = "stop";
         await this.finalizeMessage(outcome.reason);
         if (closing) {
           // What the follow-up model step would have produced, minus the
@@ -4435,6 +4435,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // The tools finished the job, and a message joined meanwhile: the
         // next call answers it.
         if (this.joins.length > 0 && step < maxSteps) continue;
+        // Set only once the run is ending here: a run that went on for a
+        // joined message ends with whatever its later steps say.
+        this.finishReason = "stop";
         return;
       }
 
@@ -4533,7 +4536,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       const { turn, resolve } = this.joins.shift()!;
       const message: AgentMessage = {
         ...userTurnMessage(turn.event ? turn.event.text : turn.text, turn.files, turn.event),
-        joined: true,
+        joined: this.turnStartId(),
       };
       this.history.push(message);
       this.produced.push(message);
@@ -4545,6 +4548,20 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       await this.report(message);
       resolve(message);
     }
+  }
+
+  /**
+   * The id of the message that started the turn this run is answering: the
+   * last user message in its history that no tool injected and that joined
+   * nothing itself. What a joined message names (`AgentMessage.joined`).
+   */
+  private turnStartId(): string {
+    const injected = injectedMessageIds(this.history);
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const message = this.history[i]!;
+      if (message.role === "user" && !message.joined && !injected.has(message.id)) return message.id;
+    }
+    return this.history[0]?.id ?? "";
   }
 
   private startMessage(): AgentMessage {
@@ -6428,13 +6445,22 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // The turn's own message, and every message that joined the turn before
     // the call (`AgentMessage.joined`): the files of all of them are the
     // turn's.
-    const users: AgentMessage[] = [];
+    let start: AgentMessage | undefined;
     for (let i = at - 1; i >= 0; i--) {
       const message = this.history[i];
-      if (message.role !== "user" || injected.has(message.id)) continue;
-      users.unshift(message);
-      if (!message.joined) break;
+      if (message.role === "user" && !message.joined && !injected.has(message.id)) {
+        start = message;
+        break;
+      }
     }
+    const users = start
+      ? [
+          start,
+          ...this.history
+            .slice(0, Math.max(0, at))
+            .filter((message) => message.role === "user" && message.joined === start.id),
+        ]
+      : [];
     const ids: string[] = [];
     for (const part of users.flatMap((message) => message.content)) {
       if (part.type !== "file") continue;

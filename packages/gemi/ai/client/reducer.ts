@@ -225,6 +225,11 @@ export function applyFrame<T extends ToolShapes = ToolShapes, O = unknown>(
  * place when the primary run is over. When the primary run ends and another is
  * still going, that one becomes the primary. `runId` undefined (a stream that
  * has not said which run it is) is the primary's, as `applyFrame` is.
+ *
+ * Which run a stream carries is learned from its `run-start`, so a caller
+ * applying a stream's frames passes that run's id from then on; a frame
+ * before it goes to the primary. Every gemi stream (a turn, an attach, a
+ * joined reply) opens with `run-start`.
  */
 export function applyRunFrame<T extends ToolShapes = ToolShapes, O = unknown>(
   state: ChatState<T, O>,

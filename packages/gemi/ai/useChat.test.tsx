@@ -3800,7 +3800,7 @@ describe("ifBusy: messages sent while a reply streams", () => {
             content: [{ type: "text", text: "and make it blue" }],
             createdAt: new Date(0).toISOString(),
             finishReason: "stop",
-            joined: true,
+            joined: "msg_hero",
           },
         },
       },

@@ -126,7 +126,7 @@ describe("applyRunFrame", () => {
             role: "user",
             content: [{ type: "text", text: "also blue" }],
             createdAt: NOW,
-            joined: true,
+            joined: "msg_1",
           },
         },
       },
