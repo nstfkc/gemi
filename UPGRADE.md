@@ -1,4 +1,4 @@
-# 0.227.0
+# 0.228.0
 
 ## Tests do not start the schedule or reach real model providers (#1342)
 
@@ -13,6 +13,22 @@ What to check:
 - **Tests that relied on cron jobs ticking** in the test process now see none. Run the job's `callback` by hand, or set `GEMI_SCHEDULE=1` for those tests (`vi.stubEnv` before the app boots).
 - **Tests that made real model calls** now fail with a `provider_error` that names `GEMI_AI_LIVE`. Give those agents a fake provider. A live suite that should call the real API sets `GEMI_AI_LIVE=1` in its script or its vitest `env`.
 - **Tests that mock the network with a library that patches `fetch` in place** (MSW, say) are let through as stubbed. Make sure the library refuses unhandled requests, or a provider call can still leave the process.
+
+# 0.227.0
+
+## Rate limits count an IPv6 client by its /64 (#1340)
+
+**Behaviour change (minor version).** See [The client's address](docs/middleware.md#the-clients-address).
+
+- New `clientAddress(req, { ipv6Prefix = 64 })` in `gemi/http`: `clientIp(req)` with an IPv6 address cut to its first `ipv6Prefix` bits (`2001:db8:1:2::/64`) and an IPv4-mapped address (`::ffff:203.0.113.7`) given as its IPv4 address. IPv4 addresses and anything that is not an address are answered unchanged.
+- It is now the default key of `RateLimitMiddleware`, of the email-code, magic-link and password per-IP limits (`requestLimit`, `verifyLimit`, `passwordLimits`), and of the MCP endpoint's failed-credential and OAuth registration budgets. `broadcast.maxConnectionsPerIp` counts an IPv6 client by its /64 too. One host is usually given a whole /64, and before this it got a fresh budget each time it changed address inside it.
+- `clientIp(req)` is unchanged: the exact address, for logs.
+
+What to check:
+
+- **Existing counters for IPv6 and IPv4-mapped clients reset once** on deploy, since their keys change. IPv4 keys are the same as before.
+- **Clients that share a /64 now share a budget.** That is usually one household or one host, but some networks put many customers in one /64 (some mobile carriers, a shared office network). If a route's limit (or `broadcast.maxConnectionsPerIp`) is tight enough for that to matter, raise it, or key it on a session, user or API key with `configure({ key })`.
+- **Your own limit keys** built from `clientIp(req)` (a `configure({ key })`, a `RateLimiter.consume` call, a `runLimitKey`) still use the full address. Switch them to `clientAddress(req)` to get the /64 grouping.
 
 # 0.226.0
 

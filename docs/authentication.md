@@ -771,8 +771,9 @@ request's own error (a 429, say), or `null` once it succeeds, not the old `inval
 | `allowFixedCodeInProduction` | `AUTH_FIXED_CODE_ALLOW_PRODUCTION=1`, else `false` | `true` accepts `fixedCode` under `NODE_ENV=production`, for a local production-build test server (`gemi start`). Logs a warning at boot: anyone who knows the code can sign in as any user. Never on a real deployment. |
 
 Codes come from `generateCode` when it returns one, else random digits. The per-IP limits
-key on `clientIp(req)`, which is only as good as the `GEMI_TRUST_PROXY` setting behind your
-proxy; the per-address limits and the attempt cap hold regardless. All of these counters
+key on `clientAddress(req)` (an IPv6 client counts by its /64, see
+[The client's address](./middleware.md#the-clients-address)), which is only as good as the
+`GEMI_TRUST_PROXY` setting behind your proxy; the per-address limits and the attempt cap hold regardless. All of these counters
 live in the rate limiter (`ratelimiter.driver`): with the default in-memory driver they are
 per process, so N instances allow N times the limits and a restart resets them. Bind
 `RedisRateLimiter` when you run more than one instance.
