@@ -108,7 +108,29 @@ export type ChatState<T extends ToolShapes = ToolShapes, O = unknown> = {
    * Each assistant message's own share is on `AgentMessage.usage` (#467).
    */
   usage?: Usage;
+  /**
+   * The run-scoped fields of every other run this state has followed, by
+   * `runId`: a second run streaming on the same thread at once (parallel
+   * turns), or one that ended and whose cursor still tells its redelivered
+   * frames apart. The fields above are the primary run's: the one `useChat`
+   * reports as `runId` and `cursor`. See `applyRunFrame`.
+   */
+  lanes?: Record<string, RunLane>;
 };
+
+/** The fields of `ChatState` that belong to one run. */
+export type RunLane = {
+  runId?: string;
+  seq: number;
+  cursorRunId?: string;
+  runMessageIds: string[];
+  loadedTools: string[];
+  finishReason?: FinishReason;
+  usage?: Usage;
+};
+
+/** How many ended runs' lanes are kept for their cursors. */
+const MAX_LANES = 16;
 
 export function initialChatState<T extends ToolShapes = ToolShapes, O = unknown>(
   init: {
@@ -189,6 +211,134 @@ export function applyFrame<T extends ToolShapes = ToolShapes, O = unknown>(
   // and skips the callbacks that would otherwise fire twice.
   if (!startsNewRun && frame.seq <= state.seq) return state;
   return { ...reduce(state, frame.event, now), seq: frame.seq };
+}
+
+/**
+ * Apply one frame of the run `runId`, when several runs stream into one state
+ * at once: parallel turns on a thread, or a reply joined while it
+ * streams on two connections.
+ *
+ * `seq` and the run-scoped fields are per run, so each run is applied against
+ * its own: the primary run's are the state's own fields, every other run's a
+ * lane (`ChatState.lanes`). The transcript, `pending` and `error` are shared.
+ * A frame of a run the state has not seen starts a lane, or takes the primary
+ * place when the primary run is over. When the primary run ends and another is
+ * still going, that one becomes the primary. `runId` undefined (a stream that
+ * has not said which run it is) is the primary's, as `applyFrame` is.
+ *
+ * Which run a stream carries is learned from its `run-start`, so a caller
+ * applying a stream's frames passes that run's id from then on; a frame
+ * before it goes to the primary. Every gemi stream (a turn, an attach, a
+ * joined reply) opens with `run-start`.
+ */
+export function applyRunFrame<T extends ToolShapes = ToolShapes, O = unknown>(
+  state: ChatState<T, O>,
+  runId: string | undefined,
+  frame: AgentStreamFrame<T, O>,
+  now: string = new Date().toISOString(),
+): ChatState<T, O> {
+  if (runId === undefined || runId === state.cursorRunId) {
+    const next = applyFrame(state, frame, now);
+    return next === state ? state : promote(next);
+  }
+  const lanes = state.lanes ?? {};
+  const lane = lanes[runId];
+  if (!lane && state.runId === undefined) {
+    // The primary run is over (or there never was one): this run takes its
+    // place, and the run that held it keeps a lane for its cursor.
+    const kept = state.cursorRunId
+      ? keepLanes({ ...lanes, [state.cursorRunId]: laneOf(state) })
+      : lanes;
+    const next = applyFrame({ ...state, ...freshLane(runId), lanes: kept }, frame, now);
+    return promote(next);
+  }
+  const own = lane ?? freshLane(runId);
+  const swapped: ChatState<T, O> = { ...state, ...own };
+  const next = applyFrame(swapped, frame, now);
+  if (next === swapped) return state;
+  return promote({
+    ...next,
+    ...laneOf(state),
+    lanes: { ...lanes, [runId]: laneOf(next) },
+  });
+}
+
+/**
+ * `markAborted` over every run the state is following: what `stop()` does
+ * when more than one is streaming.
+ */
+export function markAllAborted<T extends ToolShapes = ToolShapes, O = unknown>(
+  state: ChatState<T, O>,
+): ChatState<T, O> {
+  let next = markAborted(state);
+  const lanes = { ...state.lanes };
+  for (const [runId, lane] of Object.entries(lanes)) {
+    if (lane.runId === undefined) continue;
+    const aborted = markAborted({ ...next, ...lane });
+    lanes[runId] = laneOf(aborted);
+    next = { ...next, messages: aborted.messages };
+  }
+  return { ...next, lanes };
+}
+
+/** The ids of the runs the state is following that are still going, the primary first. */
+export function liveRunIds(state: ChatState<any, any>): string[] {
+  const ids = state.runId ? [state.runId] : [];
+  for (const lane of Object.values(state.lanes ?? {})) {
+    if (lane.runId !== undefined && !ids.includes(lane.runId)) ids.push(lane.runId);
+  }
+  return ids;
+}
+
+/** The run's own position, if this state has followed it: what `/attach` is asked to resume from. */
+export function runCursor(state: ChatState<any, any>, runId: string): number | undefined {
+  if (state.cursorRunId === runId) return state.seq;
+  return state.lanes?.[runId]?.seq;
+}
+
+function laneOf(state: ChatState<any, any>): RunLane {
+  return {
+    runId: state.runId,
+    seq: state.seq,
+    cursorRunId: state.cursorRunId,
+    runMessageIds: state.runMessageIds,
+    loadedTools: state.loadedTools,
+    finishReason: state.finishReason,
+    usage: state.usage,
+  };
+}
+
+function freshLane(runId: string): RunLane {
+  return {
+    runId,
+    seq: -1,
+    cursorRunId: runId,
+    runMessageIds: [],
+    loadedTools: [],
+    finishReason: undefined,
+    usage: undefined,
+  };
+}
+
+/** The primary run ended while another is going: that one becomes the primary. */
+function promote<T extends ToolShapes, O>(state: ChatState<T, O>): ChatState<T, O> {
+  if (state.runId !== undefined || !state.lanes) return state;
+  const live = Object.entries(state.lanes).find(([, lane]) => lane.runId !== undefined);
+  if (!live) return state;
+  const [runId, lane] = live;
+  const lanes = { ...state.lanes };
+  delete lanes[runId];
+  if (state.cursorRunId) lanes[state.cursorRunId] = laneOf(state);
+  return { ...state, ...lane, lanes: keepLanes(lanes) };
+}
+
+/** At most `MAX_LANES` ended lanes, the oldest dropped first; live ones are all kept. */
+function keepLanes(lanes: Record<string, RunLane>): Record<string, RunLane> {
+  const entries = Object.entries(lanes);
+  const ended = entries.filter(([, lane]) => lane.runId === undefined);
+  if (ended.length <= MAX_LANES) return lanes;
+  const drop = new Set(ended.slice(0, ended.length - MAX_LANES).map(([id]) => id));
+  return Object.fromEntries(entries.filter(([id]) => !drop.has(id)));
 }
 
 function reduce<T extends ToolShapes, O>(

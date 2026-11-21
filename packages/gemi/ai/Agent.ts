@@ -538,6 +538,10 @@ export type ToolEditImageParams = ToolGenerateImageParams & {
  * exactly as it would from the model's arguments. This list narrows which of
  * the caller's own files a tool reaches for; it grants nothing.
  *
+ * A message that joined the turn while it ran (`AgentMessage.joined`) is part
+ * of it: a tool called after one gets the files of the turn's message and of
+ * every message that joined it before the call, in order.
+ *
  * Inside a sub-run the turn is the sub-run's own: the message its parent's
  * tool started it with, which has files only if that tool put them there. The
  * parent's upload is not inherited — the tool that called `runAgent` read its
@@ -545,7 +549,8 @@ export type ToolEditImageParams = ToolGenerateImageParams & {
  */
 export interface ToolTurn {
   /**
-   * The `attachmentId`s on that user message's file parts, in order, without
+   * The `attachmentId`s on that user message's file parts (and those of the
+   * messages that joined the turn), in order, without
    * duplicates, and only ids of gemi's own shape. Frozen, and computed once
    * before the body runs.
    */
@@ -2386,7 +2391,44 @@ export interface AgentRun<T extends ToolShapes = ToolShapes, O = unknown> extend
    * talking instead of starting over.
    */
   stop(params?: { reason?: string }): void;
+  /**
+   * Adds a user message to this run while it goes: the run takes it before
+   * its next model call, so the model reads it there, and it is stored after
+   * the message the run was writing when it arrived, with
+   * `AgentMessage.joined` set. `AgentController` calls it for a turn whose
+   * busy policy is `"join"`.
+   *
+   * Answers `null` when the run will not make another model call to read it:
+   * it has ended or is ending, it was stopped, its current step is its last
+   * (`maxSteps`), it is a sub-run, or `turn` has no text, files or event. A
+   * message the run has accepted is taken even when the model was about to
+   * finish: the run makes one more call for it instead. If the run ends some
+   * other way before taking it (a question for the user, an error, a stop, a
+   * limit), `taken` settles `null` and the message is not in the run: the
+   * caller starts a turn of its own with it.
+   */
+  join?(turn: AgentJoinTurn): AgentRunJoin | null;
 }
+
+/** What `AgentRun.join` takes: a client turn's text and files, or a server turn's event. */
+export type AgentJoinTurn = {
+  text?: string;
+  files?: ClientTurn["files"];
+  /** The client's id for its own copy, answered with a `message-id` frame (#466). */
+  localId?: string;
+  /** A server turn's event (#1181), in place of a person's words. */
+  event?: TurnEvent & { text?: string };
+};
+
+/** What `AgentRun.join` answers when the run accepted the message. */
+export type AgentRunJoin = {
+  /**
+   * Settles with the message once the run has taken it into its history
+   * (before the model call that reads it), or `null` when the run ended
+   * without taking it.
+   */
+  taken: Promise<AgentMessage | null>;
+};
 
 /**
  * A tool plus where it sits in the prompt. Fixed for the life of the agent,
@@ -3558,6 +3600,45 @@ class ReplayMemo<R> {
   }
 }
 
+/** The user message a turn (or a message joining one) is stored as. */
+/** A user turn as the message stored for it. Internal: the controller stores a joined message no run took with it. */
+export function userTurnMessage(
+  text: string | undefined,
+  files: ClientTurn["files"],
+  event: (TurnEvent & { text?: string }) | undefined,
+): AgentMessage {
+  return {
+    id: `msg_${crypto.randomUUID()}`,
+    role: "user",
+    content: [
+      ...(text ? [{ type: "text" as const, text }] : []),
+      // Field by field rather than spread: an entry can carry whatever
+      // `attach()` answered (`downgraded`, `size`), and only these four
+      // mean anything on a `FilePart`. `attachmentId` is among them — it is
+      // what lets the model name this file to a tool — and an absent
+      // `fileId` is a storage-only upload, left out rather than written as
+      // `undefined`.
+      ...(files ?? []).map((file) => ({
+        type: "file" as const,
+        ...(file.fileId ? { fileId: file.fileId } : {}),
+        name: file.name,
+        mimeType: file.mimeType,
+        ...(file.attachmentId ? { attachmentId: file.attachmentId } : {}),
+      })),
+    ],
+    createdAt: new Date().toISOString(),
+    finishReason: "stop",
+    ...(event
+      ? {
+          event: {
+            name: event.name,
+            ...(event.data !== undefined ? { data: event.data } : {}),
+          },
+        }
+      : {}),
+  } as AgentMessage;
+}
+
 class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   readonly runId: string;
 
@@ -3670,6 +3751,15 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private readonly onPending: "escalate" | "deny";
   /** How many tool calls were open when the client's turn arrived. */
   private openedWith = 0;
+  /** Messages `join` accepted, waiting for the next model call to take them. */
+  private readonly joins: {
+    turn: AgentJoinTurn;
+    resolve: (message: AgentMessage | null) => void;
+  }[] = [];
+  /** Cleared once the run will make no further model call: `join` answers `null` from then on. */
+  private joinable = true;
+  /** The model step under way, 0 before the first. */
+  private step = 0;
   /**
    * Sub-runs that have not yet written their transcript to the tool call.
    *
@@ -3891,6 +3981,24 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.controller.abort();
   }
 
+  join(turn: AgentJoinTurn): AgentRunJoin | null {
+    // Synchronous, like `stop`: the caller decides on the answer, and nothing
+    // may change between the check and the push. See `AgentRun.join`.
+    if (this.depth > 0 || this.ended || !this.joinable || this.controller.signal.aborted) {
+      return null;
+    }
+    // The step under way is the last one: no call is left to read it.
+    if (this.step >= Math.max(1, this.config.maxSteps)) return null;
+    const text = turn.event ? turn.event.text : turn.text;
+    if (!turn.event && !text && !(turn.files && turn.files.length > 0)) return null;
+    let resolve!: (message: AgentMessage | null) => void;
+    const taken = new Promise<AgentMessage | null>((settle) => {
+      resolve = settle;
+    });
+    this.joins.push({ turn, resolve });
+    return { taken };
+  }
+
   /**
    * `maxRunDurationMs` ran out. Stopped through the same controller as
    * `stop()`, so everything that already honours a stop (the provider request,
@@ -3960,6 +4068,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
     }
     this.cancelDeadline();
+    // No model call is coming any more. A message accepted and not taken goes
+    // back to whoever joined it, who starts a turn of its own with it.
+    this.joinable = false;
+    for (const join of this.joins.splice(0)) join.resolve(null);
     if (this.limiter) {
       try {
         await this.limiter.report(this.spent(), true);
@@ -4224,6 +4336,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const maxSteps = Math.max(1, this.config.maxSteps);
 
     for (let step = 1; step <= maxSteps; step++) {
+      this.step = step;
       if (this.limiter) {
         const hit = await this.limiter.check(this.spent(), { steps: 1, tokens: 1 });
         if (hit) {
@@ -4232,6 +4345,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
       }
       await this.takeInbox();
+      await this.takeJoins();
       const message = this.startMessage();
       const outcome = await this.runStep(message, step);
       this.modelSteps++;
@@ -4262,6 +4376,15 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
 
       if (calls.length === 0 && !cut) {
+        // A message joined while the model was writing this answer: one more
+        // call reads it, rather than the run ending with it unanswered.
+        if (this.joins.length > 0 && step < maxSteps && outcome.reason === "stop") {
+          await this.finalizeMessage(outcome.reason);
+          continue;
+        }
+        // Before the first `await`, so a `join` from here on is refused
+        // rather than accepted by a run that has decided to end.
+        this.joinable = false;
         this.finishReason = outcome.reason;
         await this.finalizeMessage(outcome.reason);
         return;
@@ -4298,7 +4421,6 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // A cut call did not succeed, so the step cannot end the run.
       const closing = cut ? null : await this.closingText(message, calls, step);
       if (closing !== null) {
-        this.finishReason = "stop";
         await this.finalizeMessage(outcome.reason);
         if (closing) {
           // What the follow-up model step would have produced, minus the
@@ -4310,6 +4432,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           this.emit({ type: "text-delta", messageId: reply.id, delta: closing });
           await this.finalizeMessage("stop");
         }
+        // The tools finished the job, and a message joined meanwhile: the
+        // next call answers it.
+        if (this.joins.length > 0 && step < maxSteps) continue;
+        // Set only once the run is ending here: a run that went on for a
+        // joined message ends with whatever its later steps say.
+        this.finishReason = "stop";
         return;
       }
 
@@ -4394,6 +4522,46 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       this.emit({ type: "message", message });
       await this.report(message);
     }
+  }
+
+  /**
+   * Adds what `join` accepted to the history, as user messages marked
+   * `joined`, before the model call that reads them. Each is reported to
+   * `onMessage` and put on the stream: as a `message-id` frame (with the
+   * message) for a client that showed its own copy, and as a `message` frame
+   * otherwise, since no client watching has it.
+   */
+  private async takeJoins(): Promise<void> {
+    while (this.joins.length > 0) {
+      const { turn, resolve } = this.joins.shift()!;
+      const message: AgentMessage = {
+        ...userTurnMessage(turn.event ? turn.event.text : turn.text, turn.files, turn.event),
+        joined: this.turnStartId(),
+      };
+      this.history.push(message);
+      this.produced.push(message);
+      if (turn.localId && !turn.event) {
+        this.emit({ type: "message-id", localId: turn.localId, messageId: message.id, message });
+      } else {
+        this.emit({ type: "message", message });
+      }
+      await this.report(message);
+      resolve(message);
+    }
+  }
+
+  /**
+   * The id of the message that started the turn this run is answering: the
+   * last user message in its history that no tool injected and that joined
+   * nothing itself. What a joined message names (`AgentMessage.joined`).
+   */
+  private turnStartId(): string {
+    const injected = injectedMessageIds(this.history);
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const message = this.history[i]!;
+      if (message.role === "user" && !message.joined && !injected.has(message.id)) return message.id;
+    }
+    return this.history[0]?.id ?? "";
   }
 
   private startMessage(): AgentMessage {
@@ -6274,15 +6442,27 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private toolTurn(messageId: string): ToolTurn {
     const at = this.history.findIndex((message) => message.id === messageId);
     const injected = injectedMessageIds(this.history);
-    let user: AgentMessage | undefined;
+    // The turn's own message, and every message that joined the turn before
+    // the call (`AgentMessage.joined`): the files of all of them are the
+    // turn's.
+    let start: AgentMessage | undefined;
     for (let i = at - 1; i >= 0; i--) {
       const message = this.history[i];
-      if (message.role !== "user" || injected.has(message.id)) continue;
-      user = message;
-      break;
+      if (message.role === "user" && !message.joined && !injected.has(message.id)) {
+        start = message;
+        break;
+      }
     }
+    const users = start
+      ? [
+          start,
+          ...this.history
+            .slice(0, Math.max(0, at))
+            .filter((message) => message.role === "user" && message.joined === start.id),
+        ]
+      : [];
     const ids: string[] = [];
-    for (const part of user?.content ?? []) {
+    for (const part of users.flatMap((message) => message.content)) {
       if (part.type !== "file") continue;
       // The prefix test `providers/request.ts` applies before telling the model
       // an id. A stateless client's history can put anything here, and a value
@@ -6657,36 +6837,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const event = this.depth === 0 ? this.params.event : undefined;
     if (event || (turn && (turn.text || (turn.files && turn.files.length > 0)))) {
       const text = event ? event.text : turn?.text;
-      const message: AgentMessage = {
-        id: `msg_${crypto.randomUUID()}`,
-        role: "user",
-        content: [
-          ...(text ? [{ type: "text" as const, text }] : []),
-          // Field by field rather than spread: an entry can carry whatever
-          // `attach()` answered (`downgraded`, `size`), and only these four
-          // mean anything on a `FilePart`. `attachmentId` is among them — it is
-          // what lets the model name this file to a tool — and an absent
-          // `fileId` is a storage-only upload, left out rather than written as
-          // `undefined`.
-          ...(turn?.files ?? []).map((file) => ({
-            type: "file" as const,
-            ...(file.fileId ? { fileId: file.fileId } : {}),
-            name: file.name,
-            mimeType: file.mimeType,
-            ...(file.attachmentId ? { attachmentId: file.attachmentId } : {}),
-          })),
-        ],
-        createdAt: new Date().toISOString(),
-        finishReason: "stop",
-        ...(event
-          ? {
-              event: {
-                name: event.name,
-                ...(event.data !== undefined ? { data: event.data } : {}),
-              },
-            }
-          : {}),
-      };
+      const message = userTurnMessage(text, turn?.files, event);
       this.history.push(message);
       this.produced.push(message);
       // A sub-run's turn was written by the tool that started it, not typed by

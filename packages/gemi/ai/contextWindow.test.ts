@@ -66,6 +66,51 @@ const showing = (id: string, shownId: string): AgentMessage => ({
   ] as any,
 });
 
+describe("joined messages (ifBusy: \"join\")", () => {
+  test("a message that joined a running turn is not a turn start", () => {
+    const messages = [
+      msg("u0", "user", "write the hero"),
+      msg("a0", "assistant", "on it"),
+      msg("u1", "user", "make it blue", { joined: "u0" }),
+      msg("a1", "assistant", "blue it is"),
+      msg("u2", "user", "next thing"),
+      msg("a2", "assistant", "done"),
+    ];
+    expect(turnStarts(messages)).toEqual([0, 4]);
+    expect(splitTurns(messages).map(ids)).toEqual([["u0", "a0", "u1", "a1"], ["u2", "a2"]]);
+  });
+
+  test("a joined message stored after another turn's messages still belongs to its own turn", () => {
+    // Runs side by side: B's turn is stored between A's start and A's joined message.
+    const messages = [
+      msg("uA", "user", "write the hero"),
+      msg("aA", "assistant", "on it"),
+      msg("uB", "user", "what time is it"),
+      msg("aB", "assistant", "noon"),
+      msg("jA", "user", "make it blue", { joined: "uA" }),
+      msg("aA2", "assistant", "blue it is"),
+    ];
+    expect(turnStarts(messages)).toEqual([0, 2]);
+    expect(splitTurns(messages).map(ids)).toEqual([["uA", "aA", "jA"], ["uB", "aB", "aA2"]]);
+    // A cut at B's turn would keep A's joined message without A: it moves back to A.
+    const windowed = windowMessages(messages, { maxTurns: 1, note: false });
+    expect(ids(windowed.messages)).toEqual(ids(messages));
+    expect(windowed.omittedTurns).toBe(0);
+  });
+
+  test("the window keeps a joined message with the turn it joined", () => {
+    const messages = [
+      ...thread(2),
+      msg("u9", "user", "the last turn"),
+      msg("a9", "assistant", "first half"),
+      msg("j9", "user", "and one more thing", { joined: "u9" }),
+      msg("b9", "assistant", "second half"),
+    ];
+    const windowed = windowMessages(messages, { maxTurns: 1, note: false });
+    expect(ids(windowed.messages)).toEqual(["u9", "a9", "j9", "b9"]);
+  });
+});
+
 describe("turnStarts / splitTurns", () => {
   test("a turn starts at each user message, and index 0 always starts one", () => {
     const messages = [

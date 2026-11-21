@@ -139,9 +139,20 @@ export type RegisterParams = {
   maxRunDurationMs?: number | null;
 };
 
+/** One run going on a thread, as `MemoryLiveRuns.running` lists it. */
+export type LiveRunInfo = {
+  runId: string;
+  /** The last frame emitted, as `find` answers it. */
+  seq: number;
+  /** When the run was registered, in epoch milliseconds. */
+  startedAt: number;
+};
+
 type Entry = {
   run: AgentRun;
   threadId?: string;
+  /** `Date.now()` at `register`. */
+  startedAt: number;
   /** See `RegisterParams.owner`. `null` is unowned. */
   owner: string | null;
   clientRunId?: string;
@@ -225,6 +236,8 @@ export class MemoryLiveRuns implements LiveRuns {
   private runs = new Map<string, Entry>();
   /** Thread to the most recently registered run for it. */
   private byThread = new Map<string, string>();
+  /** Thread to every run registered for it and not yet evicted, oldest first. */
+  private threadRuns = new Map<string, Set<string>>();
   /** The client's pre-`run-start` name for a run, to the run. */
   private byClientRun = new Map<string, string>();
 
@@ -249,6 +262,7 @@ export class MemoryLiveRuns implements LiveRuns {
     const entry: Entry = {
       run: run as AgentRun,
       threadId: params.threadId,
+      startedAt: Date.now(),
       owner: params.owner ?? null,
       clientRunId: params.clientRunId,
       frames: [],
@@ -264,6 +278,12 @@ export class MemoryLiveRuns implements LiveRuns {
     this.runs.set(run.runId, entry);
     if (params.threadId) {
       this.byThread.set(params.threadId, run.runId);
+      let runs = this.threadRuns.get(params.threadId);
+      if (!runs) {
+        runs = new Set();
+        this.threadRuns.set(params.threadId, runs);
+      }
+      runs.add(run.runId);
     }
     if (params.clientRunId) {
       this.byClientRun.set(params.clientRunId, run.runId);
@@ -299,6 +319,27 @@ export class MemoryLiveRuns implements LiveRuns {
     // the transport puts in `Last-Event-ID`, so a client can compare the two
     // without knowing which end of the range each one means.
     return { runId, seq: entry.lastSeq };
+  }
+
+  /**
+   * Every run still going on the thread in this process, oldest first: more
+   * than one when turns run in parallel (`ifBusy: "parallel"`). A run that has
+   * ended is not listed, though `find` and `get` still answer for it for
+   * `ttlMs`.
+   */
+  running(params: { threadId: string }): LiveRunInfo[] {
+    const out: LiveRunInfo[] = [];
+    for (const runId of this.threadRuns.get(params.threadId) ?? []) {
+      const entry = this.runs.get(runId);
+      if (!entry || entry.ended || entry.evicted) continue;
+      out.push({ runId, seq: entry.lastSeq, startedAt: entry.startedAt });
+    }
+    return out;
+  }
+
+  /** The thread a run held here was registered for, if any. */
+  threadOf(runId: string): string | undefined {
+    return this.runs.get(runId)?.threadId;
   }
 
   get(runId: string): AgentRun | null {
@@ -376,6 +417,7 @@ export class MemoryLiveRuns implements LiveRuns {
     }
     this.runs.clear();
     this.byThread.clear();
+    this.threadRuns.clear();
     this.byClientRun.clear();
   }
 
@@ -515,6 +557,11 @@ export class MemoryLiveRuns implements LiveRuns {
       if (this.runs.get(runId) === entry) this.runs.delete(runId);
       if (entry.threadId && this.byThread.get(entry.threadId) === runId) {
         this.byThread.delete(entry.threadId);
+      }
+      if (entry.threadId) {
+        const runs = this.threadRuns.get(entry.threadId);
+        runs?.delete(runId);
+        if (runs?.size === 0) this.threadRuns.delete(entry.threadId);
       }
       if (entry.clientRunId && this.byClientRun.get(entry.clientRunId) === runId) {
         this.byClientRun.delete(entry.clientRunId);
