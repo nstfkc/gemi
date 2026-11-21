@@ -1,6 +1,7 @@
 import type { Usage } from "../types";
 import type { AnyRealtimeSession } from "./realtime";
 import { toRealtimeUsage, toVendorSession } from "./realtime";
+import { assertLiveWebSocket } from "./live";
 
 /**
  * A realtime call's sideband: the server's own WebSocket to a call the browser
@@ -202,6 +203,7 @@ function defaultWebSocket(url: string, init: { headers: Record<string, string> }
   const Ctor = (globalThis as { WebSocket?: new (url: string, init?: unknown) => WebSocketLike })
     .WebSocket;
   if (!Ctor) throw new Error("No global WebSocket: the realtime sideband needs Bun or Node 22+.");
+  assertLiveWebSocket(url);
   return new Ctor(url, { headers: init.headers });
 }
 

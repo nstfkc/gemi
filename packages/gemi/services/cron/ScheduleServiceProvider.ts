@@ -82,6 +82,10 @@ export class ScheduleServiceProvider extends ServiceProvider {
     // is how a deploy runs one cron dyno beside several web ones, and a config
     // slice would have to know which command started it.
     if (process.env.GEMI_NO_SCHEDULE === "1") return;
+    // Nor in a test process (#1342), unless it asks with `GEMI_SCHEDULE=1`:
+    // every vitest worker that boots the app would otherwise run the whole
+    // schedule against whatever database the tests share.
+    if (process.env.VITEST && process.env.GEMI_SCHEDULE !== "1") return;
 
     const app = this.app;
     // The queue's locks, so `withoutOverlapping` and `onOneServer` hold across
