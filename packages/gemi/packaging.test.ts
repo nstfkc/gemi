@@ -353,6 +353,22 @@ describe("what the tarball must not carry", () => {
       `a shipped declaration augments the consumer's RPC:\n${augmenting}`,
     ).toBe("");
   });
+
+  /**
+   * `open` (what `EMAIL_DEBUG` opens a written mail with) was bundled into
+   * `gemi/email`, and Bun wrote its `node:url` as a bare `url`. A happy-dom
+   * test that reached `gemi/email` resolved that to the npm `url` polyfill,
+   * which has no `fileURLToPath`, and the import threw (#1336). It is external
+   * now and loaded only when a mail is opened.
+   */
+  test("gemi/email loads open only when it opens a mail, and never a bare url", async () => {
+    const email = await Bun.file(
+      join(fixture, "node_modules/gemi/dist/email/index.js"),
+    ).text();
+    expect(email).not.toMatch(/from\s*"url"/);
+    expect(email).not.toMatch(/from\s*"open"/);
+    expect(email).toContain('import("open")');
+  });
 });
 
 describe("the published package, installed into an app", () => {
