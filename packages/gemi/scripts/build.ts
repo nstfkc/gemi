@@ -87,6 +87,10 @@ const result = await Bun.build({
     "bun",
     "jsx-email",
     "sharp",
+    // A dependency: `EMAIL_DEBUG` opens a written mail with it. Bundled, Bun
+    // writes its `node:url` as a bare `url`, which a happy-dom test resolves
+    // to the npm `url` polyfill (#1336).
+    "open",
     // Optional peers: only present when an app uses AzureBlobDriver or AcsDriver.
     "@azure/storage-blob",
     "@azure/communication-email",
