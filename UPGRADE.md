@@ -27,6 +27,14 @@ status 404 on a page load, and on an in-app navigation too.
 - `<Page params>` in `gemi/testing` takes decoded values, as `useParams()`
   returns them.
 
+# 0.225.2
+
+## `gemi/email` loads in a happy-dom test (#1336)
+
+**Fix (patch version). Nothing to change in an existing app.**
+
+- `open`, which `EMAIL_DEBUG` uses to show a written mail, is no longer bundled into `gemi/email`, and it is imported only when a mail is opened. Bundled, its `node:url` was written as a bare `url`, and a test under happy-dom (or jsdom) that reached `gemi/email`, through a service or a model that sends mail, resolved that to the npm `url` polyfill and failed at import with `fileURLToPath is not a function`.
+
 # 0.225.1
 
 ## A tool call that runs away in white space ends at once (#1334)
