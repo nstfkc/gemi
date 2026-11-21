@@ -104,6 +104,7 @@ export type { CorsPolicy } from "./corsPolicy";
 export {
   RateLimitMiddleware,
   RateLimitExceededError,
+  clientAddress,
   clientIp,
   type RateLimitMiddlewareConfig,
 } from "./RateLimitMiddleware";

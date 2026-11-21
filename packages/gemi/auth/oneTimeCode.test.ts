@@ -206,6 +206,27 @@ describe("enforceCodeRateLimits and auth.rateLimitKey (#1125)", () => {
   });
 });
 
+describe("enforceCodeRateLimits per IP", () => {
+  const request = (ip: string) =>
+    new HttpRequest(
+      new Request("https://a.example/api/auth/email-code", { method: "POST", headers: { "x-forwarded-for": ip } }),
+      {},
+      "api",
+    );
+  const spend = (ip: string, email: string) =>
+    enforceCodeRateLimits("request", email, request(ip), { perEmail: false, perIp: [2, 900] }).then(
+      () => "ok",
+      (error: Error) => error.constructor.name,
+    );
+
+  test("an IPv6 client is counted by its /64, so rotating inside it shares one budget", async () => {
+    expect(await spend("2001:db8:5:6::1", "a@example.com")).toBe("ok");
+    expect(await spend("2001:db8:5:6:1:2:3:4", "b@example.com")).toBe("ok");
+    expect(await spend("2001:db8:5:6:ffff::", "c@example.com")).toBe("RateLimitExceededError");
+    expect(await spend("2001:db8:5:7::1", "d@example.com")).toBe("ok");
+  });
+});
+
 describe("countCodeAttempt", () => {
   test("allows maxAttempts per row, then refuses; a new row starts again", async () => {
     const results = [];

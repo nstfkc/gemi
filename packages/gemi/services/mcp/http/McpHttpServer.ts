@@ -4,7 +4,7 @@ import { canonicalize, purposeKey } from "../../../ai/signing";
 import { MemoryNonceStore, type NonceStore } from "../../../ai/store/Nonces";
 import type { FeatureKey } from "../../../client/rpc";
 import { HttpRequest } from "../../../http/HttpRequest";
-import { clientIp } from "../../../http/RateLimitMiddleware";
+import { clientAddress } from "../../../http/RateLimitMiddleware";
 import type { ProgressUpdate } from "../../../http/modelOriginated";
 import { RequestContext } from "../../../http/requestContext";
 import {
@@ -1082,7 +1082,7 @@ export class McpHttpServer {
    * the budget keeps a flood of them from becoming one.
    */
   private async failedAttempt(req: Request): Promise<Response | null> {
-    const address = clientIp(new HttpRequest(req, {}, "api", this.endpoint.pathname));
+    const address = clientAddress(new HttpRequest(req, {}, "api", this.endpoint.pathname));
     const retryAfter = await overBudget(`mcp-auth-failed:${address}`, FAILED_AUTH_BUDGET);
     return retryAfter === null ? null : tooManyRequests(retryAfter);
   }

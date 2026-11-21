@@ -136,7 +136,7 @@ Limits how often one client may hit a route. `N` is the number of requests, `W` 
 | `rate-limit:100` | 100 requests per 60s |
 | `rate-limit:10,30` | 10 requests per 30s |
 
-The default bucket is the client's IP (the `x-forwarded-for` address the server settled on — see [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy)) **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
+The default bucket is the client's address, `clientAddress(req)` (see [The client's address](#the-clients-address)), **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
 
 Counting uses a **sliding window**, so a client cannot spend a full budget at the end of one window and another at the start of the next. See [Rate limiting](#rate-limiting) below for drivers, Redis, and limiting by something other than an IP.
 
@@ -673,12 +673,25 @@ Not sending is what keeps an outage from being counted twice. Bun's client queue
 
 Each call costs at most `timeout`: without it a request would wait as long as Bun's client does, which is the connect timeout plus the reconnect loop (10 to 30 s), and forever when Redis stops answering on an open connection. `onError` gets a `RedisRateLimiterTimeoutError` for a call that timed out, a `RedisRateLimiterDisconnectedError` for one skipped because the client said it was disconnected, and the client's own error otherwise; while Redis stays down it also gets each failed `PING`, so at most one a second. The default writes one `console.error` line at most once a minute, with how many calls were answered without Redis since the last one, and a `console.info` line when Redis answers again.
 
+### The client's address
+
+`clientAddress(req)` is the address a limit should be keyed on. It is `clientIp(req)` (the `x-forwarded-for` address the server settled on, see [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy)), grouped:
+
+| `clientIp(req)` | `clientAddress(req)` |
+| --- | --- |
+| `203.0.113.7` | `203.0.113.7` |
+| `2001:db8:1:2:aaaa:bbbb:cccc:dddd` | `2001:db8:1:2::/64` |
+| `::ffff:203.0.113.7` (IPv4-mapped) | `203.0.113.7` |
+| `unknown`, or anything else that is not an address | unchanged |
+
+An IPv6 client is counted by its /64 because one host is usually given a whole /64 and can use any address in it: keyed on the full address, it would get a fresh budget each time it changed address. `clientAddress(req, { ipv6Prefix: 48 })` groups by a different prefix length (0 to 128; 128 keeps the full address). It is the default key of `rate-limit`, the [auth limits](./authentication.md) and the MCP endpoints' limits. Use it in your own keys too, and keep `clientIp(req)` for logs, where the exact address is what you want.
+
 ### Limiting by something other than an IP
 
 Under `gemi start` the IP cannot be spoofed past the proxies [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy) trusts, but it still does not distinguish two users behind one NAT. `configure()` replaces the key with anything you can read off the request:
 
 ```typescript
-import { RateLimitMiddleware, clientIp } from "gemi/http";
+import { RateLimitMiddleware, clientAddress } from "gemi/http";
 
 export default class extends MiddlewareServiceProvider {
   aliases = {
@@ -687,7 +700,7 @@ export default class extends MiddlewareServiceProvider {
     "user-rate-limit": RateLimitMiddleware.configure({
       limit: 60,
       window: 60,
-      key: (req) => `user:${req.ctx().user?.id ?? clientIp(req)}`,
+      key: (req) => `user:${req.ctx().user?.id ?? clientAddress(req)}`,
     }),
   };
 }
