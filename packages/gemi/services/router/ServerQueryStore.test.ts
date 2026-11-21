@@ -92,6 +92,20 @@ describe("ServerQueryStore", () => {
     expect(calls[0].searchParams.toString()).toBe("a=1&b=2");
   });
 
+  test("keys encode decoded params as the client's query cache does (#1322)", async () => {
+    const { resolveQueryTarget } = await import("../../client/queryEffects");
+    const { fetcher } = createDeferredFetcher();
+    const store = new ServerQueryStore(fetcher);
+
+    const params = { id: "a/b" };
+    const entry = store.ensure("/notes/:id", { params });
+    const prefilled = store.prefill("/notes/:id/meta", { params }, { ok: true });
+
+    expect(entry.path).toBe("/notes/a%2Fb");
+    expect(entry.path).toBe(resolveQueryTarget("/notes/:id", { params }, {}).path);
+    expect(prefilled.path).toBe(resolveQueryTarget("/notes/:id/meta", {}, params).path);
+  });
+
   test("promise settles only after data is recorded and the settle listener ran", async () => {
     const { fetcher, calls } = createDeferredFetcher();
     const store = new ServerQueryStore(fetcher);

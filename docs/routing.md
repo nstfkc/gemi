@@ -15,16 +15,48 @@ import { ApiRouter, ViewRouter, HttpRequest } from "gemi/http";
 
 A project wires a root `ApiRouter` (`app/http/routes/api.ts`) and a root `ViewRouter` (`app/http/routes/view.ts`) into the kernel. Everything else hangs off those two via nesting.
 
-API handlers, including those called through MCP, receive path parameters in
-`req.params` decoded once after route matching. For `/notes/:id`, the request
-`/api/notes/a%2Fb` matches one segment and gives the handler the ID `a/b`.
-For a splat such as `/assets/:src*`, both `a%2Fb/c` and `a/b/c` give
-`src === "a/b/c"`. A malformed escape in a matched parameter returns HTTP 404.
+Path parameters are decoded once after route matching, for API and view routes
+alike. API handlers (including those called through MCP) read them from
+`req.params`; view loaders read `req.params` too, and view components read
+`useParams()`. For `/notes/:id`, the request `/api/notes/a%2Fb` and the page
+`/notes/a%2Fb` each match one segment and give the ID `a/b`. A page receives
+the same value on a direct visit, after hydration, on an in-app navigation and
+on a back/forward navigation. For a splat such as `/assets/:src*`, both
+`a%2Fb/c` and `a/b/c` give `src === "a/b/c"`. A malformed escape in a matched
+parameter is no match: an API request gets HTTP 404, a page load gets the app's
+`404` view with status 404, and an in-app navigation shows the same `404` view.
 
-Remove manual `decodeURIComponent` calls on API parameters. A decoded value can
-contain `/` and `..`. When building a filesystem path or an S3 key, validate the
-result against the directory or key prefix the caller may access. View loaders
-and client-side view routes still receive raw captures such as `a%2Fb`.
+| URL | `params.id` |
+| --- | --- |
+| `/notes/42` | `42` |
+| `/notes/a%2Fb` | `a/b` |
+| `/notes/%252F` | the literal three-character ID `%2F` |
+| `/notes/100%25` | `100%` |
+| `/notes/%E0%A4%A` | no match: 404 |
+
+```tsx
+// app/http/routes/view.ts
+"/notes/:id": this.view("NoteView", [NoteController, "show"]),
+
+// NoteController.show — no decodeURIComponent
+const note = await findNote(req.params.id);
+
+// NoteView.tsx — the same ID the loader saw
+const { id } = useParams();
+```
+
+The inverse holds wherever Gemi builds a URL from a route and its params:
+`Link`, `useNavigate`, `usePrefetch`, `Redirect`, the `Url` facade, `useQuery`,
+`useMutation` and `Query.prefetch`/`Query.prefill` encode each value into its
+segment, as `apiUrl` does. `<Link href="/notes/:id/edit">` on `/notes/a%2Fb`
+points at `/notes/a%2Fb/edit`. A wildcard keeps its `/`s and encodes each
+segment: `{ src: "a/b c" }` fills `/files/:src*` as `/files/a/b%20c`.
+
+Do not call `decodeURIComponent` on route parameters, and do not encode values
+before passing them as `params`. A second decode changes
+the literal ID `%2F` to `/`, and throws a `URIError` for `100%`. A decoded value
+can contain `/` and `..`. When building a filesystem path or an S3 key, validate
+the result against the directory or key prefix the caller may access.
 
 ## The `routes` object
 

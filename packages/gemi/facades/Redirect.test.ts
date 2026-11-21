@@ -38,3 +38,17 @@ describe("Redirect.to", () => {
     ).toBe("/invoices?page=2");
   });
 });
+
+describe("Redirect.to with decoded route params (#1322)", () => {
+  test("encodes each param back into its segment", () => {
+    expect(
+      locationOf(() => Redirect.to("/notes/:id/edit" as never, { params: { id: "a/b" } } as never))
+        .location,
+    ).toBe("/notes/a%2Fb/edit");
+    expect(
+      locationOf(() => Redirect.to("/notes/:id/edit" as never, { params: { id: "100%" } } as never))
+        .location,
+    ).toBe("/notes/100%25/edit");
+  });
+});
+

@@ -34,3 +34,17 @@ describe("initialRenderedRoute()", () => {
     expect(initialRenderedRoute({})).toBe("/");
   });
 });
+
+describe("initialRenderedRoute() with decoded params (#1322)", () => {
+  test("encodes a slash so it stays in its segment", () => {
+    expect(
+      initialRenderedRoute({ pathname: "/notes/:id", params: { id: "a/b" }, search: "" }),
+    ).toBe("/notes/a%2Fb");
+  });
+
+  test("encodes a literal percent sign", () => {
+    expect(
+      initialRenderedRoute({ pathname: "/notes/:id", params: { id: "%2F" }, search: "" }),
+    ).toBe("/notes/%252F");
+  });
+});
