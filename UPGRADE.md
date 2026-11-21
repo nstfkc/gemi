@@ -1,4 +1,4 @@
-# 0.228.0
+# 0.229.0
 
 ## A database rate limiter (#1341)
 
@@ -10,9 +10,31 @@
 - In production, gemi logs a warning at boot when the queue driver is `"database"` and the rate limiter is the in-memory one: every deploy resets those limits.
 - Shared driver contract tests: `rateLimiterDriverContract` (in the test sources) runs against the in-memory driver and the database driver on SQLite, Postgres and MySQL.
 
+Also in this release, follow-ups to 0.228.0's test defaults:
+
+- Under vitest, a skipped schedule prints one line on stderr, once per process, when the app has cron jobs.
+- Under Bun, the provider guard counts any `fetch` or `WebSocket` that is not Bun's own as stubbed, so an MSW server started in a vitest setup file (before gemi loads) is let through as well. Call `server.listen({ onUnhandledRequest: "error" })`: MSW's default sends an unmatched request on to the network.
+- The docs now say that a server a test spawns inherits `VITEST`, and so skips the schedule and refuses real model calls.
+
 What to check:
 
 - **The new boot warning.** An app on the database queue that has no `ratelimiter` driver now logs one line at boot in production. Set `driver: new DatabaseRateLimiter()` (or `RedisRateLimiter`) to silence it, and decide whether your limits should last across deploys.
+
+# 0.228.0
+
+## Tests do not start the schedule or reach real model providers (#1342)
+
+**Behaviour change (minor version).** See [What a test process does not do](docs/testing.md#what-a-test-process-does-not-do).
+
+- Under vitest (`VITEST` is set), the cron schedule does not start unless `GEMI_SCHEDULE=1`. Jobs are still discovered and listed in `app(Scheduler).jobs`. `GEMI_NO_SCHEDULE=1` still turns the schedule off everywhere, and wins.
+- Under vitest, the built-in providers (OpenAI, Azure OpenAI, Anthropic, Azure Anthropic, images, realtime and its sideband socket) refuse to send a request unless `GEMI_AI_LIVE=1`. The request fails before it is sent, with `LiveModelCallRefusedError`, and is not retried. A provider's own `fetchImpl`, a stubbed global `fetch` or `WebSocket`, and a provider pointed at `localhost`, `127.0.0.1` or `::1` are let through.
+- Nothing changes outside vitest.
+
+What to check:
+
+- **Tests that relied on cron jobs ticking** in the test process now see none. Run the job's `callback` by hand, or set `GEMI_SCHEDULE=1` for those tests (`vi.stubEnv` before the app boots).
+- **Tests that made real model calls** now fail with a `provider_error` that names `GEMI_AI_LIVE`. Give those agents a fake provider. A live suite that should call the real API sets `GEMI_AI_LIVE=1` in its script or its vitest `env`.
+- **Tests that mock the network with a library that patches `fetch` in place** (MSW, say) are let through as stubbed. Make sure the library refuses unhandled requests, or a provider call can still leave the process.
 
 # 0.227.0
 

@@ -311,6 +311,19 @@ test("list-assets answers the projected result", async () => {
 
 Models and other services are mocked the usual way (`vi.mock`), or bound in a test service provider on the `Kernel`.
 
+## What a test process does not do
+
+Under vitest (`VITEST` is set) gemi keeps two things from happening by accident:
+
+- **The cron schedule does not start.** Every test worker that boots the app would otherwise run the whole schedule against the test database. One line on stderr says so, once per process, when the app has cron jobs. Set `GEMI_SCHEDULE=1` for a test that needs it. See [Cron: In tests](./cron.md#in-tests).
+- **The built-in model providers do not reach the network.** An agent left on a real provider, with keys in the environment, would make real, billed calls. Its request fails with `LiveModelCallRefusedError` before it is sent, and the run ends with a `provider_error` naming the provider's address and `GEMI_AI_LIVE`. Give the agent a fake provider. Set `GEMI_AI_LIVE=1` to make real calls on purpose, for a live suite.
+
+  These are still let through, since none of them reaches a provider: a `fetchImpl` passed to the provider, a stubbed global `fetch` or `WebSocket` (`vi.stubGlobal`), and a provider pointed at this machine (`localhost`, `127.0.0.1`, `::1`). Under Bun, any `fetch` or `WebSocket` that is not Bun's own counts as stubbed, whether it was installed before or after gemi loaded.
+
+  **MSW:** `setupServer()` replaces the global `fetch` while it listens, so a provider's requests go to MSW and are let through. MSW's default for a request no handler matches (`onUnhandledRequest: "warn"`) sends it on to the real network, past this guard. Call `server.listen({ onUnhandledRequest: "error" })` so an unmatched provider call fails instead.
+
+A process the tests start inherits their environment, `VITEST` included. A server spawned for an end-to-end test (`Bun.spawn(["gemi", "start"])` with `env: process.env`) therefore runs without the schedule and refuses real model calls too. Pass `GEMI_SCHEDULE=1` or `GEMI_AI_LIVE=1` in its `env` if it should do either, or leave `VITEST` out of its environment if it should behave like a deployed server.
+
 ## Related
 
 - [Events & Listeners](./events.md#testing-with-eventfake) — `Event.fake()`, for asserting what a *server* test dispatched.
