@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomInt, timingSafeEqual } from "node:crypto";
 import { app } from "../foundation/app";
 import type { HttpRequest } from "../http/HttpRequest";
-import { RateLimitExceededError, clientIp } from "../http/RateLimitMiddleware";
+import { RateLimitExceededError, clientAddress } from "../http/RateLimitMiddleware";
 import { InMemoryRateLimiter } from "../services/rate-limiter/drivers/InMemoryRateLimiterDriver";
 import { RateLimiter } from "../services/rate-limiter/RateLimiter";
 import { sessionTokenSecret } from "./sessionToken";
@@ -238,7 +238,7 @@ export async function enforceCodeRateLimits(
 ) {
   const limiter = codeLimiter();
   const checks: Array<["perIp" | "perEmail", string, CodeRateLimit | undefined]> = [
-    ["perIp", `ip:${limiterKeyPart(clientIp(req))}`, limits.perIp],
+    ["perIp", `ip:${limiterKeyPart(clientAddress(req))}`, limits.perIp],
   ];
   if (email !== null) {
     checks.push(["perEmail", `email:${limiterKeyPart(email)}`, limits.perEmail]);

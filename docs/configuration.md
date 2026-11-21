@@ -410,7 +410,7 @@ Any other value (or none) leaves compression on.
 
 ## Behind a proxy: `GEMI_TRUST_PROXY`
 
-`X-Forwarded-For` is written by whoever sends the request, so `gemi start` does not believe it unless told to. Before your code (and `clientIp`, the default [rate-limit](./middleware.md#rate-limiting) key) sees the request, the server leaves exactly one address in `X-Forwarded-For` and drops `X-Real-IP`:
+`X-Forwarded-For` is written by whoever sends the request, so `gemi start` does not believe it unless told to. Before your code (and `clientIp`, which the default [rate-limit](./middleware.md#rate-limiting) key `clientAddress` groups by /64 for IPv6) sees the request, the server leaves exactly one address in `X-Forwarded-For` and drops `X-Real-IP`:
 
 | `GEMI_TRUST_PROXY` | Client address |
 | --- | --- |

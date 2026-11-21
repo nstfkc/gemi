@@ -1991,7 +1991,7 @@ export abstract class AgentController<
    * nothing sound to count it under: a client address is the proxy's unless
    * `GEMI_TRUST_PROXY` is set, which would put every visitor in one bucket, and
    * the session cookie is the visitor's to drop. An app that serves anonymous
-   * chats returns its own key here (`ip:${clientIp(req)}` behind a trusted
+   * chats returns its own key here (`ip:${clientAddress(req)}` behind a trusted
    * proxy, say), sets `requireThread`, or puts `RateLimitMiddleware` on the
    * route.
    */

@@ -180,6 +180,29 @@ describe("run", () => {
     expect(other.rejected).toBe(false);
   });
 
+  test("counts an IPv6 client by its /64, so rotating addresses inside it buys no budget", async () => {
+    const app = makeApp();
+    const args = ["2", "60"];
+
+    await runMiddleware({ app, args, headers: { "x-forwarded-for": "2001:db8:1:2::1" } });
+    await runMiddleware({ app, args, headers: { "x-forwarded-for": "2001:db8:1:2:aaaa:bbbb:cccc:dddd" } });
+    const rotated = await runMiddleware({ app, args, headers: { "x-forwarded-for": "[2001:db8:1:2::ffff]:443" } });
+    const nextBlock = await runMiddleware({ app, args, headers: { "x-forwarded-for": "2001:db8:1:3::1" } });
+
+    expect(rotated.rejected).toBe(true);
+    expect(nextBlock.rejected).toBe(false);
+  });
+
+  test("counts an IPv4-mapped address with its IPv4 address", async () => {
+    const app = makeApp();
+    const args = ["1", "60"];
+
+    await runMiddleware({ app, args, headers: { "x-forwarded-for": "203.0.113.7" } });
+    const mapped = await runMiddleware({ app, args, headers: { "x-forwarded-for": "::ffff:203.0.113.7" } });
+
+    expect(mapped.rejected).toBe(true);
+  });
+
   test("falls back to the configured defaults when the DSL passes nothing", async () => {
     const app = makeApp({
       driver: new InMemoryRateLimiter(),
