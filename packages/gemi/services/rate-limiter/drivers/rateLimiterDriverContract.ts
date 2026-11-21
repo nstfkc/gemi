@@ -44,7 +44,8 @@ export function rateLimiterDriverContract(
       const refused = await consume(driver, "a", 3);
       expect(refused).toMatchObject({ allowed: false, limit: 3, remaining: 0 });
       expect(refused.retryAfter).toBeGreaterThan(0);
-      expect(refused.retryAfter).toBeLessThanOrEqual(60_000);
+      // A sliding window can make a full budget wait into the next window.
+      expect(refused.retryAfter).toBeLessThanOrEqual(2 * 60_000);
       expect(refused.resetAt).toBeGreaterThan(Date.now());
     });
 

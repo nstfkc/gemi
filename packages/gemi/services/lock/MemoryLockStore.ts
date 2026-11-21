@@ -84,6 +84,20 @@ export class MemoryLockStore implements LockStore {
     return { allowed: true, resetInMs: window.endsAt - now, count: window.count };
   }
 
+  async pruneWindows(prefix: string, batch = 1_000): Promise<number> {
+    if (prefix === "") throw new Error("pruneWindows needs a prefix: it must never reach lock rows.");
+    const now = Date.now();
+    let removed = 0;
+    for (const [name, window] of this.windows) {
+      if (removed >= batch) break;
+      if (name.startsWith(prefix) && window.endsAt <= now) {
+        this.windows.delete(name);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
   async refund(name: string) {
     const window = this.windows.get(name);
     if (window && window.endsAt > Date.now() && window.count > 0) window.count--;

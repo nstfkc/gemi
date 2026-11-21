@@ -4,21 +4,22 @@
 
 **New API (minor version). Nothing to change in an existing app**, but see the boot warning below. See [The database driver](docs/middleware.md#the-database-driver).
 
-- New `DatabaseRateLimiter` in `gemi/services`: a rate-limiter driver that counts in the app's database (the `gemi_locks` table), so budgets survive deploys and are shared by every instance. It counts a fixed window. Options: `table`, `prefix` (default `ratelimit:`) and `store`.
-- `RateLimiter.consume(key, { limit, window, cost })` already took `cost`. The database driver honours it in whole units, and refuses a `cost` above the limit.
-- `LockStore.hit(name, limit, windowMs, cost?)` takes an optional `cost` (default `1`) and answers the window's `count`. Both built-in stores implement it. A custom `LockStore` keeps working, and gains the parameter when it wants it.
-- In production, gemi logs a warning at boot when the queue driver is `"database"` and the rate limiter is the in-memory one: every deploy resets those limits.
-- Shared driver contract tests: `rateLimiterDriverContract` (in the test sources) runs against the in-memory driver and the database driver on SQLite, Postgres and MySQL.
-
-Also in this release, follow-ups to 0.228.0's test defaults:
-
-- Under vitest, a skipped schedule prints one line on stderr, once per process, when the app has cron jobs.
-- Under Bun, the provider guard counts any `fetch` or `WebSocket` that is not Bun's own as stubbed, so an MSW server started in a vitest setup file (before gemi loads) is let through as well. Call `server.listen({ onUnhandledRequest: "error" })`: MSW's default sends an unmatched request on to the network.
-- The docs now say that a server a test spawns inherits `VITEST`, and so skips the schedule and refuses real model calls.
+- New `DatabaseRateLimiter` in `gemi/services`: a rate-limiter driver that counts in the app's database (the `gemi_locks` table, which has to exist), so budgets survive deploys and are shared by every instance. It counts a fixed window. Options: `table`, `prefix` (default `ratelimit:`), `store`, `pruneEvery` (default 1000) and `pruneBatch` (default 1000).
+- Ended windows are deleted as it goes: every `pruneEvery` calls, up to `pruneBatch` rows under the limiter's prefix, in the background. `limiter.prune()` does the same on demand, for a cron job.
+- `RateLimiter.consume(key, { limit, window, cost })` already took `cost`. The database driver honours it in whole units, refuses a `cost` above the limit, and always passes a `cost` of `0`.
+- `LockStore.hit(name, limit, windowMs, cost?)` takes an optional `cost` (default `1`) and answers the window's `count`. On Postgres and SQLite it is now one upsert instead of three statements, which the queue's and workflows' throttles also use. New optional `LockStore.pruneWindows(prefix, batch?)`, on both built-in stores. A custom `LockStore` keeps working.
+- In production, gemi logs a warning at boot when the queue driver is the database one (`"database"`, a `DatabaseQueueDriver`, or a function that builds one) and no rate-limiter `driver` is set. Each process that boots the app logs it once.
+- Shared driver contract tests run against the in-memory driver and the database driver on SQLite, Postgres and MySQL, the last two in CI's `queue-databases` job.
 
 What to check:
 
-- **The new boot warning.** An app on the database queue that has no `ratelimiter` driver now logs one line at boot in production. Set `driver: new DatabaseRateLimiter()` (or `RedisRateLimiter`) to silence it, and decide whether your limits should last across deploys.
+- **The new boot warning.** An app on the database queue that sets no `ratelimiter` driver now logs one line per process at boot in production. Set `driver: new DatabaseRateLimiter()` (or `RedisRateLimiter`), or `new InMemoryRateLimiter()` to keep in-memory limits on purpose, to silence it.
+
+Also in this release, follow-ups to 0.228.0's test defaults:
+
+- Under vitest, a skipped schedule prints one line on stderr, once per test file that boots an app with cron jobs.
+- Under Bun, the provider guard counts any `fetch` or `WebSocket` that is not Bun's own as stubbed, so an MSW server started in a vitest setup file (before gemi loads) is let through as well. So is a `fetch` an APM or error tracker wrapped in a test setup file, whose calls then go out. Call `server.listen({ onUnhandledRequest: "error" })`: MSW's default sends an unmatched request on to the network.
+- The docs now say that a server a test spawns inherits `VITEST`, and so skips the schedule and refuses real model calls.
 
 # 0.228.0
 

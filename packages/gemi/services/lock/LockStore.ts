@@ -89,6 +89,14 @@ export interface LockStore {
 
   /** Takes back one counted hit from the current window, if it has one. */
   refund(name: string): Promise<void>;
+
+  /**
+   * Deletes up to `batch` windows kept by `hit` whose name starts with
+   * `prefix` and that have ended, and resolves to how many. Optional: the
+   * built-in stores have it, and a rate limiter on a store without it keeps
+   * its rows. Never pass the prefix of a lock's name.
+   */
+  pruneWindows?(prefix: string, batch?: number): Promise<number>;
 }
 
 /** The hold on a lock ended before the work it guarded did. */

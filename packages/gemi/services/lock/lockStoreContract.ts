@@ -176,6 +176,20 @@ export function lockStoreContract(
         expect(await a.hit("costly", 5, 60_000)).toMatchObject({ allowed: false, count: 5 });
       }));
 
+    test("pruneWindows deletes ended windows under its prefix, and nothing else", () =>
+      each(async (s) => {
+        const a = s.store();
+        await a.hit("w:ended", 5, 50);
+        await a.hit("w:open", 5, 60_000);
+        await a.hit("wx:ended", 5, 50);
+        await sleep(200);
+        expect(await a.pruneWindows!("w:")).toBe(1);
+        // `w:open` keeps its count, `wx:ended` is not under the prefix.
+        expect(await a.hit("w:open", 2, 60_000)).toMatchObject({ allowed: true, count: 2 });
+        expect(await a.hit("wx:ended", 1, 60_000)).toMatchObject({ allowed: true });
+        await expect(a.pruneWindows!("")).rejects.toThrow();
+      }));
+
     test("concurrent hits from many clients never exceed the limit", () =>
       each(async (s) => {
         const results = await Promise.all(

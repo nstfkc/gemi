@@ -23,7 +23,10 @@ const MYSQL_URL = process.env.TEST_MYSQL_URL;
 type Database = {
   dialect: Dialect;
   table: string;
-  limiter(): DatabaseRateLimiter;
+  limiter(options?: ConstructorParameters<typeof DatabaseRateLimiter>[0]): DatabaseRateLimiter;
+  store(): DatabaseLockStore;
+  /** The table's row names. */
+  names(): Promise<string[]>;
   dispose(): Promise<void>;
 };
 
@@ -39,10 +42,18 @@ async function prepare(
   return {
     dialect,
     table,
-    limiter() {
+    limiter(options = {}) {
+      return new DatabaseRateLimiter({ ...options, store: this.store() });
+    },
+    store() {
       const sql = dialect === "sqlite" ? new SQL(url) : new SQL(url, { max: 2 });
       clients.push(sql);
-      return new DatabaseRateLimiter({ store: new DatabaseLockStore({ sql, dialect }, { table }) });
+      return new DatabaseLockStore({ sql, dialect }, { table });
+    },
+    async names() {
+      const quoted = dialect === "mysql" ? `\`${table}\`` : `"${table}"`;
+      const rows = (await first.unsafe(`SELECT name FROM ${quoted}`)) as Array<{ name: string }>;
+      return rows.map((row) => String(row.name)).sort();
     },
     async dispose() {
       await cleanup(first);
@@ -105,6 +116,42 @@ for (const backend of backends) {
         expect(refused.allowed).toBe(false);
         // The fixed window ends a day after its first call.
         expect(refused.retryAfter).toBeGreaterThan(86_000_000);
+      } finally {
+        await db.dispose();
+      }
+    });
+
+    test("prune deletes only this limiter's ended windows, never a lock or a look-alike", async () => {
+      const db = await backend.open();
+      try {
+        // `rl_` would match `rlX` as a LIKE pattern; it must not here.
+        const limiter = db.limiter({ prefix: "rl_", pruneEvery: 0 });
+        for (const key of ["a", "b", "c"]) await limiter.consume({ key, limit: 5, window: 100 });
+        await limiter.consume({ key: "open", limit: 5, window: 60_000 });
+        const store = db.store();
+        await store.acquire("lock", "owner", 50);
+        await store.hit("rlX_other", 5, 50);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+
+        expect(await limiter.prune()).toBe(3);
+        // The window still open, the lock (lapsed, but a lock) and the look-alike stay.
+        expect(await db.names()).toEqual(["lock", "rlX_other", "rl_open"]);
+      } finally {
+        await db.dispose();
+      }
+    });
+
+    test("rows do not grow without bound: ended windows are pruned as it goes", async () => {
+      const db = await backend.open();
+      try {
+        const limiter = db.limiter({ pruneEvery: 10, pruneBatch: 100 });
+        // A new key each call, as a per-IP limit sees from rotating addresses.
+        for (let i = 0; i < 60; i++) {
+          await limiter.consume({ key: `ip:${i}`, limit: 1, window: 20 });
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        await limiter.prune();
+        expect((await db.names()).length).toBeLessThan(20);
       } finally {
         await db.dispose();
       }

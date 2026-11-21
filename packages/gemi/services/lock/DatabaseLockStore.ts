@@ -202,32 +202,95 @@ export class DatabaseLockStore implements LockStore {
 
   /**
    * A fixed window in the lock's row: `token` is the count and `expires_at`
-   * the window's end. One guarded `UPDATE` either starts a new window, counts
-   * a hit in the current one, or matches nothing because it is full.
+   * the window's end. A guarded write either starts a new window, counts a
+   * hit in the current one, or changes nothing because it is full.
+   *
+   * On Postgres and SQLite that is one statement, an upsert whose `RETURNING`
+   * answers the count and the window's end as this hit left them, so an
+   * allowed hit costs one round trip and its `count` is exact. A refused hit
+   * reads the row once more for `resetInMs`, and MySQL (no `RETURNING`) seeds
+   * the row, updates it and reads it back: three round trips, and a `count`
+   * that may include other clients' hits since.
    */
   async hit(name: string, limit: number, windowMs: number, cost = 1) {
     await this.configure();
     const q = this.sql;
     const now = this.now(q);
-    await this.seed(q, name);
     const window = this.ms(q, Math.max(1, windowMs));
     const weight = this.int(q, cost);
-    const result = await q`
-      UPDATE ${this.name(q)}
-      SET token = CASE WHEN expires_at <= ${now} THEN ${weight} ELSE token + ${weight} END,
-          expires_at = CASE WHEN expires_at <= ${now} THEN ${now} + ${window} ELSE expires_at END,
-          updated_at = ${now}
-      WHERE name = ${name} AND (expires_at <= ${now} OR token + ${weight} <= ${this.int(q, limit)})
-    `;
-    const allowed = affected(result) > 0;
+    const max = this.int(q, limit);
+    const table = this.name(q);
+
+    if (!this.mysql) {
+      const rows = (await q`
+        INSERT INTO ${table} (name, owner, token, expires_at, updated_at)
+        VALUES (${name}, '', ${weight}, ${now} + ${window}, ${now})
+        ON CONFLICT (name) DO UPDATE
+        SET token = CASE WHEN ${table}.expires_at <= ${now} THEN ${weight} ELSE ${table}.token + ${weight} END,
+            expires_at = CASE WHEN ${table}.expires_at <= ${now} THEN ${now} + ${window} ELSE ${table}.expires_at END,
+            updated_at = ${now}
+        WHERE ${table}.expires_at <= ${now} OR ${table}.token + ${weight} <= ${max}
+        RETURNING token, expires_at - ${now} AS reset
+      `) as Array<{ token: unknown; reset: unknown }>;
+      if (rows[0]) return windowOf(true, rows[0]);
+      return windowOf(false, await this.window(q, name));
+    }
+
+    // MySQL. The row can be pruned between the seed and the update (it is an
+    // ended window, so `prune` may take it), which would refuse a hit that
+    // should start a new window: seen as "no row", and tried once more.
+    for (let attempt = 0; ; attempt++) {
+      await this.seed(q, name);
+      const result = await q`
+        UPDATE ${table}
+        SET token = CASE WHEN expires_at <= ${now} THEN ${weight} ELSE token + ${weight} END,
+            expires_at = CASE WHEN expires_at <= ${now} THEN ${now} + ${window} ELSE expires_at END,
+            updated_at = ${now}
+        WHERE name = ${name} AND (expires_at <= ${now} OR token + ${weight} <= ${max})
+      `;
+      const allowed = affected(result) > 0;
+      const row = await this.window(q, name);
+      if (allowed || row || attempt > 0) return windowOf(allowed, row);
+    }
+  }
+
+  /**
+   * Deletes up to `batch` rows whose name starts with `prefix` and whose
+   * window has ended, and resolves to how many: the cleanup for names used
+   * only with `hit`, such as a rate limiter's (#1341). An ended window's
+   * count no longer means anything, so its row can go at once; a later `hit`
+   * starts it again.
+   *
+   * Never give it the prefix of names used with `acquire` or `advance`:
+   * deleting a lock's row restarts its fencing token (see `prune`).
+   */
+  async pruneWindows(prefix: string, batch = 1_000): Promise<number> {
+    if (prefix === "") throw new Error("pruneWindows needs a prefix: it must never reach lock rows.");
+    await this.configure();
+    const q = this.sql;
+    const now = this.now(q);
+    const table = this.name(q);
+    // A whole number this code made, spliced in: MySQL takes no expression
+    // in `LIMIT`.
+    const limit = q.unsafe(String(Math.max(1, Math.floor(batch))));
+    // A prefix compared as a string, not a `LIKE` pattern: `_` and `%` in it
+    // match only themselves.
+    const length = q.unsafe(String(prefix.length));
+    const owned = q`substr(name, 1, ${length}) = ${prefix} AND expires_at <= ${now}`;
+    const result = this.mysql
+      ? await q`DELETE FROM ${table} WHERE ${owned} LIMIT ${limit}`
+      : await q`
+          DELETE FROM ${table}
+          WHERE name IN (SELECT name FROM ${table} WHERE ${owned} LIMIT ${limit})
+        `;
+    return affected(result);
+  }
+
+  private async window(q: SQL, name: string) {
     const [row] = (await q`
-      SELECT token, expires_at - ${now} AS reset FROM ${this.name(q)} WHERE name = ${name}
+      SELECT token, expires_at - ${this.now(q)} AS reset FROM ${this.name(q)} WHERE name = ${name}
     `) as Array<{ token: unknown; reset: unknown }>;
-    return {
-      allowed,
-      resetInMs: Math.max(0, Number(row?.reset ?? 0)),
-      count: Number(row?.token ?? 0),
-    };
+    return row;
   }
 
   async refund(name: string) {
@@ -318,6 +381,14 @@ export class DatabaseLockStore implements LockStore {
     const n = Math.round(value);
     return this.mysql ? q`CAST(${n} AS SIGNED)` : q`CAST(${n} AS BIGINT)`;
   }
+}
+
+function windowOf(allowed: boolean, row: { token: unknown; reset: unknown } | undefined) {
+  return {
+    allowed,
+    resetInMs: Math.max(0, Number(row?.reset ?? 0)),
+    count: Number(row?.token ?? 0),
+  };
 }
 
 function affected(result: unknown): number {

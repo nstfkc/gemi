@@ -22,6 +22,16 @@ export interface DatabaseRateLimiterOptions {
   table?: string;
   /** Prepended to every key, so limiter rows never meet a lock's. Default `ratelimit:`. */
   prefix?: string;
+  /**
+   * Every this many calls, `prune()` runs in the background and deletes up to
+   * `pruneBatch` ended windows, so the table does not keep a row for every
+   * key ever seen (a per-IP limit sees a new key for every new address).
+   * Default `1000`; `0` turns it off, for an app that calls `prune()` itself
+   * (from a cron job, say).
+   */
+  pruneEvery?: number;
+  /** The most rows one automatic `prune()` deletes. Default `1000`. */
+  pruneBatch?: number;
 }
 
 /**
@@ -42,18 +52,42 @@ const MAX_NAME = 150;
  * for quotas (so many a day); for a burst limit on a route, the sliding
  * drivers are smoother.
  *
- * Every call is one guarded `UPDATE` (plus a `SELECT` for the result), so
- * concurrent calls never admit more than the limit. Costs are whole numbers: a
- * fractional `cost` is rounded up. A database error rejects the call, so the
- * request fails rather than going unlimited.
+ * Each call is one guarded write, so concurrent calls never admit more than
+ * the limit: on Postgres and SQLite one upsert, plus a read when it refuses;
+ * on MySQL three statements (seed, update, read). `allowed` is exact.
+ * `remaining` is exact for an allowed call on Postgres and SQLite; on MySQL,
+ * and `retryAfter` on a refusal everywhere, are read just after the decision
+ * and may already include other clients' calls: treat them as hints.
+ *
+ * Costs are whole numbers: a fractional `cost` is rounded up, and a cost of
+ * `0` always passes (a peek, not a check). A database error rejects the call,
+ * so the request fails rather than going unlimited. Ended windows are deleted
+ * as it goes (`pruneEvery`) or by `prune()`.
  */
 export class DatabaseRateLimiter extends RateLimiterDriver {
   private resolved: LockStore | undefined;
   private readonly prefix: string;
+  private readonly pruneEvery: number;
+  private readonly pruneBatch: number;
+  private calls = 0;
+  private pruning: Promise<unknown> | undefined;
 
   constructor(private readonly options: DatabaseRateLimiterOptions = {}) {
     super();
     this.prefix = options.prefix ?? "ratelimit:";
+    if (this.prefix === "") throw new Error("DatabaseRateLimiter needs a prefix: its rows share the locks table.");
+    this.pruneEvery = Math.max(0, Math.floor(options.pruneEvery ?? 1_000));
+    this.pruneBatch = Math.max(1, Math.floor(options.pruneBatch ?? 1_000));
+  }
+
+  /**
+   * Deletes up to `batch` of this limiter's windows that have ended (only
+   * names under its `prefix`, never a lock's), and resolves to how many. A
+   * store without `pruneWindows` resolves to `0`.
+   */
+  async prune(batch = this.pruneBatch): Promise<number> {
+    const store = this.store();
+    return store.pruneWindows ? await store.pruneWindows(this.prefix, batch) : 0;
   }
 
   async consume(params: ConsumeParams): Promise<RateLimitResult> {
@@ -66,6 +100,7 @@ export class DatabaseRateLimiter extends RateLimiterDriver {
       return { allowed: false, limit, remaining: 0, resetAt: now + window, retryAfter: window };
     }
 
+    this.maybePrune();
     const hit = await this.store().hit(this.nameOf(params.key), limit, window, cost);
     const resetAt = now + hit.resetInMs;
     if (!hit.allowed) {
@@ -79,6 +114,16 @@ export class DatabaseRateLimiter extends RateLimiterDriver {
       resetAt,
       retryAfter: 0,
     };
+  }
+
+  /** One background `prune()` every `pruneEvery` calls, never two at once. */
+  private maybePrune() {
+    if (this.pruneEvery === 0 || ++this.calls % this.pruneEvery !== 0 || this.pruning) return;
+    this.pruning = this.prune()
+      .catch((error: unknown) => console.error("[gemi] DatabaseRateLimiter could not prune ended windows", error))
+      .finally(() => {
+        this.pruning = undefined;
+      });
   }
 
   private store(): LockStore {
