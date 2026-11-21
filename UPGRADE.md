@@ -1,3 +1,19 @@
+# 0.228.0
+
+## Tests do not start the schedule or reach real model providers (#1342)
+
+**Behaviour change (minor version).** See [What a test process does not do](docs/testing.md#what-a-test-process-does-not-do).
+
+- Under vitest (`VITEST` is set), the cron schedule does not start unless `GEMI_SCHEDULE=1`. Jobs are still discovered and listed in `app(Scheduler).jobs`. `GEMI_NO_SCHEDULE=1` still turns the schedule off everywhere, and wins.
+- Under vitest, the built-in providers (OpenAI, Azure OpenAI, Anthropic, Azure Anthropic, images, realtime and its sideband socket) refuse to send a request unless `GEMI_AI_LIVE=1`. The request fails before it is sent, with `LiveModelCallRefusedError`, and is not retried. A provider's own `fetchImpl`, a stubbed global `fetch` or `WebSocket`, and a provider pointed at `localhost`, `127.0.0.1` or `::1` are let through.
+- Nothing changes outside vitest.
+
+What to check:
+
+- **Tests that relied on cron jobs ticking** in the test process now see none. Run the job's `callback` by hand, or set `GEMI_SCHEDULE=1` for those tests (`vi.stubEnv` before the app boots).
+- **Tests that made real model calls** now fail with a `provider_error` that names `GEMI_AI_LIVE`. Give those agents a fake provider. A live suite that should call the real API sets `GEMI_AI_LIVE=1` in its script or its vitest `env`.
+- **Tests that mock the network with a library that patches `fetch` in place** (MSW, say) are let through as stubbed. Make sure the library refuses unhandled requests, or a provider call can still leave the process.
+
 # 0.227.0
 
 ## Rate limits count an IPv6 client by its /64 (#1340)

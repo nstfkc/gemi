@@ -311,6 +311,15 @@ test("list-assets answers the projected result", async () => {
 
 Models and other services are mocked the usual way (`vi.mock`), or bound in a test service provider on the `Kernel`.
 
+## What a test process does not do
+
+Under vitest (`VITEST` is set) gemi keeps two things from happening by accident:
+
+- **The cron schedule does not start.** Every test worker that boots the app would otherwise run the whole schedule against the test database. Set `GEMI_SCHEDULE=1` for a test that needs it. See [Cron: In tests](./cron.md#in-tests).
+- **The built-in model providers do not reach the network.** An agent left on a real provider, with keys in the environment, would make real, billed calls. Its request fails with `LiveModelCallRefusedError` before it is sent, and the run ends with a `provider_error` naming the provider's address and `GEMI_AI_LIVE`. Give the agent a fake provider. Set `GEMI_AI_LIVE=1` to make real calls on purpose, for a live suite.
+
+  These are still let through, since none of them reaches a provider: a `fetchImpl` passed to the provider, a stubbed global `fetch` or `WebSocket` (`vi.stubGlobal`), and a provider pointed at this machine (`localhost`, `127.0.0.1`, `::1`). A library that patches `fetch` in place (MSW, say) also counts as stubbed: set it to refuse unhandled requests.
+
 ## Related
 
 - [Events & Listeners](./events.md#testing-with-eventfake) — `Event.fake()`, for asserting what a *server* test dispatched.

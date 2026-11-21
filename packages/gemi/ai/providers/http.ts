@@ -6,6 +6,7 @@ import {
   ProviderHttpError,
   ProviderTimeoutError,
 } from "./errors";
+import { assertLiveFetch } from "./live";
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -300,6 +301,8 @@ export async function requestWithRetry(
   init: RequestInit,
   options: RequestOptions,
 ): Promise<Response> {
+  // Before the first attempt, so a refusal is never retried.
+  if (!options.fetchImpl) assertLiveFetch(url);
   const doFetch = options.fetchImpl ?? ((u: string, i: RequestInit) => fetch(u, i));
   const sleep = options.sleep ?? defaultSleep;
   const random = options.random ?? Math.random;

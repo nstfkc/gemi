@@ -64,7 +64,7 @@
     "build:client-types": "tsc -p tsconfig.browser.json",
     "test": "bun --bun x vitest",
     "test:types": "vitest run --typecheck.only",
-    "test:live": "bun --bun x vitest run ai/live",
+    "test:live": "GEMI_AI_LIVE=1 bun --bun x vitest run ai/live",
     "test:packaging": "bun --bun x vitest run --config vitest.packaging.config.ts",
     "build:publish": "bun scripts/build-publish.ts",
     "prepublishOnly": "echo 'Do not publish from this directory — its exports point at TS source. Run: bun run build:publish, then publish from .publish/' && exit 1",
