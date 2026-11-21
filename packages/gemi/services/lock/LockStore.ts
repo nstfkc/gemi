@@ -74,12 +74,18 @@ export interface LockStore {
    * first hit after the last one ended and lasts `windowMs`. A refused hit is
    * not counted. `resetInMs` is how long until the window ends. A name used
    * here must not also be used with `acquire` or `advance`.
+   *
+   * `cost` (default `1`) counts the hit as that many: it is allowed when the
+   * window's count plus `cost` is at most `limit`. Pass a `cost` no greater
+   * than `limit`: what a new window does with a larger one differs by store.
+   * `count` is the window's count after the hit, where the store reports it.
    */
   hit(
     name: string,
     limit: number,
     windowMs: number,
-  ): Promise<{ allowed: boolean; resetInMs: number }>;
+    cost?: number,
+  ): Promise<{ allowed: boolean; resetInMs: number; count?: number }>;
 
   /** Takes back one counted hit from the current window, if it has one. */
   refund(name: string): Promise<void>;

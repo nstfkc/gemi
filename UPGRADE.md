@@ -1,3 +1,19 @@
+# 0.228.0
+
+## A database rate limiter (#1341)
+
+**New API (minor version). Nothing to change in an existing app**, but see the boot warning below. See [The database driver](docs/middleware.md#the-database-driver).
+
+- New `DatabaseRateLimiter` in `gemi/services`: a rate-limiter driver that counts in the app's database (the `gemi_locks` table), so budgets survive deploys and are shared by every instance. It counts a fixed window. Options: `table`, `prefix` (default `ratelimit:`) and `store`.
+- `RateLimiter.consume(key, { limit, window, cost })` already took `cost`. The database driver honours it in whole units, and refuses a `cost` above the limit.
+- `LockStore.hit(name, limit, windowMs, cost?)` takes an optional `cost` (default `1`) and answers the window's `count`. Both built-in stores implement it. A custom `LockStore` keeps working, and gains the parameter when it wants it.
+- In production, gemi logs a warning at boot when the queue driver is `"database"` and the rate limiter is the in-memory one: every deploy resets those limits.
+- Shared driver contract tests: `rateLimiterDriverContract` (in the test sources) runs against the in-memory driver and the database driver on SQLite, Postgres and MySQL.
+
+What to check:
+
+- **The new boot warning.** An app on the database queue that has no `ratelimiter` driver now logs one line at boot in production. Set `driver: new DatabaseRateLimiter()` (or `RedisRateLimiter`) to silence it, and decide whether your limits should last across deploys.
+
 # 0.227.0
 
 ## Rate limits count an IPv6 client by its /64 (#1340)

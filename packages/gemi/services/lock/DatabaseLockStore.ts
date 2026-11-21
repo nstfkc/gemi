@@ -205,24 +205,29 @@ export class DatabaseLockStore implements LockStore {
    * the window's end. One guarded `UPDATE` either starts a new window, counts
    * a hit in the current one, or matches nothing because it is full.
    */
-  async hit(name: string, limit: number, windowMs: number) {
+  async hit(name: string, limit: number, windowMs: number, cost = 1) {
     await this.configure();
     const q = this.sql;
     const now = this.now(q);
     await this.seed(q, name);
     const window = this.ms(q, Math.max(1, windowMs));
+    const weight = this.int(q, cost);
     const result = await q`
       UPDATE ${this.name(q)}
-      SET token = CASE WHEN expires_at <= ${now} THEN 1 ELSE token + 1 END,
+      SET token = CASE WHEN expires_at <= ${now} THEN ${weight} ELSE token + ${weight} END,
           expires_at = CASE WHEN expires_at <= ${now} THEN ${now} + ${window} ELSE expires_at END,
           updated_at = ${now}
-      WHERE name = ${name} AND (expires_at <= ${now} OR token < ${this.int(q, limit)})
+      WHERE name = ${name} AND (expires_at <= ${now} OR token + ${weight} <= ${this.int(q, limit)})
     `;
     const allowed = affected(result) > 0;
     const [row] = (await q`
-      SELECT expires_at - ${now} AS reset FROM ${this.name(q)} WHERE name = ${name}
-    `) as Array<{ reset: unknown }>;
-    return { allowed, resetInMs: Math.max(0, Number(row?.reset ?? 0)) };
+      SELECT token, expires_at - ${now} AS reset FROM ${this.name(q)} WHERE name = ${name}
+    `) as Array<{ token: unknown; reset: unknown }>;
+    return {
+      allowed,
+      resetInMs: Math.max(0, Number(row?.reset ?? 0)),
+      count: Number(row?.token ?? 0),
+    };
   }
 
   async refund(name: string) {

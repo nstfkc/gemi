@@ -3915,9 +3915,10 @@ App providers run after the framework's, so they can rebind anything the framewo
 | Driver | Use it when |
 | --- | --- |
 | `InMemoryRateLimiter` (default) | one instance, or local development |
+| `DatabaseRateLimiter` | budgets that must outlast a deploy (daily quotas, sign-up caps), or several instances without Redis |
 | `RedisRateLimiter` | more than one instance — counters are shared, so the limit is the limit |
 
-The in-memory driver keeps counters in the process that served the request. With N instances behind a load balancer the effective limit is N × the configured limit, and it resets on every deploy. Switch to Redis as soon as you scale past one:
+The in-memory driver keeps counters in the process that served the request. With N instances behind a load balancer the effective limit is N × the configured limit, and it resets on every deploy. In production, `gemi` logs a warning at boot when the queue uses the database driver and the rate limiter is still in memory. Switch to the database or Redis as soon as you scale past one instance, or as soon as a budget must last longer than a deploy:
 
 ```typescript
 // app/config/ratelimiter.ts
@@ -3943,6 +3944,34 @@ export default defineRateLimiterConfig({
 | `timeout` | `250` | ms one call may wait for Redis before it is answered as `onRedisError` says; `0` turns it off |
 | `onError` | one `console.error` line a minute | called with every Redis failure |
 | `failOpen` | | deprecated: `true` is `onRedisError: "open"`, `false` is `"closed"` |
+
+#### The database driver
+
+`DatabaseRateLimiter` counts in the application's database, in the locks table the database queue already uses (`gemi_locks`; see [Locks](./jobs-and-queues.md#locks--the-lock-facade) for the table). Budgets survive restarts and deploys, and every instance on the database shares them.
+
+```typescript
+// app/config/ratelimiter.ts
+import { DatabaseRateLimiter, defineRateLimiterConfig } from "gemi/services";
+
+export default defineRateLimiterConfig({
+  driver: new DatabaseRateLimiter(),
+});
+```
+
+```typescript
+// Three starts a day per visitor, durable across deploys.
+await RateLimiter.enforce(`starts:visitor:${visitor.id}`, { limit: 3, window: 86_400 });
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `table` | `gemi_locks` | the locks table the default store uses |
+| `prefix` | `ratelimit:` | prepended to every key, so limiter rows never meet a lock's |
+| `store` | a `DatabaseLockStore` on the default connection | another `LockStore`, or `() => LockStore` built on the first call |
+
+Unlike the other two drivers it counts a **fixed window**: the window starts at the first call after the last window ended and lasts `window`. A client that spends its whole budget at the end of one window gets a new budget when the next one starts. That suits quotas (so many a day). For a burst limit on a busy route, the sliding window of the memory and Redis drivers is smoother.
+
+Each call is one guarded `UPDATE` and one `SELECT`, so concurrent calls never admit more than the limit. Costs are whole numbers (a fractional `cost` is rounded up), and a `cost` above the limit is always refused. A key longer than 150 characters is stored as its SHA-256. A database error rejects the call, so the request fails rather than going unlimited. `store.prune(olderThanMs)` also deletes the limiter's idle rows.
 
 #### When Redis fails
 
@@ -22242,7 +22271,7 @@ model GemiLock {
 }
 ```
 
-Without Prisma, `await app(QueueManager).locks.store.createTable()` (a `DatabaseLockStore`) creates it. Nothing reads or writes the table until a unique job, a `withoutOverlapping` or `onOneServer` cron job, or the `Lock` facade is used. Rows are kept after release so tokens keep growing; `store.prune(olderThanMs)` deletes idle ones.
+Without Prisma, `await app(QueueManager).locks.store.createTable()` (a `DatabaseLockStore`) creates it. Nothing reads or writes the table until a unique job, a `withoutOverlapping` or `onOneServer` cron job, the `Lock` facade or a [`DatabaseRateLimiter`](./middleware.md#the-database-driver) is used. Rows are kept after release so tokens keep growing; `store.prune(olderThanMs)` deletes idle ones.
 
 The queue slice's `locks` picks another store: `"auto"` (the default: the driver's own), `"memory"`, `"database"` (the default connection), a `LockStore`, or `(app) => LockStore`.
 
