@@ -1,6 +1,5 @@
 import type { ComponentType } from "react";
 import { render } from "jsx-email";
-import open from "open";
 import { app } from "../foundation/app";
 import { MailManager } from "../services/email/MailManager";
 import { deliverThrough } from "../services/email/deliver";
@@ -126,6 +125,11 @@ export class Email {
       // `EMAIL_DEBUG_OPEN=false` keeps the file without opening it, without
       // the rest of what `CI=true` changes (#1190).
       if (process.env.CI !== "true" && process.env.EMAIL_DEBUG_OPEN !== "false") {
+        // Loaded here, and left out of the bundle (scripts/build.ts), so
+        // importing `gemi/email` never loads `open` (#1336). Bundled, its
+        // `node:url` became a bare `url`, which a happy-dom test resolves to
+        // the npm `url` polyfill: no `fileURLToPath`, and the import threw.
+        const { default: open } = await import("open");
         await open(fileName);
       }
       return { id: `debug_${crypto.randomUUID()}`, provider, status: "debug" };
