@@ -1,3 +1,13 @@
+# 0.233.1
+
+## Two email-code verifies at once for a new address no longer answer 500 (#1356)
+
+**Fix (patch version).** Both requests found no user, and the second insert broke the unique email: `UniqueConstraintError` escaped `POST /auth/email-code/verify` as a 500. Now, when creating the user fails and the user exists after all, the request goes on as a sign-in for that user (`isNewUser: false`), and `onUserCreated` runs once. With an issued code the second request is `invalid_code`, as before, since the first one spent it. Only a failed insert is recovered this way: an `onUserCreated` that throws still fails the request.
+
+On SQLite, `UserProvider.transaction` now queues in the process, one transaction after another per connection, as the legacy-session lock already did: the second sign-up's `BEGIN` failed with "cannot start a transaction within a transaction" while the first one's was open. The next one begins at the commit, before the after-commit callbacks, so a listener that signs someone up again doesn't wait on itself. The queue doesn't cover an app's own `Model.transaction` calls in other requests, or several processes on one SQLite file ([#1362](https://github.com/nstfkc/gemi/issues/1362)).
+
+What to check: nothing. An `onUserCreated` that wrote rows outside the user provider's transaction already ran only for the winning request.
+
 # 0.233.0
 
 ## Text after the conversation, and a prompt cache that holds across turns (#1345)
