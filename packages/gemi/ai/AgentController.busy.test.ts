@@ -824,11 +824,13 @@ describe("parallel: each message names its turn (#1339)", () => {
   test.each([
     ["parallel", "parallel" as const, undefined],
     ["the default", undefined, "denied"],
-  ])("a new message asked as %s: the questions other turns wait on stay open, or are refused as before", async (_name, ifBusy, status) => {
+  ])("a person's new message asked as %s: the questions other turns wait on stay open, or are refused as before", async (_name, ifBusy, status) => {
     const { A, B, stored, Chat, threadId, release, calls } = await twoParked([say("noted")]);
-    const turn = await Chat.startTurn({ threadId, text: "something else", ...(ifBusy ? { ifBusy } : {}) });
+    const response = await new Chat().stream(
+      request("", { threadId, turn: { text: "something else" }, ...(ifBusy ? { ifBusy } : {}) }),
+    );
     release(calls());
-    await turn.result();
+    await framesOf(response);
     const { messages } = await stored();
     expect(resultOf(messages, A.toolCallId)?.status).toBe(status);
     expect(resultOf(messages, B.toolCallId)?.status).toBe(status);
@@ -836,6 +838,37 @@ describe("parallel: each message names its turn (#1339)", () => {
       expect(resultOf(messages, A.toolCallId)?.cause).toBe("refused");
       expect(resultOf(messages, B.toolCallId)?.cause).toBe("refused");
     }
+  });
+
+  test.each([
+    ["queued", "queue" as const],
+    ["parallel", "parallel" as const],
+    ["the default", undefined],
+  ])("a server turn (%s) leaves every turn's question open, and each is answered on its own turn (#1371)", async (_name, ifBusy) => {
+    const { A, B, answer, stored, Chat, threadId, release, calls } = await twoParked([
+      say("weekly report"),
+      say("home is live"),
+      say("about is live"),
+    ]);
+    const report = await Chat.startTurn({ threadId, text: "the weekly report is ready", ...(ifBusy ? { ifBusy } : {}) });
+    release(calls());
+    expect((await report.result()).text).toBe("weekly report");
+    let { messages } = await stored();
+    expect(resultOf(messages, A.toolCallId)).toBeUndefined();
+    expect(resultOf(messages, B.toolCallId)).toBeUndefined();
+    expect(messages.some((message) => message.pending?.some((call) => call.toolCallId === A.toolCallId))).toBe(true);
+    expect(messages.some((message) => message.pending?.some((call) => call.toolCallId === B.toolCallId))).toBe(true);
+
+    const one = await answer(A);
+    expect(one.result.text).toBe("home is live");
+    const two = await answer(B);
+    expect(two.result.text).toBe("about is live");
+    const { byText } = await stored();
+    expect(one.turn.run.turn?.id).toBe(byText("publish home").id);
+    expect(two.turn.run.turn?.id).toBe(byText("publish about").id);
+    ({ messages } = await stored());
+    expect(resultOf(messages, A.toolCallId)?.status).toBe("ok");
+    expect(resultOf(messages, B.toolCallId)?.status).toBe("ok");
   });
 
   test("the same answer sent twice ends the second as stale, and refuses nothing", async () => {

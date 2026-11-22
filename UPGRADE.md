@@ -1,3 +1,11 @@
+# 0.236.2
+
+## A server turn no longer refuses other turns' open questions (#1371)
+
+**Fix (patch version).** A turn started with `startTurn` (text or an `event`) that didn't run parallel refused every open question on the thread, the same as a person moving on with a new message. So a scheduled report or a job's result arriving while the person hadn't answered an approval killed that approval, and the agent asked again on the server turn. Now a server turn leaves other turns' questions open, queued or not, and each one is still answered on its own turn. A person's new message (not parallel) still refuses every open call, as before.
+
+What to check: if you relied on a `startTurn` clearing questions the person never answered, refuse them yourself (answer them with `approve: false`, or `stop` their run).
+
 # 0.236.1
 
 ## Two password sign-ups at once no longer answer 500 (#1361)
