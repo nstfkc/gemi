@@ -143,8 +143,9 @@ protected trailingContext(req: HttpRequest, { body }: { body: Body }) {
 }
 ```
 
-- It is never stored and `contextWindow` doesn't count it.
-- It is outside the cached prefix. The OpenAI and Azure OpenAI providers send it as a last developer message. The Anthropic providers add it after the last message's blocks and keep the cache breakpoint on the block before it. A provider that doesn't declare `capabilities.trailingContext` (a custom one) is sent it as a last user message.
+- It is never stored and `contextWindow` doesn't count it: a large one adds to every call and never triggers compaction. Keep it short.
+- It is outside the cached prefix. The OpenAI and Azure OpenAI providers send it as a last developer message. The Anthropic providers add it after the last message's blocks and keep the cache breakpoint on the block before it. A provider that doesn't declare `capabilities.trailingContext` (a custom one) is sent it as a last user message, in the current turn (its `turn` is the turn's id), so `splitTurns` and `turnOf` still find the person's message. The [scripted provider](./ai-scripted-provider.md) declares it, and a test reads it as `call.trailingContext`.
+- A [recording](./ai-recordings.md) matches it like the rest of the request, so one that holds the time replays as changed unless the test pins the clock (`pinClock`).
 - It is called once per turn, after `context()`, on turns from `useChat`, `startTurn` and voice. Answer nothing to send none. `prepareStep` sees it as `trailingContext` and can answer another one for one call (`""` sends none).
 - It isn't handed down to a sub-agent.
 - `body` is client-controlled, as in `instructions()`: it says what the client claims, not what is true.

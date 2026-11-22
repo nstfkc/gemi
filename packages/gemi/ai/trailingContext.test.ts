@@ -16,6 +16,8 @@ import {
 import { fakeProvider } from "./providers/fakeProvider";
 import { buildResponsesRequest } from "./providers/request";
 import { s } from "./Schema";
+import { splitTurns } from "./contextWindow";
+import { scriptedProvider } from "./testing";
 import type { AgentMessage } from "./types";
 
 // `trailingContext`, a cache key that stays put, and `activeTools` without a
@@ -119,6 +121,79 @@ describe("trailingContext on a run", () => {
     await (await Chat.startTurn({ threadId, text: "hello", body: { page: "settings" } })).result();
     expect(provider.calls[0]!.trailingContext).toBe("The person is on settings.");
     expect((await store.loadThread(threadId))!.map(textOf)).toEqual(["hello", "hi"]);
+  });
+});
+
+describe("the request prefix across turns (#1345)", () => {
+  const callB = (id: string): ProviderEvent[] => [{ type: "tool-call", toolCallId: id, name: "b", args: "{}" }, finish()];
+  /** Two turns with different trailing text, the first step of each narrowed to "b". */
+  async function twoTurns(features: { trailingContext?: boolean; allowedTools?: boolean }) {
+    const provider = capable(features, callB("c1"), say("one"), say("two"));
+    const agent = Agent.create({
+      name: "prefix",
+      instructions: "You help.",
+      provider,
+      tools: [noop("a"), noop("b")],
+      prepareStep: ({ step }) => (step === 1 ? { activeTools: ["b"] } : {}),
+    });
+    const first = await agent.stream({ messages: [], turn: { text: "first" }, trailingContext: "Screen: home, 09:00." }).result();
+    const second = await agent
+      .stream({ messages: first.messages, turn: { text: "second" }, trailingContext: "Screen: pricing, 09:05." })
+      .result();
+    return { provider, first, second };
+  }
+
+  test("system prompt and tools are byte-equal on every call; turn 2 starts with turn 1 as stored", async () => {
+    const { provider, first } = await twoTurns({ trailingContext: true, allowedTools: true });
+    expect(provider.calls).toHaveLength(3);
+    expect(new Set(provider.calls.map((call) => call.systemPrompt)).size).toBe(1);
+    expect(new Set(provider.calls.map((call) => JSON.stringify(call.tools))).size).toBe(1);
+    const turn2 = provider.calls[2]!.messages;
+    expect(JSON.stringify(turn2.slice(0, first.messages.length))).toBe(JSON.stringify(first.messages));
+    const sent = JSON.stringify(provider.calls.map((call) => call.messages));
+    expect(sent).not.toContain("Screen:");
+    expect(provider.calls.map((call) => call.trailingContext)).toEqual([
+      "Screen: home, 09:00.",
+      "Screen: home, 09:00.",
+      "Screen: pricing, 09:05.",
+    ]);
+  });
+
+  test("on the Responses request, each step's input is a prefix of the next once the trailing item is left out", async () => {
+    const model = "gpt-5.4";
+    const { provider } = await twoTurns(responsesRequestFeatures(model));
+    const inputs = provider.calls.map((call) => {
+      const body = buildResponsesRequest(call as any, {
+        model,
+        capabilities: { ...capabilitiesForModel(model), ...responsesRequestFeatures(model) },
+      });
+      expect(body.input.at(-1)).toMatchObject({ role: "developer" });
+      return { input: body.input.slice(0, -1), head: JSON.stringify([body.instructions, body.tools]) };
+    });
+    expect(new Set(inputs.map((entry) => entry.head)).size).toBe(1);
+    for (let i = 1; i < inputs.length; i++) {
+      const before = inputs[i - 1]!.input;
+      expect(JSON.stringify(inputs[i]!.input.slice(0, before.length))).toBe(JSON.stringify(before));
+    }
+  });
+
+  test("the fallback message is in the current turn, so the turn read off the request is the person's", async () => {
+    const provider = fakeProvider(say("hi"));
+    await Agent.create({ name: "screen", provider })
+      .stream({ messages: [], turn: { text: "hello" }, trailingContext: "Pricing page." })
+      .result();
+    const sent = provider.calls[0]!.messages;
+    expect(sent.at(-1)!.turn).toBe(sent[0]!.id);
+    expect(splitTurns(sent)).toHaveLength(1);
+  });
+
+  test("a scripted provider gets it as a parameter, and its turn is the person's message", async () => {
+    const provider = scriptedProvider(["hi"]);
+    await Agent.create({ name: "screen", provider })
+      .stream({ messages: [], turn: { text: "hello" }, trailingContext: "Pricing page." })
+      .result();
+    expect(provider.calls[0]!.trailingContext).toBe("Pricing page.");
+    expect(provider.calls[0]!.turn?.text).toBe("hello");
   });
 });
 
