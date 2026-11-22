@@ -2370,6 +2370,12 @@ export interface AgentRun<T extends ToolShapes = ToolShapes, O = unknown> extend
    * came (#1260). See `CreateAgentParams.rememberDenials`.
    */
   readonly denials: readonly ToolDenial[];
+  /**
+   * The turn this run answers (#1339), once the run has taken its turn in:
+   * the id every message it writes carries as `AgentMessage.turn`. Optional,
+   * so an `AgentRun` written by hand still type-checks.
+   */
+  readonly turn?: AgentRunTurn;
   /** Numbered events, replayable from a cursor. `toResponse` is this, encoded. */
   frames(from?: number): AsyncIterable<AgentStreamFrame<T, O>>;
   toResponse(params?: { from?: number }): Response;
@@ -2409,6 +2415,19 @@ export interface AgentRun<T extends ToolShapes = ToolShapes, O = unknown> extend
    */
   join?(turn: AgentJoinTurn): AgentRunJoin | null;
 }
+
+/**
+ * The turn a run answers (#1339), as `AgentRun.turn` and the controller's
+ * hooks (`ctx.turn`) see it.
+ */
+export type AgentRunTurn = {
+  /** The id of the user message that started the turn: `AgentMessage.turn` on every message the run writes. */
+  id: string;
+  /** Set when the run adds no message of its own and carries on an earlier turn: answers to its tool calls, or a bare continuation. */
+  continues?: true;
+  /** The tool calls the request answered, by `toolCallId`. */
+  answers?: string[];
+};
 
 /** What `AgentRun.join` takes: a client turn's text and files, or a server turn's event. */
 export type AgentJoinTurn = {
@@ -3713,6 +3732,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private readonly approvals = new Map<string, ToolApprovalRecord>();
   /** See `AgentRun.denials`. */
   readonly denials: ToolDenial[] = [];
+  /** See `AgentRun.turn`. Set by `ingestTurn`, before any message of the run's is written. */
+  turn: AgentRunTurn | undefined;
   private finishReason: FinishReason = "stop";
   /** Calls cut at `maxToolArgumentChars` sent back to the model so far (#1259). */
   private cutCalls = 0;
@@ -4516,6 +4537,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         content: [{ type: "text", text }],
         createdAt: new Date().toISOString(),
         finishReason: "stop",
+        // Read by this run, so part of its turn rather than one of its own.
+        ...this.turnField(),
       };
       this.history.push(message);
       this.produced.push(message);
@@ -4534,9 +4557,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private async takeJoins(): Promise<void> {
     while (this.joins.length > 0) {
       const { turn, resolve } = this.joins.shift()!;
+      const start = this.turnStartId();
       const message: AgentMessage = {
         ...userTurnMessage(turn.event ? turn.event.text : turn.text, turn.files, turn.event),
-        joined: this.turnStartId(),
+        turn: start,
+        joined: start,
       };
       this.history.push(message);
       this.produced.push(message);
@@ -4551,11 +4576,32 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   }
 
   /**
+   * The turn a run that adds no message of its own carries on (#1339): the
+   * turn of the message whose tool calls it answers, or, with nothing to
+   * answer, of the thread's last message. A message stored without `turn`
+   * belongs to the last turn start at or before it, found as `turnStarts`
+   * finds one.
+   */
+  private continuedTurn(asking: AgentMessage | undefined): string {
+    const at = asking ? this.history.indexOf(asking) : this.history.length - 1;
+    const from = this.history[at];
+    if (from?.turn !== undefined) return from.turn;
+    const injected = injectedMessageIds(this.history);
+    for (let i = at; i >= 0; i--) {
+      const message = this.history[i]!;
+      if (message.turn !== undefined) return message.turn;
+      if (message.role === "user" && !message.joined && !injected.has(message.id)) return message.id;
+    }
+    return this.history[0]?.id ?? "";
+  }
+
+  /**
    * The id of the message that started the turn this run is answering: the
    * last user message in its history that no tool injected and that joined
    * nothing itself. What a joined message names (`AgentMessage.joined`).
    */
   private turnStartId(): string {
+    if (this.turn) return this.turn.id;
     const injected = injectedMessageIds(this.history);
     for (let i = this.history.length - 1; i >= 0; i--) {
       const message = this.history[i]!;
@@ -4564,12 +4610,18 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     return this.history[0]?.id ?? "";
   }
 
+  /** `{ turn }` for a message this run writes, or nothing before the turn is known. */
+  private turnField(): { turn?: string } {
+    return this.turn ? { turn: this.turn.id } : {};
+  }
+
   private startMessage(): AgentMessage {
     const message: AgentMessage = {
       id: `msg_${crypto.randomUUID()}`,
       role: "assistant",
       content: [],
       createdAt: new Date().toISOString(),
+      ...this.turnField(),
     };
     this.current = message;
     this.history.push(message);
@@ -6446,8 +6498,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // The turn's own message, and every message that joined the turn before
     // the call (`AgentMessage.joined`): the files of all of them are the
     // turn's.
-    let start: AgentMessage | undefined;
-    for (let i = at - 1; i >= 0; i--) {
+    // By `turn` when the message holding the call has one (#1339): with
+    // parallel runs, the last user message before it may be another turn's.
+    const named = this.history[at]?.turn;
+    let start: AgentMessage | undefined = named
+      ? this.history.find((message) => message.id === named)
+      : undefined;
+    for (let i = at - 1; !start && i >= 0; i--) {
       const message = this.history[i];
       if (message.role === "user" && !message.joined && !injected.has(message.id)) {
         start = message;
@@ -6459,7 +6516,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           start,
           ...this.history
             .slice(0, Math.max(0, at))
-            .filter((message) => message.role === "user" && message.joined === start.id),
+            .filter(
+              (message) =>
+                message.role === "user" &&
+                message !== start &&
+                !injected.has(message.id) &&
+                (message.joined === start.id || message.turn === start.id),
+            ),
         ]
       : [];
     const ids: string[] = [];
@@ -6569,6 +6632,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     if (this.ended || this.controller.signal.aborted) return;
     for (const message of queued) {
       if (this.history.some((held) => held.id === message.id)) continue;
+      // Shown by the turn that settles the call, so it is that turn's file.
+      if (this.turn && message.turn === undefined) message.turn = this.turn.id;
       this.history.push(message);
       this.produced.push(message);
       this.emit({ type: "message", message });
@@ -6670,6 +6735,33 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const turn = this.params.turn;
     const open = this.openCalls();
     this.openedWith = open.length;
+
+    // The turn's own message, made now so its id is the turn's before any
+    // message of the run's is written (a re-entered tool's file, say), and
+    // added to the history below, after the answers, as before.
+    const event = this.depth === 0 ? this.params.event : undefined;
+    const opening =
+      event || (turn && (turn.text || (turn.files && turn.files.length > 0)))
+        ? userTurnMessage(event ? event.text : turn?.text, turn?.files, event)
+        : undefined;
+    const answers = [...new Set((turn?.toolResults ?? []).map((answer) => answer.toolCallId))];
+    // The turn of the call answered, not of the first call open: with
+    // parallel runs, two turns can each be waiting on a question. A request
+    // answering calls of both carries on the turn of the first answer it
+    // lists.
+    const answered = answers
+      .map((toolCallId) => open.find(({ call }) => call.toolCallId === toolCallId))
+      .find((entry) => entry !== undefined);
+    const id = opening?.id ?? this.continuedTurn((answered ?? open[0])?.message);
+    // An empty thread continued with nothing has no turn to name.
+    this.turn = id
+      ? {
+          id,
+          ...(opening ? {} : { continues: true as const }),
+          ...(answers.length > 0 ? { answers } : {}),
+        }
+      : undefined;
+    if (opening) opening.turn = opening.id;
     /** Questions a re-entered tool asked again. The run ends on these. */
     const escalated: PendingToolCall[] = [];
 
@@ -6835,10 +6927,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       await this.reportDeferred();
     }
 
-    const event = this.depth === 0 ? this.params.event : undefined;
-    if (event || (turn && (turn.text || (turn.files && turn.files.length > 0)))) {
-      const text = event ? event.text : turn?.text;
-      const message = userTurnMessage(text, turn?.files, event);
+    if (opening) {
+      const message = opening;
       this.history.push(message);
       this.produced.push(message);
       // A sub-run's turn was written by the tool that started it, not typed by
