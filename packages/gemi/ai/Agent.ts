@@ -3210,15 +3210,18 @@ function withActiveTools(config: RunConfig, names: readonly string[], owner: str
 
 /**
  * `AgentStreamParams.trailingContext` as a message, for a provider that does
- * not place it itself (#1345). Sent, never stored.
+ * not place it itself (#1345). Sent, never stored. In the current turn
+ * (`turn`), so `splitTurns`/`turnOf` reading the request don't take it for
+ * the start of a new one.
  */
-function trailingMessage(text: string): AgentMessage {
+function trailingMessage(text: string, turn: string | undefined): AgentMessage {
   return {
     id: "msg_trailing_context",
     role: "user",
     content: [{ type: "text", text }],
     createdAt: new Date().toISOString(),
     finishReason: "stop",
+    ...(turn ? { turn } : {}),
   };
 }
 
@@ -4744,9 +4747,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const emulating = forced && provider.capabilities.supportsForcedToolChoice === false;
     const secondAsk = this.forceAgain !== undefined;
     this.forceAgain = undefined;
-    const systemPrompt = emulating
-      ? [request.instructions, forcedToolLine(request.toolChoice!)].filter(Boolean).join("\n\n")
-      : request.instructions;
+    // After the conversation, with the trailing context, rather than in the
+    // system prompt (#1345): a forced step would otherwise move the cached
+    // prefix from the system prompt on.
+    const systemPrompt = request.instructions;
 
     let outcome: StepOutcome = { reason: "stop" };
     const partialArgs = new Map<string, { name: string; args: string; namespace?: string }>();
@@ -4763,7 +4767,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
     // A provider that does not place a trailing context itself is sent it
     // as a last user message (#1345). Never in the history.
-    const trailing = request.trailingContext;
+    const trailing =
+      [request.trailingContext, emulating ? forcedToolLine(request.toolChoice!) : undefined]
+        .filter(Boolean)
+        .join("\n\n") || undefined;
     const placesTrailing = provider.capabilities.trailingContext === true;
     const stream = provider.stream({
       // Not `this.history` directly: an image a tool showed is in the history
@@ -4771,7 +4778,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // is cut to the context window. See `prepareRequest`.
       messages:
         trailing && !placesTrailing
-          ? [...request.messages, trailingMessage(trailing)]
+          ? [...request.messages, trailingMessage(trailing, this.turn?.id)]
           : request.messages,
       ...(trailing && placesTrailing ? { trailingContext: trailing } : {}),
       ...(request.allowedTools ? { allowedTools: request.allowedTools } : {}),

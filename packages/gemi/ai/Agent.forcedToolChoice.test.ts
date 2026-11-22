@@ -8,7 +8,9 @@ import { s } from "./Schema";
 import type { AgentMessage } from "./types";
 
 // #1261: a forced `toolChoice` on a provider that sends it as `auto` is
-// emulated with a system line and one more ask.
+// emulated with a line and one more ask. The line goes after the
+// conversation, with the trailing context (#1345), so the system prompt and
+// the cached prefix stay the same on a forced step.
 
 const finish = (): ProviderEvent => ({
   type: "finish",
@@ -56,21 +58,29 @@ function setup(
   return { provider, agent };
 }
 
+/** The text a call was sent after the conversation: `trailingContext`, or the fallback message. */
+const lineOf = (call: { trailingContext?: string; messages: AgentMessage[] }) => {
+  if (call.trailingContext !== undefined) return call.trailingContext;
+  const last = call.messages.at(-1);
+  return last?.id === "msg_trailing_context" ? (last.content[0] as { text: string }).text : undefined;
+};
+
 const texts = (messages: AgentMessage[]) =>
   messages
     .filter((m) => m.role === "assistant")
     .flatMap((m) => m.content.filter((p) => p.type === "text").map((p: any) => p.text));
 
-test("adds a system line naming the tool when the provider cannot force it", async () => {
+test("adds a line naming the tool, after the conversation, when the provider cannot force it", async () => {
   const { provider, agent } = setup([callsLookup("c1"), text("found")], { forces: false });
 
   await agent.stream({ messages: [], turn: { text: "go" } }).result();
 
   expect(provider.calls[0]!.toolChoice).toEqual({ name: "lookup" });
-  expect(provider.calls[0]!.systemPrompt).toMatch(/^You research\.\n\n/);
-  expect(provider.calls[0]!.systemPrompt).toContain('"lookup"');
+  expect(lineOf(provider.calls[0]!)).toContain('"lookup"');
+  // The system prompt is the agent's own on every step.
+  expect(provider.calls.map((call) => call.systemPrompt)).toEqual(["You research.", "You research."]);
   // Not forced on step 2, so no line there.
-  expect(provider.calls[1]!.systemPrompt).toBe("You research.");
+  expect(lineOf(provider.calls[1]!)).toBeUndefined();
 });
 
 test('"required" asks for a tool call, naming none', async () => {
@@ -81,10 +91,9 @@ test('"required" asks for a tool call, naming none', async () => {
 
   await agent.stream({ messages: [], turn: { text: "go" } }).result();
 
-  const prompt = provider.calls[0]!.systemPrompt!;
-  expect(prompt).not.toBe("You research.");
-  expect(prompt).toMatch(/tool/);
-  expect(prompt).not.toContain('"lookup"');
+  const line = lineOf(provider.calls[0]!)!;
+  expect(line).toMatch(/tool/);
+  expect(line).not.toContain('"lookup"');
 });
 
 test("a step that ends without the call is asked again once, with the line", async () => {
@@ -96,7 +105,7 @@ test("a step that ends without the call is asked again once, with the line", asy
 
   expect(provider.calls).toHaveLength(3);
   expect(provider.calls[1]!.toolChoice).toEqual({ name: "lookup" });
-  expect(provider.calls[1]!.systemPrompt).toContain('"lookup"');
+  expect(lineOf(provider.calls[1]!)).toContain('"lookup"');
   expect(ran).toEqual(["a"]);
   expect(result.finishReason).toBe("stop");
   expect(texts(result.messages)).toEqual(["I will look it up.", "found"]);
@@ -127,6 +136,7 @@ test("a provider that forces it gets no line and no second ask", async () => {
 
   expect(provider.calls).toHaveLength(1);
   expect(provider.calls[0]!.systemPrompt).toBe("You research.");
+  expect(lineOf(provider.calls[0]!)).toBeUndefined();
   expect(texts(result.messages)).toEqual(["first"]);
 });
 
