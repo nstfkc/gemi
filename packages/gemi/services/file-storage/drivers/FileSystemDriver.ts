@@ -250,6 +250,11 @@ export class FileSystemDriver extends FileStorageDriver {
     }
   }
 
+  /**
+   * The object as a `Response` whose body streams from a file it has already
+   * opened. Consume or cancel the body: a response dropped unread holds the
+   * file open until it is garbage-collected.
+   */
   async fetch(
     params: ReadFileParams | string,
     { signal }: FetchFileOptions = {},

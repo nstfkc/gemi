@@ -27,6 +27,7 @@ refused, whether its target is inside the store, outside it, or missing.
   the store. Replace aliases inside the store with copies.
 - `fetch()` of a missing object now rejects with `FileNotFoundError`. Before, it
   answered `200` and the body failed once it was read.
+  The file is open once `fetch()` resolves, so consume or cancel the body.
 
 # 0.240.0
 

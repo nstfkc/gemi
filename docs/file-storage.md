@@ -127,7 +127,7 @@ interface ReadFileParams {
 
 Because `fetch` returns a `Response`, a controller can return it directly. See [Controllers](./controllers.md).
 
-On `FileSystemDriver`, `fetch` rejects with `FileNotFoundError` for a missing object, as `read` does, so the caller gets a 404 rather than a `200` whose body fails once it is read.
+On `FileSystemDriver`, `fetch` rejects with `FileNotFoundError` for a missing object, as `read` does, so the caller gets a 404 rather than a `200` whose body fails once it is read. The file is open from then on, so consume or cancel the body: returning the response from a route does that, but a response dropped unread holds the file open until it is garbage-collected.
 
 #### Cancelling a read
 
