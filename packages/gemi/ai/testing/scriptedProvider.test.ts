@@ -118,6 +118,38 @@ describe("scriptedProvider (#1343)", () => {
     expect(typo.error?.message).toMatch(/Agent "greter" has no script/);
   });
 
+  test("exhausted: a step answers every call past the script, from the call", async () => {
+    const provider = scriptedProvider(["First."], {
+      exhausted: (call) => `${call.agent} call ${call.index + 1}: ${call.turn?.text}`,
+    });
+    const agent = Agent.create({ name: "echo", provider });
+    const texts: string[] = [];
+    for (const text of ["a", "b", "c"]) {
+      texts.push(lastText(await agent.stream({ messages: [], turn: { text } }).result()));
+    }
+    expect(texts).toEqual(["First.", "echo call 2: b", "echo call 3: c"]);
+    expect(provider.calls).toHaveLength(3);
+    expect(() => provider.assertDone()).not.toThrow();
+  });
+
+  test("exhausted: a step is per agent too, and an agent the scripts do not name still fails", async () => {
+    const provider = scriptedProvider({ main: [], builder: ["Built."] }, { exhausted: { text: "stop" } });
+    const main = await Agent.create({ name: "main", provider }).stream({ messages: [], turn: { text: "x" } }).result();
+    expect(lastText(main)).toBe("stop");
+    const builder = Agent.create({ name: "builder", provider });
+    expect(lastText(await builder.stream({ messages: [], turn: { text: "x" } }).result())).toBe("Built.");
+    expect(lastText(await builder.stream({ messages: [], turn: { text: "y" } }).result())).toBe("stop");
+    const typo = await Agent.create({ name: "biulder", provider }).stream({ messages: [], turn: { text: "x" } }).result();
+    expect(typo.finishReason).toBe("error");
+    expect(typo.error?.message).toMatch(/Agent "biulder" has no script/);
+  });
+
+  test("exhausted: a step leaves assertDone checking the scripted steps", async () => {
+    const provider = scriptedProvider({ main: ["One.", "Two."] }, { exhausted: "More." });
+    await Agent.create({ name: "main", provider }).stream({ messages: [], turn: { text: "x" } }).result();
+    expect(() => provider.assertDone()).toThrow('Steps never used: "main": 1 step(s).');
+  });
+
   test("one list running out says which step, and whose call it was", async () => {
     const provider = scriptedProvider(["Hi."]);
     await Agent.create({ name: "a", provider }).stream({ messages: [], turn: { text: "x" } }).result();
