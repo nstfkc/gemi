@@ -441,6 +441,7 @@ function reduce<T extends ToolShapes, O>(
       return withMessage(state, event.messageId, now, (message) => ({
         ...message,
         role: event.role,
+        ...(event.turn && message.turn === undefined ? { turn: event.turn } : {}),
       }));
 
     // The two additive cases, and the only two that can double text. `seq`
