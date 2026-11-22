@@ -620,7 +620,7 @@ function suite(label: string, url?: string) {
      * Both halves are asserted per dialect rather than skipping the one that is
      * inconvenient: the point is that they genuinely differ.
      */
-    test("whether a DB.sql write survives a rollback depends on the dialect", async () => {
+    test("a DB.sql write inside a transaction escapes it on Postgres and fails on SQLite", async () => {
       const attempt = Model.transaction(async () => {
         await DB.sql`update "User" set "name" = ${"escaped"} where "email" = ${"ada@x.test"}`;
         throw new Error("rolled back");

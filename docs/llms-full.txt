@@ -10037,7 +10037,7 @@ On MySQL, add `@db.Text` to `title` and `@db.LongText` to `summaries` and `messa
 ## How it behaves
 
 - **The whole message is kept**, as JSON, one row per message id, in the order the thread first saw it. A message written again (a run writes its assistant message as it streams, and a turn that answers a pending call writes the earlier message again with the result) replaces its row in place.
-- **One writer per thread at a time.** An append runs in a transaction that locks the thread's row first (the database's write lock on SQLite), so two appends to one thread cannot interleave. On SQLite, one client's transactions take turns; several clients on one file need a busy timeout.
+- **One writer per thread at a time.** An append runs in a transaction that locks the thread's row first (the database's write lock on SQLite), so two appends to one thread cannot interleave. On SQLite, transactions on one connection take turns, and a transaction that meets another process's lock on the file is retried for up to 5 seconds, without blocking the event loop (see [orm.md](./orm.md#transactions)).
 - **An unknown thread is `null`** from `loadThread`, and the controller answers 404, as with `MemoryAgentStore`. An append to it throws.
 - **Regenerate** (`removeMessages`) and **compaction summaries** (`loadSummaries`, `saveSummary`, `lockSummary`) are supported. Summaries live on the thread's row and are deleted with it. `lockSummary` is a compare-and-set on that row, so several instances do not summarise the same thread at once.
 - **Joins the ORM transaction** on its connection, when a call is made inside one, and rolls back with it.
@@ -14785,17 +14785,28 @@ transaction: it doesn't see its uncommitted rows, and a rollback doesn't take it
   backoff for up to 5 seconds, then fails with the `SQLITE_BUSY` error. So is a `BEGIN`.
 - Transactions start with `BEGIN IMMEDIATE`, so one that reads first can't fail at its first
   write because a plain write landed in between.
-- A multi-statement string (`sql.unsafe("…; …")`, `sql.file(...)`) waits its turn before it runs,
+- A multi-statement string (`sql.unsafe("…; …")`, `sql.file(...)`; a `;` inside a string
+  literal, a quoted name or a comment, or a trailing one, doesn't count) waits its turn before it runs,
   so it never meets this process's open transaction, and it is never run twice: if it still meets
   another process's lock, it fails with `SqliteBusyError`, since the statements before the one
-  that failed may have committed.
-- Code inside a transaction that writes through the pool (`DB.sql`, a raw client) instead of the
-  transaction's handle no longer joins the transaction. That write waits for the transaction,
-  which is waiting for it, so after 5 seconds it fails with `TransactionQueueDeadlockError`. Use
-  the ORM (which joins the open transaction), `DB.query`, or the handle `transaction()` gives you.
-  Reads through the pool work, and see what was committed before the transaction.
+  that failed may have committed. Because it waits for the open transaction even when it only
+  reads, one issued through the pool inside a transaction fails after 5 seconds like a write; run
+  it on the transaction's handle.
+- A write through the pool inside a transaction doesn't join the transaction. It waits for the
+  transaction, which is waiting for it, so after 5 seconds it fails with
+  `TransactionQueueDeadlockError`. The error's `stack` (and `callSite`) points at the call that
+  issued the write, and its message quotes the statement. That covers `DB.sql` and a raw client,
+  and also gemi stores that write through the pool on purpose: a lock or a rate-limit hit
+  (`DatabaseLockStore`), an OAuth connection (`DatabaseConnectionStore`), a run
+  (`DatabaseRunStore`) or an agent job (`DatabaseAgentJobStore`), called inside `transaction()`.
+  Call those before the transaction or from `afterCommit`. For your own SQL, use the ORM (which
+  joins the open transaction), `DB.query`, or the handle `transaction()` gives you. Reads through
+  the pool work, and see what was committed before the transaction. On Postgres the same code
+  runs on another connection and works.
 - `:memory:` databases keep one connection, since a second one would open a second, empty
   database. Postgres and MySQL are unchanged.
+- If the file can't be switched to WAL (another process holds it, a network filesystem), gemi
+  warns once at startup. The mode is stored in the file, so it stays WAL under an older gemi too.
 
 ### Two things that will bite you
 
@@ -22400,7 +22411,7 @@ export default defineQueueConfig({
 How it works:
 
 - **Claiming.** Each job is a row. Postgres and MySQL claim rows with `SELECT … FOR UPDATE SKIP LOCKED`, so replicas claiming at the same moment take different rows. On MySQL the claim runs at READ COMMITTED on a connection of its own, because MySQL's default REPEATABLE READ locks the gaps a range scan passes over as well as the rows it returns, and claimers then block or deadlock on each other instead of skipping past. The connection's isolation level is put back before it returns to the pool. SQLite runs one write at a time, so a single `UPDATE … RETURNING` claims atomically.
-- **SQLite and a second process.** Bun opens SQLite with a busy timeout of 0, so a write that finds another process holding the file's lock fails at once with `SQLITE_BUSY`. The driver raises that to one second the first time it touches a SQLite connection, so `gemi dev` and a script or seed dispatching into the same file wait for each other instead. The setting belongs to the connection, so with `driver: "database"` it applies to the app's default connection too. A connection you already gave a busy timeout keeps it, and `new DatabaseQueueDriver(connection, { busyTimeout })` picks another value (`0` leaves the connection alone). Bun waits for the lock on the JavaScript thread, so the process serves nothing else while it waits. That is why the default is short. For more than one server, use Postgres or MySQL.
+- **SQLite and a second process.** On a gemi connection to a SQLite file, a write that finds another process holding the file's lock (`gemi dev` and a script or seed dispatching into the same file) waits for it in JS, without blocking the event loop, and is retried for up to 5 seconds before it fails with `SQLITE_BUSY` (see [orm.md](./orm.md#transactions)). SQLite's own `busy_timeout` stays 0 there, because Bun waits for it on the JavaScript thread, and the process would serve nothing else meanwhile. So `new DatabaseQueueDriver(connection, { busyTimeout })` is ignored on such a connection, with a warning. It still applies to a `:memory:` database and to a client you built yourself: the driver raises a busy timeout of 0 to one second the first time it touches it, a client you already gave a busy timeout keeps it, and `busyTimeout: 0` leaves it alone. For more than one server, use Postgres or MySQL.
 - **Leases.** A claim leases the job for `visibilityTimeout` (default five minutes). The queue renews the lease every third of that while the job runs. A job whose process died without finishing becomes claimable again when its lease runs out, and that is the whole of crash recovery. A lower `visibilityTimeout` retries such a job sooner, at the cost of more lease renewals.
 - **Retries.** The attempt count and the last error are stored in the row, so `maxAttempts` and `backoff` hold across restarts. An attempt whose process died counts too.
 - **Dead letters.** A job that used up its attempts stays in the table with `status = 'dead'` and its `last_error`. `app(QueueManager).retryDead(id)` runs it again from attempt 1, with all its `maxAttempts`, and resolves `false` if `id` is not a dead job — one that is waiting, running or gone is left alone. There is no `gemi` command for it yet; a [console command](./commands.md) of your own is a few lines around that call. From a console command the job waits for a server or a worker to claim it, up to `pollInterval`. `driver.prune(olderThanMs)` deletes dead rows older than that, for example from a cron job. Nothing else removes them.

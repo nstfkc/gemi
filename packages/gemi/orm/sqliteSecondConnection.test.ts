@@ -241,7 +241,7 @@ describe("statements outside a transaction on SQLite (#1375)", () => {
     expect([...((await within(write as Promise<unknown>)) as unknown[])]).toEqual([["v"]]);
   });
 
-  test("a plain write awaited from inside the transaction's own context fails instead of hanging", async () => {
+  test("a plain write awaited from inside the transaction's own context fails instead of hanging, naming its call", async () => {
     const started = Date.now();
     const result = Note.transaction(async () => {
       await Note.create({ data: { body: "tx" } });
@@ -249,10 +249,49 @@ describe("statements outside a transaction on SQLite (#1375)", () => {
       // transaction commits, which waits for it.
       await sql()`INSERT INTO ${sql()(table)} (body) VALUES ('pool')`;
     });
-    await expect(within(result, 8000)).rejects.toBeInstanceOf(TransactionQueueDeadlockError);
+    const error = (await within(result, 8000).catch(
+      (caught: unknown) => caught,
+    )) as TransactionQueueDeadlockError;
+    expect(error).toBeInstanceOf(TransactionQueueDeadlockError);
     expect(Date.now() - started).toBeGreaterThanOrEqual(4900);
+    // Where it was issued, not the queue's timer.
+    expect(error.callSite).toBeInstanceOf(Error);
+    expect(error.stack).toContain("sqliteSecondConnection.test.ts");
+    expect(error.stack).not.toContain("sqliteQueue.ts");
+    expect(error.message).toContain(`Statement: INSERT INTO ? (body) VALUES ('pool')`);
     expect(await bodies()).toEqual([]);
   }, 10_000);
+
+  test("a gemi store that writes through the pool inside a transaction fails the same way", async () => {
+    const locks = new DatabaseLockStore(
+      { sql: sql(), dialect: "sqlite" },
+      { table: `${table}_locks2` },
+    );
+    await locks.createTable();
+    const result = DB.transaction(async () => {
+      await locks.hit("sign-up", 10, 60_000);
+    });
+    const error = (await within(result, 8000).catch(
+      (caught: unknown) => caught,
+    )) as TransactionQueueDeadlockError;
+    expect(error).toBeInstanceOf(TransactionQueueDeadlockError);
+    expect(error.stack).toContain("DatabaseLockStore.ts");
+    // Before the transaction it works.
+    expect(await locks.hit("sign-up", 10, 60_000)).toMatchObject({ count: 1 });
+  }, 10_000);
+
+  test("a read with a semicolon in a literal, a comment or at its end runs at once inside a transaction", async () => {
+    await within(
+      Note.transaction(async () => {
+        await Note.create({ data: { body: "tx" } });
+        const rows = (await sql().unsafe("SELECT ';' || 'x' AS v; -- trailing; comment")) as {
+          v: string;
+        }[];
+        expect(rows[0]!.v).toBe(";x");
+      }),
+      1000,
+    );
+  });
 
   describe("multi-statement strings", () => {
     test("they are told apart from one statement", () => {
@@ -260,6 +299,13 @@ describe("statements outside a transaction on SQLite (#1375)", () => {
       expect(isMultiStatement("select 1;")).toBe(false);
       expect(isMultiStatement("select 1; \n ")).toBe(false);
       expect(isMultiStatement("insert into a values (1); insert into a values (2)")).toBe(true);
+      expect(isMultiStatement("select 1; select 2 -- two")).toBe(true);
+      expect(isMultiStatement("SELECT ';' || 'x' AS v")).toBe(false);
+      expect(isMultiStatement("select 'it''s; fine'")).toBe(false);
+      expect(isMultiStatement('select "a;b", [c;d], `e;f` from t')).toBe(false);
+      expect(isMultiStatement("select 1 -- a; b\n")).toBe(false);
+      expect(isMultiStatement("select 1; /* done; */ -- end")).toBe(false);
+      expect(isMultiStatement("/* ; */ select 1; 'x'")).toBe(true);
     });
 
     test("one waits its turn behind an open transaction instead of meeting its lock, and runs once", async () => {
@@ -335,6 +381,24 @@ describe("transactions against another process's lock", () => {
     } finally {
       await other.close();
     }
+  });
+});
+
+describe("closing", () => {
+  test("closing the client closes both connections", async () => {
+    const own = new DatabaseManager({ url: `sqlite://${join(dir, "closing.sqlite")}` });
+    const pool = own.connection().sql;
+    await pool`CREATE TABLE t (v TEXT)`;
+    await pool.begin(async (tx) => {
+      await tx`INSERT INTO t (v) VALUES ('x')`;
+    });
+    await pool.close();
+    await expect(pool`SELECT 1`).rejects.toThrow();
+    await expect(
+      pool.begin(async (tx) => {
+        await tx`SELECT 1`;
+      }),
+    ).rejects.toThrow();
   });
 });
 

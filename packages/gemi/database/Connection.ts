@@ -235,17 +235,37 @@ export class Connection implements DatabaseConnection {
     //
     // All issued now, synchronously, so each is ahead of every statement a
     // caller sends after the constructor returns. A file another process
-    // holds locked can refuse the switch to WAL; the statements still work
-    // without it (a plain read may then meet a writer's lock too, and waits
-    // its turn like a write), so that one failure is not fatal.
+    // holds locked can refuse the switch to WAL, and SQLite then answers with
+    // the mode it kept rather than an error. The statements still work
+    // without WAL, but a plain read can then meet a writer's lock and wait its
+    // turn like a write, so it is worth one warning, not a failure.
+    let refused: unknown;
     await Promise.all(
       this.clients.flatMap((client) =>
         SQLITE_FILE_PRAGMAS.map((pragma) => {
           const run = client.unsafe(pragma) as Promise<unknown>;
-          return pragma.includes("journal_mode") ? run.catch(() => {}) : run;
+          if (!pragma.includes("journal_mode")) return run;
+          return run.then(
+            (rows) => {
+              const mode = (rows as { journal_mode?: string }[] | undefined)?.[0]?.journal_mode;
+              if (String(mode).toLowerCase() !== "wal") refused ??= mode;
+            },
+            (error) => {
+              refused ??= error;
+            },
+          );
         }),
       ),
     );
+    if (refused !== undefined) {
+      console.warn(
+        `[gemi] The SQLite database for the "${this.name}" connection could not be switched to ` +
+          `WAL mode (${refused instanceof Error ? refused.message : `it stayed in "${String(refused)}"`}). ` +
+          `Statements still work, but a read outside a transaction can now wait for a writer, ` +
+          `and one issued inside a transaction through the pool fails after 5 seconds. Keep the ` +
+          `file on a local disk, and make sure no other process holds it open when the app starts.`,
+      );
+    }
   }
 
   // Escape hatch matching Bun's own API, so `connection.query` reads like `sql`

@@ -1672,17 +1672,28 @@ transaction: it doesn't see its uncommitted rows, and a rollback doesn't take it
   backoff for up to 5 seconds, then fails with the `SQLITE_BUSY` error. So is a `BEGIN`.
 - Transactions start with `BEGIN IMMEDIATE`, so one that reads first can't fail at its first
   write because a plain write landed in between.
-- A multi-statement string (`sql.unsafe("…; …")`, `sql.file(...)`) waits its turn before it runs,
+- A multi-statement string (`sql.unsafe("…; …")`, `sql.file(...)`; a `;` inside a string
+  literal, a quoted name or a comment, or a trailing one, doesn't count) waits its turn before it runs,
   so it never meets this process's open transaction, and it is never run twice: if it still meets
   another process's lock, it fails with `SqliteBusyError`, since the statements before the one
-  that failed may have committed.
-- Code inside a transaction that writes through the pool (`DB.sql`, a raw client) instead of the
-  transaction's handle no longer joins the transaction. That write waits for the transaction,
-  which is waiting for it, so after 5 seconds it fails with `TransactionQueueDeadlockError`. Use
-  the ORM (which joins the open transaction), `DB.query`, or the handle `transaction()` gives you.
-  Reads through the pool work, and see what was committed before the transaction.
+  that failed may have committed. Because it waits for the open transaction even when it only
+  reads, one issued through the pool inside a transaction fails after 5 seconds like a write; run
+  it on the transaction's handle.
+- A write through the pool inside a transaction doesn't join the transaction. It waits for the
+  transaction, which is waiting for it, so after 5 seconds it fails with
+  `TransactionQueueDeadlockError`. The error's `stack` (and `callSite`) points at the call that
+  issued the write, and its message quotes the statement. That covers `DB.sql` and a raw client,
+  and also gemi stores that write through the pool on purpose: a lock or a rate-limit hit
+  (`DatabaseLockStore`), an OAuth connection (`DatabaseConnectionStore`), a run
+  (`DatabaseRunStore`) or an agent job (`DatabaseAgentJobStore`), called inside `transaction()`.
+  Call those before the transaction or from `afterCommit`. For your own SQL, use the ORM (which
+  joins the open transaction), `DB.query`, or the handle `transaction()` gives you. Reads through
+  the pool work, and see what was committed before the transaction. On Postgres the same code
+  runs on another connection and works.
 - `:memory:` databases keep one connection, since a second one would open a second, empty
   database. Postgres and MySQL are unchanged.
+- If the file can't be switched to WAL (another process holds it, a network filesystem), gemi
+  warns once at startup. The mode is stored in the file, so it stays WAL under an older gemi too.
 
 ### Two things that will bite you
 

@@ -1,5 +1,5 @@
 import type { SQL } from "bun";
-import { queuedOnSqlite } from "./sqliteQueue";
+import { insideQueueHolder, queuedOnSqlite } from "./sqliteQueue";
 
 /**
  * Two Bun clients for one SQLite file (#1375): one for transactions, one for
@@ -58,13 +58,44 @@ export function isSqliteBusy(error: unknown): boolean {
 }
 
 /**
- * Whether a SQL string holds more than one statement. A `;` followed by
- * anything but whitespace counts, even inside a string literal: a false
- * positive only means the string runs in a turn of its own and isn't retried.
+ * Whether a SQL string holds more than one statement: a `;` with more SQL
+ * after it. Semicolons inside string literals (`'…'`), quoted identifiers
+ * (`"…"`, `` `…` ``, `[…]`) and comments (`-- …` and block comments) don't count, and
+ * neither do trailing ones or a trailing comment.
  */
 export function isMultiStatement(text: string): boolean {
-  const at = text.indexOf(";");
-  return at !== -1 && text.slice(at + 1).replace(/[\s;]/g, "") !== "";
+  let ended = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]!;
+    if (char === "-" && text[i + 1] === "-") {
+      const end = text.indexOf("\n", i);
+      if (end === -1) return false;
+      i = end;
+      continue;
+    }
+    if (char === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end === -1) return false;
+      i = end + 1;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`" || char === "[") {
+      const close = char === "[" ? "]" : char;
+      // A doubled quote inside a literal is an escaped one: the scan
+      // closes and reopens it, which lands in the same place.
+      const end = text.indexOf(close, i + 1);
+      if (end === -1) return ended;
+      if (ended) return true;
+      i = end;
+      continue;
+    }
+    if (char === ";") {
+      ended = true;
+      continue;
+    }
+    if (ended && !/\s/.test(char)) return true;
+  }
+  return false;
 }
 
 /** The pragmas each client gets, in order, before anything else it runs. */
@@ -94,6 +125,28 @@ const standIns = new WeakSet<object>();
  */
 export function retriesSqliteBusy(sql: unknown): boolean {
   return typeof sql === "function" && standIns.has(sql);
+}
+
+let warnedBusyTimeout = false;
+
+/**
+ * A store's `busyTimeout` option given for a connection that retries in JS,
+ * where it is ignored: warned once per process.
+ */
+export function warnIgnoredBusyTimeout(sql: unknown, busyTimeout: number | undefined): void {
+  if (
+    busyTimeout === undefined ||
+    busyTimeout === 0 ||
+    warnedBusyTimeout ||
+    !retriesSqliteBusy(sql)
+  ) {
+    return;
+  }
+  warnedBusyTimeout = true;
+  console.warn(
+    `[gemi] busyTimeout (${busyTimeout}ms) is ignored on a SQLite file connection: gemi waits for ` +
+      `another process's lock itself, without blocking the event loop, for up to 5 seconds.`,
+  );
 }
 
 /** What a stand-in query was built from, so a template that nests one gets Bun's own back. */
@@ -143,7 +196,10 @@ export function plainSqliteClient(plain: SQL, transactions: SQL): SQL {
    * builds a fresh Bun query (a query runs once); `first` is the one already
    * built. `multi` strings take a turn before running and never run twice.
    */
-  const wrap = (make: () => Query, first: Query, multi: boolean): Query => {
+  const wrap = (make: () => Query, first: Query, multi: boolean, text: string): Query => {
+    // Issued from inside the transaction holding the queue: if it has to
+    // wait, that is a suspected deadlock, and its error names this call.
+    const callSite = insideQueueHolder(self) ? new Error("statement issued here") : undefined;
     const modifiers: [PropertyKey, unknown[]][] = [];
     let current = first;
     let running: Promise<unknown> | undefined;
@@ -155,7 +211,7 @@ export function plainSqliteClient(plain: SQL, transactions: SQL): SQL {
     const fresh = () => (current = prepare(make()));
 
     const inTurn = (fn: () => Promise<unknown>) =>
-      queuedOnSqlite(self, () => fn(), { statement: true });
+      queuedOnSqlite(self, () => fn(), { statement: true, text, callSite });
 
     const run = async (): Promise<unknown> => {
       if (multi) {
@@ -236,25 +292,35 @@ export function plainSqliteClient(plain: SQL, transactions: SQL): SQL {
       }
       const call = [strings, ...unwrap(values)];
       const make = () => Reflect.apply(target, target, call) as Query;
-      return wrap(make, make(), false);
+      return wrap(make, make(), false, (strings as readonly string[]).join("?"));
     },
     get(target, prop) {
       switch (prop) {
         case "unsafe":
           return (text: string, params?: unknown[]) => {
             const make = () => target.unsafe(text, params as never) as unknown as Query;
-            return wrap(make, make(), isMultiStatement(text));
+            return wrap(make, make(), isMultiStatement(text), text);
           };
         case "file":
           return (path: string, params?: unknown[]) => {
             const make = () => target.file(path, params as never) as unknown as Query;
-            return wrap(make, make(), true);
+            return wrap(make, make(), true, `file ${path}`);
           };
         case "begin":
         case "transaction":
           return begin;
         case "reserve":
           return transactions.reserve.bind(transactions);
+        // Both clients: the stand-in is the connection's whole client.
+        case "close":
+        case "end":
+          return async (...args: unknown[]) => {
+            await Promise.all(
+              [target, transactions].map((client) =>
+                (client[prop] as (...a: unknown[]) => Promise<unknown>).apply(client, args),
+              ),
+            );
+          };
       }
       const value = Reflect.get(target, prop, target);
       if (typeof value !== "function") return value;

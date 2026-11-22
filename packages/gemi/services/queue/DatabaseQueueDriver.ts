@@ -34,7 +34,7 @@ import {
   createWorkflowSourceTableStatements,
   createWorkflowTableStatements,
 } from "./workflow/DatabaseWorkflowStore";
-import { retriesSqliteBusy } from "../../database/sqliteClient";
+import { retriesSqliteBusy, warnIgnoredBusyTimeout } from "../../database/sqliteClient";
 
 export type DatabaseQueueDriverOptions = {
   /**
@@ -80,7 +80,12 @@ export type DatabaseQueueDriverOptions = {
    * process's write lock before failing with `SQLITE_BUSY`. Default `1000`.
    * Applied only to a connection whose busy timeout is still SQLite's `0`, so
    * one the application configured itself keeps its own; `0` here leaves the
-   * connection alone. See `configure` for what the wait costs.
+   * connection alone. See `configure` for what the wait costs.   *
+   * Ignored, with a warning, on a gemi connection to a SQLite file (#1375):
+   * there gemi waits for another process's lock in JS, for up to 5 seconds,
+   * and keeps `busy_timeout` at 0 because SQLite's own wait blocks the event
+   * loop. It applies to `:memory:` and to a client the application built
+   * itself.
    */
   busyTimeout?: number;
 };
@@ -261,6 +266,7 @@ export class DatabaseQueueDriver implements QueueDriver {
     this.dialect = connection.dialect;
     this.connection = connection.name;
     this.busyTimeout = busyTimeout;
+    warnIgnoredBusyTimeout(connection.sql, options.busyTimeout);
   }
 
   /**

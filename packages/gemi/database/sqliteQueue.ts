@@ -25,22 +25,39 @@ const sqliteQueues = new WeakMap<SQL, Promise<void>>();
  * (`afterCommit`), or inside the transaction, where it becomes a savepoint.
  */
 export class TransactionQueueDeadlockError extends Error {
-  constructor(kind: "transaction" | "statement" = "transaction") {
+  /**
+   * Where the waiting statement or transaction was issued: an `Error` whose
+   * stack is the call's. The error's own `stack` is this one too, so a log
+   * points at the line rather than at the queue's timer.
+   */
+  readonly callSite: Error | undefined;
+
+  constructor(
+    kind: "transaction" | "statement" = "transaction",
+    detail: { callSite?: Error; text?: string } = {},
+  ) {
+    const text = detail.text?.replace(/\s+/g, " ").trim();
     super(
-      kind === "statement"
+      (kind === "statement"
         ? "A SQLite statement outside any transaction waited for the open transaction on its " +
-            "connection, from inside that transaction's own async context (the pool's handle " +
-            "instead of the transaction's, or an in-process call that left the transaction's " +
-            "scope while the transaction waits on it). SQLite lets one writer at a time in, so " +
-            "it would wait for the transaction that waits on it. Run it inside the transaction " +
-            "(on its handle, or through the ORM), or after the commit (`afterCommit`)."
+          "connection, from inside that transaction's own async context (a write through the " +
+          "pool instead of the transaction's handle: `DB.sql`, or a gemi store such as the " +
+          "rate limiter, called inside `transaction()`; or an in-process call that left the " +
+          "transaction's scope while the transaction waits on it). SQLite lets one writer at a " +
+          "time in, so it would wait for the transaction that waits on it. Run it before the " +
+          "transaction, after the commit (`afterCommit`), or inside it on its handle."
         : "A SQLite transaction started from inside an open transaction on the same connection, " +
-            "outside its scope (a raw `begin`, or an in-process call that left the transaction's scope " +
-            "while the transaction waits on it). SQLite runs one transaction per connection, so it " +
-            "would wait for the transaction that waits on it. Run it after the commit (`afterCommit`), " +
-            "or inside the transaction.",
+          "outside its scope (a raw `begin`, or an in-process call that left the transaction's scope " +
+          "while the transaction waits on it). SQLite runs one transaction per connection, so it " +
+          "would wait for the transaction that waits on it. Run it after the commit (`afterCommit`), " +
+          "or inside the transaction.") +
+        (text ? ` Statement: ${text.length > 100 ? `${text.slice(0, 100)}…` : text}` : ""),
+      detail.callSite ? { cause: detail.callSite } : undefined,
     );
     this.name = "TransactionQueueDeadlockError";
+    this.callSite = detail.callSite;
+    const frames = detail.callSite?.stack?.split("\n").slice(1).join("\n");
+    if (frames) this.stack = `${this.name}: ${this.message}\n${frames}`;
   }
 }
 
@@ -90,9 +107,21 @@ export function queuedOnSqlite<T>(
     slowTransactionThreshold?: number | false;
     /** A plain statement waiting for its turn (`sqliteClient.ts`), for the error it fails with. */
     statement?: boolean;
+    /** The statement's SQL, named by the deadlock error. */
+    text?: string;
+    /** Where the caller issued it, when it was captured earlier than this call. */
+    callSite?: Error;
   } = {},
 ): Promise<T> {
   const inside = insideQueued.getStore();
+  const kind = options.statement ? "statement" : "transaction";
+  // Queued from inside the transaction holding the pool: the suspected
+  // deadlock, and the one case the error needs a call site for. Captured in
+  // every environment, and only here, so the normal path pays nothing.
+  const holderNow = queueHolders.get(pool);
+  const callSite =
+    options.callSite ??
+    (holderNow && inside?.has(holderNow) ? new Error(`${kind} queued here`) : undefined);
   const token = {};
   let release!: () => void;
   const released = new Promise<void>((resolve) => {
@@ -110,17 +139,17 @@ export function queuedOnSqlite<T>(
     const site =
       slowTransactionThreshold(options.slowTransactionThreshold) === null
         ? undefined
-        : new Error("transaction queued here");
+        : (callSite ?? new Error(`${kind} queued here`));
     const timer = setTimeout(() => {
       // Still waiting. On a transaction it is inside: it can never get its
       // turn, so it fails, and lets the queue go when its turn would come.
       const holder = queueHolders.get(pool);
       if (holder && inside?.has(holder)) {
         abandoned = true;
-        reject(new TransactionQueueDeadlockError(options.statement ? "statement" : "transaction"));
+        reject(new TransactionQueueDeadlockError(kind, { callSite, text: options.text }));
         return;
       }
-      if (site) warnQueueWait(site);
+      if (site) warnQueueWait(site, kind);
     }, QUEUE_WAIT_WARNING_MS);
     timer.unref?.();
 
@@ -138,13 +167,23 @@ export function queuedOnSqlite<T>(
   });
 }
 
-/** Development's warning for a transaction still waiting in the queue. */
-function warnQueueWait(site: Error): void {
+/** Development's warning for a transaction or statement still waiting in the queue. */
+function warnQueueWait(site: Error, kind: "transaction" | "statement"): void {
   const stack = site.stack?.split("\n").slice(1).join("\n") ?? "";
   console.warn(
-    `[gemi] A SQLite transaction has waited ${QUEUE_WAIT_WARNING_MS}ms for the one open on its ` +
-      `connection (SQLite runs one at a time per connection). Look for a long transaction, or ` +
+    `[gemi] A SQLite ${kind} has waited ${QUEUE_WAIT_WARNING_MS}ms for the transaction open on its ` +
+      `connection (SQLite lets one writer in at a time). Look for a long transaction, or ` +
       `one that waits on work started outside it.\n${stack}\n` +
       `(development only; database.slowTransactionThreshold: false switches it off)`,
   );
+}
+
+/**
+ * Whether the current async context is inside the transaction holding
+ * `pool`'s queue: a statement issued now would be a suspected deadlock if it
+ * had to wait. Cheap: what a statement checks before capturing a stack.
+ */
+export function insideQueueHolder(pool: SQL): boolean {
+  const holder = queueHolders.get(pool);
+  return holder !== undefined && insideQueued.getStore()?.has(holder) === true;
 }

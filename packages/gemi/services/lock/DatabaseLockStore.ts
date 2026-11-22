@@ -4,7 +4,7 @@ import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
 import { queuedOnSqlite, runOnConnection, withTransaction } from "../../orm/context";
 import { LockLostError, type LockStore } from "./LockStore";
-import { retriesSqliteBusy } from "../../database/sqliteClient";
+import { retriesSqliteBusy, warnIgnoredBusyTimeout } from "../../database/sqliteClient";
 
 export type DatabaseLockStoreOptions = {
   /**
@@ -15,7 +15,12 @@ export type DatabaseLockStoreOptions = {
   /**
    * SQLite only: the busy timeout given to a connection still at SQLite's `0`,
    * as `DatabaseQueueDriver` does. Default `1000`; `0` leaves the connection
-   * alone.
+   * alone.   *
+   * Ignored, with a warning, on a gemi connection to a SQLite file (#1375):
+   * there gemi waits for another process's lock in JS, for up to 5 seconds,
+   * and keeps `busy_timeout` at 0 because SQLite's own wait blocks the event
+   * loop. It applies to `:memory:` and to a client the application built
+   * itself.
    */
   busyTimeout?: number;
 };
@@ -63,6 +68,7 @@ export class DatabaseLockStore implements LockStore {
     this.dialect = connection.dialect;
     this.connection = connection.name;
     this.busyTimeout = options.busyTimeout ?? 1000;
+    warnIgnoredBusyTimeout(connection.sql, options.busyTimeout);
   }
 
   /** Creates the table if it does not exist; the DDL Prisma makes for the model in the docs. */
