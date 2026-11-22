@@ -141,12 +141,14 @@ describe("FallbackProvider", () => {
         ["sol", "gpt-5.6-sol-2026-09-01", "fallback"],
         ["gpt-5.4", "gpt-5.4-2026-03-05", "ok"],
       ]);
-      // The closing finish is the answering leg's, with the failed leg's cost on it.
+      // The closing finish is the answering leg's, with the failed leg's cost
+      // on it, split by the model that spent each part (#1146).
       expect(events.at(-1)).toEqual({
         type: "finish",
         reason: "stop",
         usage: usage(13, 5),
         model: "gpt-5.4-2026-03-05",
+        byModel: { "gpt-5.6-sol-2026-09-01": usage(3, 0), "gpt-5.4-2026-03-05": usage(10, 5) },
       });
     });
 
@@ -189,7 +191,12 @@ describe("FallbackProvider", () => {
     const chain = FallbackProvider.chain([{ provider: primary }, { provider: secondary }]);
 
     const events = await collect(chain.stream({ messages: [] }));
-    expect(events.at(-1)).toEqual({ type: "finish", reason: "stop", usage: usage(110, 5) });
+    expect(events.at(-1)).toEqual({
+      type: "finish",
+      reason: "stop",
+      usage: usage(110, 5),
+      byModel: { a: usage(100, 0), b: usage(10, 5) },
+    });
   });
 
   test("a non-retryable failure is final by default", async () => {

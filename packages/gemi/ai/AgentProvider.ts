@@ -274,7 +274,18 @@ export type ProviderEvent =
    * request that failed before any response, or a provider that does not know.
    * Optional so a custom provider need not fill it in (#741).
    */
-  | { type: "finish"; reason: FinishReason; usage: Usage; model?: string }
+  | {
+      type: "finish";
+      reason: FinishReason;
+      usage: Usage;
+      model?: string;
+      /**
+       * The same usage split by the model that spent it, when more than one
+       * did: a fallback chain's abandoned legs and the leg that answered. So
+       * each is priced at its own model (#1146). Absent for one model.
+       */
+      byModel?: Record<string, Usage>;
+    }
   /**
    * What the call has used so far (#1353), whenever the stream reports it
    * before the end (Anthropic's `message_start` and `message_delta`): the
@@ -433,13 +444,13 @@ export abstract class AgentProvider {
    */
   /**
    * What a prompt-cache write costs, as a multiple of the input price, for
-   * `model`'s calls (#1146): the default of `ModelPrice.cacheWriteInput` when
-   * `Usage.costUsd` and meters price `Usage.cacheWriteInputTokens`. 1 unless
-   * the vendor bills writes above input (Anthropic's 5-minute cache: 1.25).
-   * Optional, so a provider that implements this class rather than extending
-   * it still type-checks; absent means 1.
+   * `model`'s calls (#1146), when the vendor publishes one rule for it: the
+   * default of `ModelPrice.cacheWriteInput`. A provider that states none
+   * leaves `Usage.costUsd` of a call that writes the cache `null` unless the
+   * table prices writes. Optional, so a provider that implements this class
+   * rather than extending it still type-checks.
    */
-  cacheWriteFactor?(model: string): number;
+  cacheWriteFactor?(model: string): number | undefined;
 
   normalizeError(error: unknown): AgentError {
     return normalizeProviderError(error);
@@ -593,7 +604,12 @@ export class AnthropicProvider extends AgentProvider {
     this.config = config;
   }
 
-  /** The 5-minute cache gemi asks for (`cache_control: ephemeral`) bills writes at 1.25x input. */
+  /**
+   * Anthropic's published rule: a 5-minute cache write is 1.25x the input
+   * price. It assumes 5-minute writes: gemi marks `cache_control` as
+   * `ephemeral` with no `ttl`. A 1-hour write is 2x; an option that sends
+   * `ttl` must price `cache_creation.ephemeral_1h_input_tokens` apart.
+   */
   cacheWriteFactor(_model: string): number {
     return 1.25;
   }

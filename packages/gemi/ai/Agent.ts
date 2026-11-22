@@ -30,15 +30,7 @@ import {
   RunAborted,
   withoutCost,
 } from "./runtime";
-import {
-  eventWithCost,
-  openMeter,
-  recordStopped,
-  recordUsage,
-  withCost,
-  type UsageMeter,
-  type UsageTotals,
-} from "./usageMeter";
+import { eventWithCost, openMeter, recordStopped, type UsageMeter, type UsageTotals } from "./usageMeter";
 import { supportsStrict } from "./Schema";
 import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
@@ -3793,6 +3785,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private usage: Usage = emptyUsage();
   private cost: number | null | undefined;
 
+  /** Where an unpriced model is told: the run's log (#1146). */
+  private readonly costWarn = (message: string, extra: Record<string, unknown>) => this.writeLog(message, extra);
+
   /** Adds `usage` to the run: its tokens to `usage`, its cost to `cost`. */
   private addSpent(usage: Usage | undefined) {
     if (!usage) return;
@@ -4875,7 +4870,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     for (;;) {
       const next = await raceAbort(Promise.resolve(iterator.next()), signal).catch((error: unknown) => {
         if (callSoFar && error instanceof RunAborted) {
-          this.addSpent(eventWithCost(callSoFar, provider.model, provider).usage);
+          this.addSpent(eventWithCost(callSoFar, provider.model, provider, this.costWarn).usage);
           recordStopped(callSoFar, provider.model, provider);
           message.usage = addUsage(message.usage ?? emptyUsage(), callSoFar.usage);
           callSoFar = undefined;
@@ -4992,8 +4987,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
         case "finish": {
           callSoFar = undefined;
-          if (event.usage) this.addSpent(withCost(event.model ?? provider.model, event.usage, provider));
-          recordUsage(event.model ?? provider.model, event.usage, provider);
+          // Priced per model: a fallback chain's finish splits by leg (#1146).
+          if (event.usage) {
+            this.addSpent(eventWithCost(event, provider.model, provider, this.costWarn).usage);
+            recordStopped(event, provider.model, provider);
+          }
           // This step's own cost, on the message the step wrote (#467). The run
           // total above is the whole turn — every step plus tools' sub-runs,
           // `generate()` calls and images — and putting it on the last message
@@ -6568,7 +6566,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           mimeType: image.mimeType,
           ...(params.showModel ? { showModel: true } : {}),
         },
-        { size: image.size, usage: image.usage },
+        // Without its cost: the record is on the tool call, which goes to
+        // clients and the store (#1146).
+        { size: image.size, usage: withoutCost(image.usage) },
       );
 
       write(record);

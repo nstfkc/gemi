@@ -16,7 +16,7 @@ import {
 } from "./runtime";
 import type { Infer, Schema } from "./Schema";
 import type { AgentError, AgentMessage, FinishReason, ProviderErrorDetail, Usage } from "./types";
-import { eventWithCost, recordStopped, recordUsage, withCost } from "./usageMeter";
+import { eventWithCost, recordStopped } from "./usageMeter";
 
 /**
  * One model call with an output schema: no tools, no loop, no stream to a client.
@@ -552,10 +552,11 @@ async function callModel<O extends Schema<any>>(
             // nothing already failed. A content filter reports an error and
             // then closes the call with a finish that still bills — the same
             // rule `AgentRunImpl.runStep` follows.
+            // Priced per model: a fallback chain's finish splits by leg (#1146).
             if (event.usage) {
-              usage = addUsage(usage, withCost(event.model ?? params.provider.model, event.usage, params.provider));
+              usage = addUsage(usage, eventWithCost(event, params.provider.model, params.provider).usage);
+              recordStopped(event, params.provider.model, params.provider);
             }
-            recordUsage(event.model ?? params.provider.model, event.usage, params.provider);
             if (!error) reason = event.reason;
             break;
           case "error":

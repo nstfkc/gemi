@@ -7,6 +7,7 @@ import { ImageModel } from "./ImageModel";
 import { fakeImageProvider, fakeProvider } from "./providers/fakeProvider";
 import { addUsage } from "./runtime";
 import { s } from "./Schema";
+import { MemoryAttachmentStore, ScopedAttachments } from "./store/Attachments";
 import type { UsageReport } from "./usageLimits";
 import { priceUsage, resetUnpricedWarnings, Usage, withCost } from "./usageMeter";
 
@@ -42,11 +43,42 @@ afterEach(() => {
 });
 
 describe("withCost", () => {
-  test("no table in effect: no costUsd at all", () => {
+  test("no pricing: no costUsd at all; a pricing function: null, not its unit", () => {
     expect(withCost("fake", usage(10, 1))).not.toHaveProperty("costUsd");
-    // A pricing function's unit is the app's, not known to be USD.
+    // A pricing function's unit is the app's, not known to be USD, and a run
+    // mixing it with table-priced calls must not add up to a partial number.
     Usage.configure({ pricing: () => 5 });
-    expect(withCost("fake", usage(10, 1))).not.toHaveProperty("costUsd");
+    expect(withCost("fake", usage(10, 1)).costUsd).toBeNull();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("cache reads without a cachedInput price are null, warned once; with one, priced", () => {
+    const read = usage(1_000_000, 0, { cachedInputTokens: 500_000 });
+    Usage.configure({ pricing: { m: { input: 2, output: 0 } } });
+    expect(withCost("m", read).costUsd).toBeNull();
+    expect(withCost("m", read).costUsd).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain("cachedInput");
+    // No cache reads: priced at input.
+    expect(withCost("m", usage(1_000_000, 0)).costUsd).toBe(2);
+    Usage.configure({ pricing: { m: { input: 2, output: 0, cachedInput: 0.2 } } });
+    expect(withCost("m", read).costUsd).toBeCloseTo(1 + 0.1);
+  });
+
+  test("cache writes need a cacheWriteInput price or the provider's factor", () => {
+    const written = usage(1_000_000, 0, { cacheWriteInputTokens: 1_000_000 });
+    Usage.configure({ pricing: { m: { input: 2, output: 0 } } });
+    expect(withCost("m", written).costUsd).toBeNull();
+    expect(withCost("m", written, 1.25).costUsd).toBe(2.5);
+    Usage.configure({ pricing: { m: { input: 2, output: 0, cacheWriteInput: 3 } } });
+    expect(withCost("m", written).costUsd).toBe(3);
+  });
+
+  test("the warning goes to the given log rather than the console", () => {
+    Usage.configure({ pricing: prices });
+    const log = vi.fn();
+    expect(withCost("mystery", usage(1, 1), undefined, log).costUsd).toBeNull();
+    expect(log).toHaveBeenCalledTimes(1);
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -87,8 +119,10 @@ describe("cache writes, per provider", () => {
     const anthropic = new AnthropicProvider("claude-test", { apiKey: "k" });
     const openai = new OpenAIProvider("gpt-test", { apiKey: "k" });
     expect(anthropic.cacheWriteFactor("claude-test")).toBe(1.25);
-    expect(openai.cacheWriteFactor?.("gpt-test") ?? 1).toBe(1);
+    // OpenAI reports no cache writes, and states no rule for them.
+    expect(openai.cacheWriteFactor?.("gpt-test")).toBeUndefined();
     expect(priceUsage({ m: { input: 2, output: 0 } }, "m", written, 1.25)).toBe(2.5);
+    // A meter keeps its long-standing default: writes at input.
     expect(priceUsage({ m: { input: 2, output: 0 } }, "m", written)).toBe(2);
   });
 
@@ -103,8 +137,8 @@ describe("cache writes, per provider", () => {
     ]);
     expect(chain.cacheWriteFactor("claude-test")).toBe(1.25);
     expect(chain.cacheWriteFactor("claude-test-20260101")).toBe(1.25);
-    expect(chain.cacheWriteFactor("gpt-test")).toBe(1);
-    expect(chain.cacheWriteFactor("unknown")).toBe(1);
+    expect(chain.cacheWriteFactor("gpt-test")).toBeUndefined();
+    expect(chain.cacheWriteFactor("unknown")).toBeUndefined();
   });
 
   test("an agent's calls use their provider's factor, in costUsd and in meters", async () => {
@@ -123,8 +157,9 @@ describe("cache writes, per provider", () => {
   });
 });
 
+const toolCall = (id: string, name: string) => ({ type: "tool-call" as const, id, name, args: "{}" });
+
 describe("a run's costUsd", () => {
-  const toolCall = (id: string, name: string) => ({ type: "tool-call" as const, id, name, args: "{}" });
 
   async function run(onUsage?: (report: UsageReport) => void) {
     const sub = Agent.create({
@@ -189,6 +224,92 @@ describe("a run's costUsd", () => {
     expect(final.costUsd!.total).toBeCloseTo(result.usage.costUsd!);
     const deltas = reports.reduce((sum, report) => sum + (report.costUsd?.delta ?? 0), 0);
     expect(deltas).toBeCloseTo(result.usage.costUsd!);
+  });
+
+  test("a fallback chain's finish prices each leg at its own model", async () => {
+    Usage.configure({ pricing: { a: { input: 1, output: 0 }, b: { input: 100, output: 0 } } });
+    const leg = (model: string, events: any[]) =>
+      Object.assign(fakeProvider(events), { model }) as unknown as ReturnType<typeof fakeProvider>;
+    const chain = FallbackProvider.chain([
+      {
+        provider: leg("a", [
+          { type: "error", error: { code: "rate_limited", message: "busy", retryable: true } },
+          { type: "finish", reason: "error", usage: usage(1_000_000, 0) },
+        ]),
+      },
+      { provider: leg("b", [{ type: "text-delta", delta: "ok" }, finish(10_000, 0)]) },
+    ]);
+    const agent = Agent.create({ name: "a", provider: chain });
+    const metered = await Usage.meter(() => agent.stream({ messages: [] }).result());
+    // The abandoned leg at a's price ($1), the answer at b's ($1), not all at b's ($101).
+    expect(metered.value.usage.costUsd).toBeCloseTo(2);
+    expect(metered.byModel.a!.cost).toBeCloseTo(1);
+    expect(metered.byModel.b!.cost).toBeCloseTo(1);
+  });
+
+  test("mixing table-priced calls with a meter's pricing function gives null", async () => {
+    Usage.configure({ pricing: prices });
+    const sub = Agent.create({
+      name: "sub",
+      provider: fakeProvider([{ type: "text-delta", delta: "ok" }, finish(10, 1)]),
+    });
+    const tool = AgentTool.create({
+      name: "inner",
+      description: "x",
+      inputSchema: s.object({}),
+      outputSchema: s.object({ ok: s.boolean() }),
+      execute: async (_input: unknown, ctx: ToolContext) => {
+        await Usage.meter(() => ctx.runAgent(sub, { prompt: "go" }), { pricing: () => 7 });
+        return { ok: true };
+      },
+    });
+    const agent = Agent.create({
+      name: "lead",
+      provider: fakeProvider(
+        [toolCall("c1", "inner"), finish(10, 1)],
+        [{ type: "text-delta", delta: "done" }, finish(20, 2)],
+      ),
+      tools: [tool],
+    });
+    expect((await agent.stream({ messages: [] }).result()).usage.costUsd).toBeNull();
+  });
+
+  test("an image a tool generates is priced on the run, and its record on the call carries no cost", async () => {
+    Usage.configure({ pricing: { ...prices, "fake-image": { input: 5, output: 10 } } });
+    const banner = ImageModel.create({ name: "banner", provider: fakeImageProvider(), size: "1024x1024" });
+    const draw = AgentTool.create({
+      name: "draw",
+      description: "x",
+      inputSchema: s.object({}),
+      outputSchema: s.object({ id: s.string() }),
+      execute: async (_input: unknown, ctx: any) => {
+        const made = await ctx.generateImage(banner, { prompt: "a street" });
+        expect(made.usage.costUsd).toBeGreaterThan(0);
+        return { id: made.attachment.id };
+      },
+    });
+    const storage = {
+      objects: new Map<string, Blob>(),
+      async put(params: any) {
+        const name = `blob-${this.objects.size}`;
+        this.objects.set(name, params instanceof Blob ? params : params.body);
+        return name;
+      },
+    };
+    const attachments = new ScopedAttachments(new MemoryAttachmentStore(), storage as any, { key: "user:u1" });
+    const agent = Agent.create({
+      name: "designer",
+      provider: fakeProvider([toolCall("c1", "draw"), finish(10, 1)], [{ type: "text-delta", delta: "done" }, finish(20, 2)]),
+      tools: [draw],
+    });
+    const stream = agent.stream({ messages: [], attachments });
+    const events: unknown[] = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+    expect(result.usage.costUsd).toBeCloseTo(usd(10, 1) + usd(20, 2) + (15 * 5 + 196 * 10) / 1_000_000);
+    expect(JSON.stringify(result.messages)).toContain('"generated"');
+    expect(JSON.stringify(result.messages)).not.toContain("costUsd");
+    expect(JSON.stringify(events)).not.toContain("costUsd");
   });
 
   test("is null with an unpriced call in it, and absent with no table", async () => {

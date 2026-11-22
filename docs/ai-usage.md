@@ -24,8 +24,10 @@ Usage.configure({
 ```
 
 - A key also prices the model ids it's a prefix of (`gpt-5.4` prices `gpt-5.4-2026-03-05`), and the longest matching key wins.
-- `cachedInput` defaults to `input`. `imageInput` and `imageOutput` price image tokens; without them, image tokens are priced as text.
-- `cacheWriteInput` defaults to `input` times the provider's cache-write factor (`provider.cacheWriteFactor(model)`): 1.25 on Anthropic (the 5-minute cache gemi asks for), 1 elsewhere. A `FallbackProvider` asks the leg that served the call. Set `cacheWriteInput` for a contract rate.
+- **Set `cachedInput` for every model that reads the prompt cache.** A cache read is a fraction of `input` (Anthropic: a tenth or less, depending on the model), and an agent loop is mostly cache reads. Without it, `usage.costUsd` of a call with cache reads is `null`, and a meter prices them at `input`, an over-count.
+- `cacheWriteInput` defaults to `input` times the provider's published rule (`provider.cacheWriteFactor(model)`): 1.25 on Anthropic, for the 5-minute cache gemi asks for. A `FallbackProvider` asks the leg that served the call. Other providers state none: `costUsd` of a call that writes the cache is then `null` unless you set `cacheWriteInput`, and a meter prices writes at `input`. Set `cacheWriteInput` for a contract rate too.
+- `imageInput` and `imageOutput` price image tokens; without them, image tokens are priced as text.
+- A table can't express long-context tiers, fast modes, regional premiums or batch discounts. Price those with a function, and read the meter's `cost`: a function gives no `costUsd`.
 - In a meter, a model with no price costs 0 and is listed in `unpriced`.
 
 Or give a function. It answers the cost in whatever unit you count in, and `undefined` for a model it doesn't price:
@@ -62,9 +64,11 @@ const result = await agent.stream(params).result();
 await log.insert({ runId: result.runId, costUsd: result.usage.costUsd });
 ```
 
-- `null` when a call's model isn't in the table: gemi never guesses a price. A total with an unpriced call in it is `null` too, and the first unpriced call of each model logs one warning.
-- Absent with no pricing, or with a pricing function (its unit is yours, not necessarily USD). The meter's `cost` covers that case.
-- **Server-side only.** `costUsd` is on `result().usage`, `generate`'s and `ImageModel`'s results, and `usageLimits.onUsage` (`report.costUsd.delta` / `.total`). It isn't on any frame sent to a client (`usage`, `message-end`) or on a stored message (`AgentMessage.usage`, a sub-run's transcript), so end users never see what their work cost you. To show spend, send it yourself.
+- `null` when gemi can't price a call without guessing: its model isn't in the table, or it read the cache and the model has no `cachedInput`, or it wrote the cache with neither `cacheWriteInput` nor a provider rule. A total with such a call in it is `null` too. The first one of each model and reason logs one warning, to the run's log.
+- `null` under a pricing function (its unit is yours, not necessarily USD), including a call inside a `Usage.meter(fn, { pricing })` with a function, so a run mixing the two isn't a partial sum. The meter's `cost` covers that case. Absent with no pricing at all.
+- A fallback chain prices each leg at its own model: the closing `finish` splits the usage by model (`byModel`) when abandoned legs spent something.
+- **Server-side only.** `costUsd` is on `result().usage`, `generate`'s result (its `usage` and its `messages`), `ImageModel`'s results, and `usageLimits.onUsage` (`report.costUsd.delta` / `.total`). An agent run strips it from every frame sent to a client (`usage`, `message-end`, tool calls' generated-image records) and from what it stores (its messages, a sub-run's transcript, compaction summaries), so end users never see what their work cost you.
+- **`result().usage` includes it**, and so does `AgentTurn.result()`. Pick the fields you return from a route or an MCP tool rather than returning the result whole. To show spend, send it yourself.
 - Video: gemi has no video model. Report what a video API costs with `Usage.add("video", cost)` in the run or meter.
 
 ## Metering work outside a run

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { addUsage, emptyUsage } from "./runtime";
+import { addCost, addUsage, emptyUsage } from "./runtime";
 import type { Usage as UsageType } from "./types";
 
 /**
@@ -21,16 +21,24 @@ import type { Usage as UsageType } from "./types";
  */
 
 /**
- * USD per million tokens. `cachedInput` defaults to `input`, and
- * `cacheWriteInput` to `input` times the provider's cache-write factor
- * (`AgentProvider.cacheWriteFactor`: 1.25 on Anthropic, 1 elsewhere).
+ * USD per million tokens.
+ *
+ * Set `cachedInput` for every model whose calls read the prompt cache: it is
+ * a fraction of `input` (Anthropic: a tenth or less, depending on the model).
+ * Without it, `Usage.costUsd` of a call with cache reads is `null`, and a
+ * meter prices them at `input` (its long-standing default, an over-count).
+ *
+ * `cacheWriteInput` defaults to `input` times the provider's published
+ * cache-write rule (`AgentProvider.cacheWriteFactor`: 1.25 on Anthropic for
+ * the 5-minute cache). With neither, `costUsd` of a call that writes the
+ * cache is `null`, and a meter prices writes at `input`.
  */
 export type ModelPrice = {
   input: number;
   output: number;
   cachedInput?: number;
-  /** For `Usage.cacheWriteInputTokens`. Set it for a contract rate or a
-   *  longer cache TTL; the provider's factor covers the default. */
+  /** For `Usage.cacheWriteInputTokens`: a contract rate, or a longer cache
+   *  TTL. Wins over the provider's factor. */
   cacheWriteInput?: number;
   /** For image tokens (`Usage.imageInputTokens` / `imageOutputTokens`);
    *  they're priced as text when these are absent. */
@@ -138,7 +146,7 @@ class Meter implements UsageMeter {
     return configured;
   }
 
-  recordCall(model: string, usage: UsageType, label: string | undefined, cacheWriteFactor: number) {
+  recordCall(model: string, usage: UsageType, label: string | undefined, cacheWriteFactor: number | undefined) {
     if (!this.open) return;
     const cost = priceUsage(this.resolvePricing(), model, usage, cacheWriteFactor);
     if (cost === undefined) this.unpriced.add(model);
@@ -232,14 +240,14 @@ async function meter<T>(
 }
 
 /**
- * A stopped call's last `usage` event (#1353), recorded as its `finish`
- * would have been: each model's share at that model, `fallback` when the
- * event names none.
+ * A call's closing `finish`, or a stopped call's last `usage` event (#1353),
+ * recorded: each model's share at that model (`byModel`, a fallback chain's
+ * legs), `fallback` when the event names none.
  */
 export function recordStopped(
   event: { usage: UsageType; model?: string; byModel?: Record<string, UsageType> },
   fallback: string,
-  cacheWriteFactor: CacheWriteFactor = 1,
+  cacheWriteFactor?: CacheWriteFactor,
 ): void {
   if (event.byModel) {
     for (const [model, usage] of Object.entries(event.byModel)) recordUsage(model, usage, cacheWriteFactor);
@@ -251,20 +259,22 @@ export function recordStopped(
 /**
  * The provider's cache-write factor: a number, or the provider itself, asked
  * for the model the call reported (a fallback chain answers per leg).
+ * `undefined` when the provider states none.
  */
-export type CacheWriteFactor = number | { cacheWriteFactor?(model: string): number };
+export type CacheWriteFactor = number | undefined | { cacheWriteFactor?(model: string): number | undefined };
 
-function factorFor(factor: CacheWriteFactor, model: string): number {
+function factorFor(factor: CacheWriteFactor, model: string): number | undefined {
+  if (factor === undefined) return undefined;
   if (typeof factor === "number") return factor;
   const value = factor.cacheWriteFactor?.(model);
-  return typeof value === "number" && value > 0 ? value : 1;
+  return typeof value === "number" && value > 0 ? value : undefined;
 }
 
 /** Called by the model call sites with each `finish` frame's usage. */
 export function recordUsage(
   model: string,
   usage: UsageType | undefined,
-  cacheWriteFactor: CacheWriteFactor = 1,
+  cacheWriteFactor?: CacheWriteFactor,
 ): void {
   if (!usage) return;
   const stack = openStack();
@@ -275,52 +285,81 @@ export function recordUsage(
   for (const meter of stack) meter.recordCall(model, usage, label, factor);
 }
 
-/** The table in effect here: the innermost meter's pricing, else the configured one; none for a function. */
-function pricesHere(): ModelPrices | undefined {
-  const pricing = openStack().at(-1)?.resolvePricing() ?? configured;
-  return typeof pricing === "function" ? undefined : pricing;
+/** The pricing in effect here: the innermost meter's, else the configured one. */
+function pricingHere(): UsagePricing | undefined {
+  return openStack().at(-1)?.resolvePricing() ?? configured;
 }
 
 const warnedUnpriced = new Set<string>();
 
+/** Where `withCost` says a model is unpriced: the run's log, else the console. */
+export type CostWarn = (message: string, extra: Record<string, unknown>) => void;
+
 /**
- * `usage` with `costUsd` (#1146): priced at the table in effect, `null` for a
- * model the table lacks (warned once per model), unchanged when no table is
- * in effect. The model call sites run each call's usage through this before
- * they add it up, so every total gemi reports carries its cost.
+ * `usage` with `costUsd` (#1146), priced at the `ModelPrices` table in
+ * effect, with no guessing:
+ *
+ * - `null` for a model the table lacks, and for a call with cache reads (or
+ *   writes) the table has no price for: no `cachedInput` (no
+ *   `cacheWriteInput`, and no provider factor). Warned once per model and
+ *   reason.
+ * - `null` under a pricing function: its unit is the app's, not USD, and a
+ *   run that mixes it with table-priced calls must not answer a partial sum.
+ * - Unchanged with no pricing at all.
+ *
+ * The model call sites run each call's usage through this before they add it
+ * up, so every total gemi reports carries its cost.
  */
 export function withCost(
   model: string,
   usage: UsageType,
-  cacheWriteFactor: CacheWriteFactor = 1,
+  cacheWriteFactor?: CacheWriteFactor,
+  warn?: CostWarn,
 ): UsageType {
-  const prices = pricesHere();
-  if (!prices) return usage;
-  const cost = priceUsage(prices, model, usage, factorFor(cacheWriteFactor, model));
-  if (cost === undefined && !warnedUnpriced.has(model)) {
-    warnedUnpriced.add(model);
-    console.warn(
-      `gemi: no price for model "${model}" in Usage.configure({ pricing }); its usage.costUsd is null.`,
-    );
+  const pricing = pricingHere();
+  if (!pricing) return usage;
+  if (typeof pricing === "function") return { ...usage, costUsd: null };
+  const price = priceFor(pricing, model);
+  const factor = factorFor(cacheWriteFactor, model);
+  const missing = !price
+    ? "a price"
+    : (usage.cachedInputTokens ?? 0) > 0 && price.cachedInput === undefined
+      ? "a cachedInput price"
+      : (usage.cacheWriteInputTokens ?? 0) > 0 && price.cacheWriteInput === undefined && factor === undefined
+        ? "a cacheWriteInput price"
+        : undefined;
+  if (missing) {
+    const key = `${model}\u0000${missing}`;
+    if (!warnedUnpriced.has(key)) {
+      warnedUnpriced.add(key);
+      const message = `[gemi/ai] no ${missing} for model "${model}" in Usage.configure({ pricing }): its usage.costUsd is null`;
+      if (warn) warn(message, { model });
+      else console.warn(message);
+    }
+    return { ...usage, costUsd: null };
   }
-  return { ...usage, costUsd: cost ?? null };
+  return { ...usage, costUsd: priceUsage(pricing, model, usage, factor) ?? null };
 }
 
 /**
- * A stopped call's `usage` event with `costUsd`, priced per model when the
- * event splits by model (`byModel`).
+ * A call's closing `finish`, or a stopped call's last `usage` event, with
+ * `costUsd`: priced per model when the event splits by model (`byModel`, a
+ * fallback chain's abandoned legs), each at its own model and factor.
  */
 export function eventWithCost<E extends { usage: UsageType; model?: string; byModel?: Record<string, UsageType> }>(
   event: E,
   fallback: string,
-  cacheWriteFactor: CacheWriteFactor = 1,
+  cacheWriteFactor?: CacheWriteFactor,
+  warn?: CostWarn,
 ): E {
-  if (!event.byModel) return { ...event, usage: withCost(event.model ?? fallback, event.usage, cacheWriteFactor) };
+  if (!event.byModel) {
+    return { ...event, usage: withCost(event.model ?? fallback, event.usage, cacheWriteFactor, warn) };
+  }
   let cost: number | null | undefined;
   for (const [model, usage] of Object.entries(event.byModel)) {
-    const part = withCost(model, usage, cacheWriteFactor).costUsd;
+    const part = withCost(model, usage, cacheWriteFactor, warn).costUsd;
     if (part === undefined) return event;
-    cost = cost === null || part === null ? null : (cost ?? 0) + part;
+    cost = addCost(cost, part);
   }
   return cost === undefined ? event : { ...event, usage: { ...event.usage, costUsd: cost } };
 }
@@ -343,7 +382,7 @@ export function priceUsage(
   pricing: UsagePricing | undefined,
   model: string,
   usage: UsageType,
-  cacheWriteFactor = 1,
+  cacheWriteFactor?: number,
 ): number | undefined {
   if (!pricing) return undefined;
   if (typeof pricing === "function") {
@@ -365,7 +404,7 @@ export function priceUsage(
   return (
     ((usage.inputTokens - cached - cacheWrite - imageIn) * price.input +
       cached * (price.cachedInput ?? price.input) +
-      cacheWrite * (price.cacheWriteInput ?? price.input * cacheWriteFactor) +
+      cacheWrite * (price.cacheWriteInput ?? price.input * (cacheWriteFactor ?? 1)) +
       imageIn * (price.imageInput ?? price.input) +
       (usage.outputTokens - imageOut) * price.output +
       imageOut * (price.imageOutput ?? price.output)) /
