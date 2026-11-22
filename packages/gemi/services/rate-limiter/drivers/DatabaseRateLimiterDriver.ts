@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 import { DatabaseManager } from "../../../database/DatabaseManager";
 import { Log } from "../../../facades/Log";
@@ -33,6 +33,17 @@ export interface DatabaseRateLimiterOptions {
   pruneEvery?: number;
   /** The most rows one automatic `prune()` deletes. Default `1000`. */
   pruneBatch?: number;
+  /**
+   * Store each key as its HMAC-SHA256 under this secret, never as given (#1363).
+   * Keys usually hold personal data, such as the client's address or an email,
+   * and the rows stay until their window ends and a prune deletes them.
+   * Default `true`: keyed with the app's `SECRET`, so the first call fails when
+   * that is unset. Pass a string to key with that instead, or `false` to store
+   * keys as given (a key over 150 characters is still stored as its SHA-256).
+   * The prefix stays in clear, so `prune()` works the same either way.
+   * Changing the secret starts every budget again.
+   */
+  hashKeys?: boolean | string;
 }
 
 /**
@@ -77,6 +88,9 @@ export class DatabaseRateLimiter extends RateLimiterDriver {
     super();
     this.prefix = options.prefix ?? "ratelimit:";
     if (this.prefix === "") throw new Error("DatabaseRateLimiter needs a prefix: its rows share the locks table.");
+    if (options.hashKeys === "") {
+      throw new Error("DatabaseRateLimiter's `hashKeys` secret is empty. Pass a secret, `true` to use SECRET, or `false`.");
+    }
     this.pruneEvery = Math.max(0, Math.floor(options.pruneEvery ?? 1_000));
     this.pruneBatch = Math.max(1, Math.floor(options.pruneBatch ?? 1_000));
   }
@@ -146,7 +160,31 @@ export class DatabaseRateLimiter extends RateLimiterDriver {
     return this.resolved;
   }
 
+  /**
+   * What is wrong with the hashing secret, if anything: the message every
+   * call fails with. Checked at boot by `RateLimiterServiceProvider`, so a
+   * missing `SECRET` fails a production boot rather than every request.
+   */
+  secretProblem(): string | undefined {
+    const { hashKeys = true } = this.options;
+    if (hashKeys !== true || process.env.SECRET) return undefined;
+    return "DatabaseRateLimiter stores its keys hashed with the app's SECRET, and SECRET is not set. Set it, pass `hashKeys: <secret>`, or `hashKeys: false` to store keys as given.";
+  }
+
+  private secret(): string | undefined {
+    const { hashKeys = true } = this.options;
+    if (hashKeys === false) return undefined;
+    if (typeof hashKeys === "string") return hashKeys;
+    const problem = this.secretProblem();
+    if (problem) throw new Error(problem);
+    return process.env.SECRET!;
+  }
+
   private nameOf(key: string): string {
+    const secret = this.secret();
+    if (secret !== undefined) {
+      return `${this.prefix}#${createHmac("sha256", secret).update(`gemi:ratelimit:${key}`).digest("hex")}`;
+    }
     const name = `${this.prefix}${key}`;
     if (name.length <= MAX_NAME) return name;
     return `${this.prefix}#${createHash("sha256").update(key).digest("hex")}`;

@@ -2,6 +2,7 @@ import { Log } from "../../facades/Log";
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { withDefaults } from "../../support/withDefaults";
 import { DatabaseQueueDriver } from "../queue/DatabaseQueueDriver";
+import { DatabaseRateLimiter } from "./drivers/DatabaseRateLimiterDriver";
 import type { QueueConfig } from "../queue/config";
 import { QueueManager } from "../queue/QueueManager";
 import { RateLimiter } from "./RateLimiter";
@@ -30,6 +31,7 @@ export class RateLimiterServiceProvider extends ServiceProvider {
    * choice and silences it. Each process that boots the app says it once.
    */
   async boot() {
+    this.checkSecret();
     if (process.env.NODE_ENV !== "production") return;
     if (this.app.config.get<RateLimiterConfig>("ratelimiter", {}).driver !== undefined) return;
     if (!this.durableQueue()) return;
@@ -39,6 +41,20 @@ export class RateLimiterServiceProvider extends ServiceProvider {
         "DatabaseRateLimiter()` (or `RedisRateLimiter`, or `InMemoryRateLimiter` to keep it) in " +
         "app/config/ratelimiter.ts.",
     );
+  }
+
+  /**
+   * The database limiter hashes its keys with `SECRET` (#1363), and without it
+   * every limited call fails. In production that fails the boot, so a deploy
+   * stops before it serves; elsewhere it warns, and the calls still fail.
+   */
+  private checkSecret() {
+    const driver = this.app.config.get<RateLimiterConfig>("ratelimiter", {}).driver;
+    if (!(driver instanceof DatabaseRateLimiter)) return;
+    const problem = driver.secretProblem();
+    if (!problem) return;
+    if (process.env.NODE_ENV === "production") throw new Error(`[gemi] ${problem}`);
+    Log.warning(`[gemi] ${problem}`);
   }
 
   /** Whether the queue's driver is the database one, the function form included. */
