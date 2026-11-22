@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 import { DatabaseManager } from "../../../database/DatabaseManager";
 import { Log } from "../../../facades/Log";
@@ -33,6 +33,17 @@ export interface DatabaseRateLimiterOptions {
   pruneEvery?: number;
   /** The most rows one automatic `prune()` deletes. Default `1000`. */
   pruneBatch?: number;
+  /**
+   * Store each key as its HMAC-SHA256 under this secret, never as given (#1363).
+   * Keys usually hold personal data, such as the client's address or an email,
+   * and the rows stay until their window ends and a prune deletes them.
+   * Default `true`: keyed with the app's `SECRET`, so the first call fails when
+   * that is unset. Pass a string to key with that instead, or `false` to store
+   * keys as given (a key over 150 characters is still stored as its SHA-256).
+   * The prefix stays in clear, so `prune()` works the same either way.
+   * Changing the secret starts every budget again.
+   */
+  hashKeys?: boolean | string;
 }
 
 /**
@@ -146,7 +157,24 @@ export class DatabaseRateLimiter extends RateLimiterDriver {
     return this.resolved;
   }
 
+  private secret(): string | undefined {
+    const { hashKeys = true } = this.options;
+    if (hashKeys === false) return undefined;
+    if (typeof hashKeys === "string" && hashKeys !== "") return hashKeys;
+    const secret = process.env.SECRET;
+    if (!secret) {
+      throw new Error(
+        "DatabaseRateLimiter stores its keys hashed with the app's SECRET, and SECRET is not set. Set it, pass `hashKeys: <secret>`, or `hashKeys: false` to store keys as given.",
+      );
+    }
+    return secret;
+  }
+
   private nameOf(key: string): string {
+    const secret = this.secret();
+    if (secret !== undefined) {
+      return `${this.prefix}#${createHmac("sha256", secret).update(`gemi:ratelimit:${key}`).digest("hex")}`;
+    }
     const name = `${this.prefix}${key}`;
     if (name.length <= MAX_NAME) return name;
     return `${this.prefix}#${createHash("sha256").update(key).digest("hex")}`;

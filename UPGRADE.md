@@ -1,3 +1,18 @@
+# 0.234.0
+
+## The database rate limiter stores keys hashed (#1363)
+
+`DatabaseRateLimiter` now stores each key as its HMAC-SHA256 under the app's `SECRET` (`ratelimit:#<hex>`), not as given. Rate-limit keys usually hold a client address or an email, and the rows stay until their window ends and a prune deletes them. The prefix stays in clear, so `prune()` and `pruneEvery` work as before.
+
+What to check:
+
+- **`SECRET` must be set** wherever the database limiter runs. Without it, every limited call fails ("DatabaseRateLimiter stores its keys hashed with the app's SECRET"). To key with another secret, pass `new DatabaseRateLimiter({ hashKeys: "<secret>" })`. To keep the old behaviour, pass `hashKeys: false`.
+- **Budgets start again once** on upgrade: the rows are named differently, so the counts already in the table no longer match. A daily quota gives everyone a fresh day. The old rows are pruned as their windows end.
+- **Changing `SECRET`** starts every budget again too.
+- Code that reads `gemi_locks` rows by the limiter's key name finds nothing now. Count through the limiter instead.
+
+The in-memory and Redis drivers are unchanged.
+
 # 0.232.0
 
 ## Answering one turn's question keeps the others open (#1355)
