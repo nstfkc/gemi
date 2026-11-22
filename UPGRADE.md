@@ -1,3 +1,24 @@
+# 0.230.0
+
+## Every message names its turn (#1339)
+
+**New API and behaviour changes (minor version).** See [Which turn a message belongs to](docs/ai-server-turns.md#which-turn-a-message-belongs-to).
+
+- New `AgentMessage.turn`: the id of the user message that started the turn a message answers, written on every message a run writes. A new message's `turn` is its own id. A turn that only answers tool calls (or a bare continuation) carries on the turn that asked them, even when other turns were stored since.
+- `turnStarts`, `splitTurns`, `contextWindow` and compaction group by `turn` when a message has it. With runs side by side (`ifBusy: "parallel"`), a reply stored after another run's messages now goes with its own question, and a cut never keeps it without that question. Messages stored without `turn` are read as before.
+- New `AgentRun.turn` and `ctx.turn` in the controller's hooks: `{ id, continues?, answers? }`.
+- `busyPolicy`'s `running[]` gains `messageId` (the run's turn id) and `body` (the `Body` the request that started it carried).
+- `maxThreadRuns` may answer `{ max, overflow: "queue" | "reject" }`. With `"queue"`, a parallel turn past `max` waits until one of the runs ends, then starts, instead of answering `429 too_many_runs`. A bare number refuses, as before.
+- `AgentMessage.joined` is deprecated. It is still written on a joined message, with the same value as `turn`. Read `turn`; `joined` goes in a later minor version.
+
+What to check:
+
+- **Messages from a run's `inbox`** (`AgentJobs.message`, #1222) are now part of the run's turn: they are no longer turn starts. A `contextWindow` with `maxTurns` counts fewer turns on a thread that had them, and keeps a little more. Files a tool showed carry the turn that showed them as well.
+- **Code that groups messages itself** by "a user message starts a turn" mis-groups parallel runs. Use `splitTurns`, or group by `message.turn ?? <the legacy rule>`.
+- **Code that reads `message.joined`**: read `message.turn` instead, which every message has, not only joined ones. A joined message has both, with the same value.
+- **A `maxThreadRuns` override that calls `super.maxThreadRuns()`** now gets `ThreadRunLimit` (`number | { max, overflow }`) back, not `number`. The default still answers a number.
+- **A store that keeps messages in its own columns** (not the built-in stores, which store the message as JSON) should keep `turn`, or every message it loads falls back to the legacy rule.
+
 # 0.228.0
 
 ## Tests do not start the schedule or reach real model providers (#1342)

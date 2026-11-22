@@ -93,7 +93,7 @@ turn.joined;   // true: turn.runId is the running run's id
 await turn.result(); // that run's result
 ```
 
-- The message is stored in the order it arrived, between the run's messages, with `message.joined` set to the id of the message that started the turn. It is not a turn start: `splitTurns` puts it with that turn even when runs side by side stored other messages between, `contextWindow` never cuts between them, and a turn's files include the files of the messages that joined it.
+- The message is stored in the order it arrived, between the run's messages, with `message.turn` (and the older `message.joined`) set to the id of the message that started the turn. It is not a turn start: `splitTurns` puts it with that turn even when runs side by side stored other messages between, `contextWindow` never cuts between them, and a turn's files include the files of the messages that joined it.
 - The run sends a `message-id` frame (or a `message` frame for an event) when it takes the message, so a chat that sent it renames its copy there.
 - When the run ends before it reaches a step that reads the message (it was on its last step under `maxSteps`, it failed, it was superseded, it parked on an approval), the message starts a turn of its own after the run, as `"queue"` would. That turn goes through the busy rules again, so it can join the run that superseded. A message stored this way is a turn start, without `joined`. From the chat, the reply to it arrives on the same response stream; `startTurn`'s `result()` settles with the run that answered it.
 - **A stop drops it.** When a person stops the run (`/stop`, the chat's `stop()`, `AgentTurn.stop()`) before it read the message, no turn starts for it and it is not stored: a stop stops the conversation, messages sent into it included. The joined stream ends with the run, and `startTurn`'s `result()` is the stopped run's (`finishReason: "aborted"`).
@@ -107,11 +107,12 @@ With `ifBusy: "parallel"` a second run starts while the first goes on. Each run 
 
 - Each run reads the thread as it was when it started, plus its own messages: the messages another run is still writing are left out. A parallel turn waits only until the runs already going have stored their opening messages.
 - Messages are stored in arrival order. Each run's messages are written by id, so runs writing at once don't overwrite each other.
-- Each run counts against `maxConcurrentRuns`. A thread takes at most `maxThreadRuns` runs at once (default `DEFAULT_MAX_THREAD_RUNS`, 3); one more answers `429` with code `too_many_runs`. Override it per thread:
+- Every message a run writes names its turn: `message.turn` is the id of the message that started it (see [Which turn a message belongs to](#which-turn-a-message-belongs-to)). A reply stored after another run's messages still goes with its own question in `splitTurns`, `contextWindow` and compaction.
+- Each run counts against `maxConcurrentRuns`. A thread takes at most `maxThreadRuns` runs at once (default `DEFAULT_MAX_THREAD_RUNS`, 3); one more answers `429` with code `too_many_runs`. Override it per thread, and answer `{ max, overflow: "queue" }` to hold the turn until one of the runs ends instead, as `"queue"` waits; it then starts as one more parallel run:
 
 ```typescript
 protected maxThreadRuns(req: HttpRequest, { threadId, owner, body }) {
-  return body.plan === "pro" ? 5 : 2;
+  return { max: body.plan === "pro" ? 5 : 2, overflow: "queue" };
 }
 ```
 
@@ -119,6 +120,19 @@ protected maxThreadRuns(req: HttpRequest, { threadId, owner, body }) {
 - `maxThreadRuns` counts every run on the thread, whoever started it. On a thread several users share, one of them can use up its limit; count per owner in `maxThreadRuns` (`owner`, and `this.liveRuns.running({ threadId })` with `this.liveRuns.ownerOf(runId)`) if that matters.
 - A parallel run leaves out the answers other runs are still writing, but not their user messages, so the model can see a question that is not answered yet before its own message. It usually answers only its own; say so in the instructions if it should.
 - Starting waits until the runs already going have taken their own turns in, for at most five seconds, and outside the thread's lock: a supersede or another turn meanwhile is not held up.
+
+### Which turn a message belongs to
+
+Every message a run writes has `message.turn`: the id of the user message that started the turn it answers. That message has its own id as `turn`.
+
+- A new message (text, files or a server event) starts a turn: its id is the turn's.
+- A turn that only answers tool calls (approvals, client tools) carries on the turn that asked them, even when other turns were stored since. So does a turn with nothing in it (a continuation).
+- What the run reads while it works is part of its turn: a joined message, a message from its `inbox`, a file a tool showed.
+- A message stored before `turn` existed has none. `splitTurns` and `contextWindow` then read it as before: a turn starts at a user message that no tool injected and that joined nothing.
+
+The run's turn is `turn` on the `AgentRun` (`AgentTurn.run` from `startTurn`, or what `agent.stream` returns) and `ctx.turn` in the controller's hooks: `{ id, continues?, answers? }`, where `continues` is set when the request added no message of its own and `answers` lists the `toolCallId`s it answered. It is `undefined` until the run has taken its turn in.
+
+`message.joined` is still written on a joined message, with the same value as `turn`. It is deprecated: read `turn`. It goes in a later minor version.
 
 ### Choosing per message: `busyPolicy`
 
@@ -138,7 +152,7 @@ Its parameters:
 | | |
 |---|---|
 | `threadId`, `body`, `owner` | The request's thread, `Body` and run owner. |
-| `running` | The runs going on the thread, oldest first: `{ runId, startedAt, owner, turn, joined }`, where `turn` is the message that started the run and `joined` the messages that joined it (`{ text?, files?, event? }`). |
+| `running` | The runs going on the thread, oldest first: `{ runId, startedAt, owner, turn, messageId, body, joined }`, where `turn` is the message that started the run and `joined` the messages that joined it (`{ text?, files?, event? }`), `messageId` the turn's id (`message.turn` on what the run writes; for a run that answers tool calls, the turn that asked them; `undefined` for a moment after the run starts), and `body` the `Body` the request that started it carried. |
 | `requested` | What the request asked for (`ifBusy` from `startTurn` or the chat), or `undefined`. |
 | `source` | `"client"` or `"server"`. |
 | `turn` | The new message. |

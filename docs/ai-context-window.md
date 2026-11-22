@@ -35,7 +35,7 @@ The options (`ContextWindowOptions`):
 
 How the cut is made:
 
-- **At a turn start.** A turn is a user message and everything after it up to the next one: the assistant's steps, their tool calls with their results, and any file a tool showed the model (a user-role message that is not a turn). A cut never separates a call from its result.
+- **At a turn start.** A turn is a user message and everything after it up to the next one: the assistant's steps, their tool calls with their results, and any file a tool showed the model (a user-role message that is not a turn). A cut never separates a call from its result. A message that names its turn (`message.turn`, written on everything a run writes) goes with that turn even when runs side by side stored other messages between, and a cut never keeps it without the message that started its turn (see [Which turn a message belongs to](./ai-server-turns.md#which-turn-a-message-belongs-to)).
 - **The latest turn is always sent**, even when it alone is over the budget.
 - **In steps, for the prompt cache.** Providers cache the request's prefix. A window that slid one turn per turn would change the first message on every turn and miss the cache every time. With `step: 10` the window starts at the thread's 0th, 10th, 20th, … turn, so consecutive turns send the same prefix until the window has to move again. `step: 1` slides one turn at a time.
 - **System messages** from before the cut stay at the front.

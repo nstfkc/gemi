@@ -19,6 +19,7 @@ import type {
   PrepareStepContext,
   AgentJoinTurn,
   AgentRunJoin,
+  AgentRunTurn,
   PrepareStepResult,
   ReasoningEffort,
   SkillDefinition,
@@ -322,6 +323,14 @@ export type AgentHookContext = {
    * `CreateAgentParams.rememberDenials`.
    */
   readonly denials: readonly ToolDenial[];
+  /**
+   * The turn the run answers (#1339): `id` is `AgentMessage.turn` on every
+   * message it writes; `continues` is set when the request added no message
+   * of its own (answers to tool calls, or a bare continuation) and carries on
+   * that earlier turn; `answers` lists the tool calls it answered. Read live
+   * from the run: `undefined` before the run has taken its turn in.
+   */
+  readonly turn: AgentRunTurn | undefined;
 };
 
 /**
@@ -439,6 +448,15 @@ export type AgentRunningTurn = {
   owner: string | null;
   /** What started the turn: the person's text and files, or a server turn's event. Empty for a turn with neither (answers, a continuation). */
   turn: AgentRunningTurnMessage;
+  /**
+   * The turn the run answers (#1339): the id of the message that started it,
+   * `AgentMessage.turn` on everything the run writes. For a run that answers
+   * tool calls, the turn that asked them. `undefined` until the run has taken
+   * its turn in, a moment after it starts.
+   */
+  messageId: string | undefined;
+  /** The `body` the request that started the run carried, as `instructions()` got it. */
+  body: unknown;
   /** The messages that joined it so far, oldest first. */
   joined: AgentRunningTurnMessage[];
 };
@@ -887,6 +905,7 @@ const runRecords = new WeakMap<
     owner: string | null;
     turn: AgentRunningTurnMessage;
     joined: AgentRunningTurnMessage[];
+    body: unknown;
   }
 >();
 
@@ -1044,6 +1063,14 @@ export const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 export const DEFAULT_MAX_HISTORY_MESSAGES = 1000;
 /** `AgentController.maxConcurrentRuns`'s default. */
 export const DEFAULT_MAX_CONCURRENT_RUNS = 5;
+/**
+ * What `maxThreadRuns` answers: how many runs one thread may have going, and
+ * what a parallel turn past that does. A bare number refuses it (429
+ * `too_many_runs`); `overflow: "queue"` holds it until one of the runs ends,
+ * then starts it as a parallel run.
+ */
+export type ThreadRunLimit = number | { max: number; overflow: "queue" | "reject" };
+
 /** `AgentController.maxThreadRuns`'s default. */
 export const DEFAULT_MAX_THREAD_RUNS = 3;
 /** The cap on `attach` and `stop` bodies, which carry ids and nothing else. */
@@ -1216,7 +1243,7 @@ export type AgentControllerHooks<Body extends object = object, Ctx = AgentContex
   maxThreadRuns?: (
     req: HttpRequest<any, any>,
     params: { threadId: string; owner: string | null; body: Body },
-  ) => number | Promise<number>;
+  ) => ThreadRunLimit | Promise<ThreadRunLimit>;
   instructions?: (
     req: HttpRequest<any, any>,
     extra: { body: Body },
@@ -1940,13 +1967,15 @@ export abstract class AgentController<
    * plan, a kind of conversation): default `DEFAULT_MAX_THREAD_RUNS` (3). A
    * parallel turn on a thread that already has this many going is refused
    * with a 429 `too_many_runs` before anything runs; `busyPolicy` sees
-   * `running.length` and can join instead. Only parallel turns are counted
-   * here: the other policies never add a run to the thread.
+   * `running.length` and can join instead. Answer `{ max, overflow: "queue" }`
+   * to hold such a turn until one of the runs ends instead (#1339), as a
+   * queued turn waits: it then starts as one more parallel run. Only parallel
+   * turns are counted here: the other policies never add a run to the thread.
    */
   protected maxThreadRuns(
     req: HttpRequest<any, any>,
     params: { threadId: string; owner: string | null; body: Body },
-  ): number | Promise<number> {
+  ): ThreadRunLimit | Promise<ThreadRunLimit> {
     const hook = this.hooks?.maxThreadRuns;
     if (hook) return hook(req, params);
     return DEFAULT_MAX_THREAD_RUNS;
@@ -2497,12 +2526,16 @@ export abstract class AgentController<
       // it for its first frame.
       const runId = `run_${crypto.randomUUID()}`;
       let denials: readonly ToolDenial[] = [];
+      let ofRun: AgentRun | undefined;
       const ctx: AgentHookContext = {
         req,
         runId,
         threadId,
         get denials() {
           return denials;
+        },
+        get turn() {
+          return ofRun?.turn;
         },
       };
 
@@ -2609,6 +2642,7 @@ export abstract class AgentController<
           : {}),
       }) as AgentRun;
       denials = run.denials;
+      ofRun = run;
 
       // Registered before the response is built: the run is now owned by the
       // process rather than by this request, which is the property `/attach`
@@ -2638,6 +2672,7 @@ export abstract class AgentController<
           ? { ...(event.text ? { text: event.text } : {}), event: { name: event.name } }
           : runningTurnMessage(turn),
         joined: [],
+        body: extraBody,
       });
       if (journal) {
         journals.set(run, journal);
@@ -2894,8 +2929,13 @@ export abstract class AgentController<
           });
           return { waitFor: Promise.race([all, limit]).finally(() => clearTimeout(timer)) };
         }
-        const max = await this.maxThreadRuns(busy.req, { threadId, owner, body: busy.body });
+        const limit = await this.maxThreadRuns(busy.req, { threadId, owner, body: busy.body });
+        const { max, overflow } =
+          typeof limit === "number" ? { max: limit, overflow: "reject" as const } : limit;
         if (running.length >= max) {
+          // Looked at again once one has ended: another turn may have taken
+          // the slot by then, and this one waits again.
+          if (overflow === "queue") return { waitFor: Promise.race(running.map(({ run }) => ended(run))) };
           return {
             response: limitResponse(
               429,
@@ -2966,6 +3006,8 @@ export abstract class AgentController<
           startedAt: record?.startedAt ?? new Date(info.startedAt),
           owner: this.liveRuns.ownerOf(info.runId),
           turn: record?.turn ?? {},
+          messageId: run.turn?.id,
+          body: record?.body,
           joined: [...(record?.joined ?? [])],
         };
       }),
@@ -3101,6 +3143,7 @@ export abstract class AgentController<
   ): Promise<AgentMessage | null> {
     await persisted.get(run);
     const message = userTurnMessage(turn.event ? turn.event.text : turn.text, turn.files, turn.event);
+    message.turn = message.id;
     try {
       await this.store.appendMessages(threadId, [message]);
       return message;
