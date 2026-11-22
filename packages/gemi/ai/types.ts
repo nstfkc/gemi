@@ -122,6 +122,19 @@ export type Usage = {
   cachedAudioInputTokens?: number;
   audioOutputTokens?: number;
   totalTokens: number;
+  /**
+   * What this usage cost in USD, at the prices `Usage.configure({ pricing })`
+   * (or the innermost `Usage.meter`'s) gives as a table (`ModelPrices`).
+   * Set per model call when the call finishes, and summed with the usage, so
+   * a run's `usage.costUsd` is its calls' total.
+   *
+   * - Absent when no table is in effect (no pricing, or a pricing function,
+   *   whose unit isn't known to be USD).
+   * - `null` when a call's model isn't in the table: gemi has no built-in
+   *   prices and never guesses one. A total with an unpriced call in it is
+   *   `null` too. The first unpriced call of each model warns once.
+   */
+  costUsd?: number | null;
 };
 
 export type FinishReason =

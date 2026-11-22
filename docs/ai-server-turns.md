@@ -44,7 +44,7 @@ It answers once the run has started:
 - `runId` and `threadId`.
 - `run`: the `AgentRun`. Iterate it, or its `frames()`, to follow the turn as it goes.
 - `stop({ reason })`: what the chat's stop button does.
-- `result()`: settles when the run has ended, its transcript is stored and the controller's hooks have run (or `hookHoldMs` passed). It is the run's `AgentRunResult` (`messages`, `finishReason`, `usage`, `output`, `error`) plus `threadId`, `text` (the text of the run's last assistant message) and `pending`.
+- `result()`: settles when the run has ended, its transcript is stored and the controller's hooks have run (or `hookHoldMs` passed). It is the run's `AgentRunResult` (`messages`, `finishReason`, `usage`, `output`, `error`) plus `threadId`, `text` (the text of the run's last assistant message) and `pending`. Its `usage` carries the run's cost (`costUsd`, see [AI Usage and Cost](./ai-usage.md)), so pick the fields you return to a client or an MCP caller.
 
 ## What is the same as a browser turn, and what is not
 

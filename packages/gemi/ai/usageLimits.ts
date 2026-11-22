@@ -90,6 +90,13 @@ export type UsageReport = {
   scopes: string[];
   /** `true` on the run's last report, sent once as it ends, whatever the delta. */
   final: boolean;
+  /**
+   * The same in USD (`Usage.costUsd`, #1146): spent since the previous
+   * report, and by the run so far. Present once a model call of the run has
+   * been priced at a `ModelPrices` table; `null` once a call's model is not in
+   * it. Server-side only: no client frame or stored message carries it.
+   */
+  costUsd?: { delta: number | null; total: number | null };
 };
 
 /**
@@ -180,6 +187,7 @@ const minus = (a: UsageCounts, b: UsageCounts): UsageCounts => ({
 /** One run's limits, and what it has reported so far. @internal */
 export class RunUsageLimiter {
   private reported: UsageCounts = zero();
+  private reportedCost: number | null = 0;
   private readonly store: UsageLimitStore;
   private readonly scopes: readonly { key: string; limit: UsageLimit }[];
 
@@ -235,11 +243,19 @@ export class RunUsageLimiter {
    * Adds what was spent since the last call to every scope's store, and tells
    * `onUsage`. Skipped when nothing was spent, unless `final`.
    */
-  async report(current: UsageCounts, final = false): Promise<void> {
+  async report(current: UsageCounts, final = false, costUsd?: number | null): Promise<void> {
     const delta = minus(current, this.reported);
     const spent = delta.tokens !== 0 || delta.steps !== 0 || delta.toolCalls !== 0;
     if (!spent && !final) return;
     this.reported = { ...current };
+    const cost =
+      costUsd === undefined
+        ? undefined
+        : {
+            delta: costUsd === null || this.reportedCost === null ? null : costUsd - this.reportedCost,
+            total: costUsd,
+          };
+    if (costUsd !== undefined) this.reportedCost = costUsd;
     if (spent) {
       for (const scope of this.scopes) {
         try {
@@ -259,6 +275,7 @@ export class RunUsageLimiter {
         total: { ...current },
         scopes: this.scopes.map((scope) => scope.key),
         final,
+        ...(cost ? { costUsd: cost } : {}),
       });
     } catch (error) {
       this.onHookError(error);
