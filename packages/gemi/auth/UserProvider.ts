@@ -1,7 +1,6 @@
 import * as registry from "../orm/registry";
-import { currentConnectionName, currentTransaction, deferUntilCommit } from "../orm/context";
+import { currentConnectionName, currentTransaction } from "../orm/context";
 import { DatabaseManager } from "../database/DatabaseManager";
-import type { DatabaseConnection } from "../database/Connection";
 import { app } from "../foundation/app";
 import type {
   Account,
@@ -112,13 +111,6 @@ function registryModels(): AuthModels {
     get: (_target, name: string) => registry.get(name),
   });
 }
-
-/**
- * The tail of the last `transaction` or `withLegacySessionLock` on each
- * SQLite connection. See those methods for why SQLite queues in the process
- * instead of locking in the database.
- */
-const sqliteLegacySessionQueues = new WeakMap<DatabaseConnection, Promise<unknown>>();
 
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object") {
@@ -278,46 +270,12 @@ export class UserProvider<TSession = SessionWithUser> {
    * too, and an application's provisioning writes should run under the same
    * policy resolution as the rest of its code.
    *
-   * On SQLite, transactions opened here queue in the process, one after
-   * another per connection, with the legacy-session ones
-   * (`withLegacySessionLock`): Bun's client runs every statement on one
-   * connection, where a second `BEGIN` while a transaction is open fails
-   * outright. Two sign-ups at once answered 500 there (#1356). Inside a
-   * transaction already, this is a savepoint and does not queue.
+   * On SQLite, `Model.transaction` queues it behind any transaction open on
+   * the connection (#1362), so two sign-ups at once no longer fail at `BEGIN`
+   * (#1356). Inside a transaction already, this is a savepoint.
    */
   transaction<T>(fn: () => Promise<T>): Promise<T> {
-    return this.queuedOnSqlite((release) =>
-      this.models.User.transaction(async () => {
-        deferUntilCommit(release);
-        return fn();
-      }),
-    );
-  }
-
-  /**
-   * `begin` now, or, on SQLite outside a transaction, after the transactions
-   * this provider queued on the connection before it.
-   *
-   * The next one may begin at COMMIT, not when `begin` resolves: the first
-   * after-commit callback lets it go. `begin` resolves only after every
-   * callback deferred until the commit has run (a sync event listener, say),
-   * and one of those that opened a transaction here would otherwise wait on
-   * the very transaction that waits on it, and every sign-in on the process
-   * behind both. A rollback runs no callbacks; settling lets it go then.
-   */
-  private queuedOnSqlite<T>(begin: (release: () => void) => Promise<T>): Promise<T> {
-    const none = () => {};
-    if (currentTransaction()) return begin(none);
-    const name = this.models.User.$connection ?? currentConnectionName();
-    const connection = app(DatabaseManager).connection(name);
-    if (connection.dialect !== "sqlite") return begin(none);
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => (release = resolve));
-    const previous = sqliteLegacySessionQueues.get(connection) ?? Promise.resolve();
-    sqliteLegacySessionQueues.set(connection, released);
-    const result = previous.then(() => begin(release));
-    result.then(release, release);
-    return result;
+    return this.models.User.transaction(fn);
   }
 
   /**
@@ -331,10 +289,8 @@ export class UserProvider<TSession = SessionWithUser> {
    *   taken as the transaction's first statement and held until it ends. A
    *   row lock would not do: after a conversion the old row is gone, and there
    *   is nothing left to lock.
-   * - **SQLite**: one writer at a time already, and Bun's client runs every
-   *   statement on one connection, where a second `BEGIN` while a transaction
-   *   is open fails outright. So these transactions queue in the process, one
-   *   after another per connection.
+   * - **SQLite**: one writer at a time already, and `Model.transaction`
+   *   queues transactions per connection in the process (#1362).
    * - **MySQL / MariaDB**: the transaction alone. The conversion deletes the old
    *   row before it writes the new one, and both sides' deletes of that row
    *   wait on each other's row lock.
@@ -344,18 +300,13 @@ export class UserProvider<TSession = SessionWithUser> {
   withLegacySessionLock<T>(token: string, fn: () => Promise<T>): Promise<T> {
     const name = this.models.User.$connection ?? currentConnectionName();
     const connection = app(DatabaseManager).connection(name);
-    const locked = (release: () => void) =>
-      this.models.User.transaction(async () => {
-        deferUntilCommit(release);
-        if (connection.dialect === "postgres") {
-          const key = `gemi:legacy-session:${token}`;
-          await currentTransaction()!`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
-        }
-        return fn();
-      });
-    // Queued on SQLite like `transaction`; see `queuedOnSqlite`. Inside a
-    // transaction already, this one is a savepoint and does not queue.
-    return this.queuedOnSqlite(locked);
+    return this.models.User.transaction(async () => {
+      if (connection.dialect === "postgres") {
+        const key = `gemi:legacy-session:${token}`;
+        await currentTransaction()!`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+      }
+      return fn();
+    });
   }
 
   /**
