@@ -741,7 +741,10 @@ export default defineAuthConfig({
   Two verifies at once for a new address (a double submit, a retry) create the user once:
   with an issued code the second is `"invalid_code"` (the code is spent); with the fixed
   development code it signs in to the same user, with `isNewUser: false`. `onUserCreated`
-  runs once.
+  runs once. On SQLite, gemi's sign-in transactions queue one after another in the process,
+  each releasing the next at its commit. The queue doesn't cover the app's own
+  `Model.transaction` calls in other requests, or several processes on one database file
+  ([#1362](https://github.com/nstfkc/gemi/issues/1362)).
 
 Both answer 404 unless `enabled`. On the client:
 

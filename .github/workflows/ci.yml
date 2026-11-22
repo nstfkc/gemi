@@ -585,7 +585,7 @@ jobs:
         run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" auth/AuthController.emailCodeRace.test.ts -t "postgres"
         working-directory: packages/gemi
         env:
-          VITEST_MIN_PASSED: "1"
+          VITEST_MIN_PASSED: "3"
 
       # The change feed's database driver on Postgres: the driver contract,
       # publishing inside transactions, and LISTEN/NOTIFY between instances

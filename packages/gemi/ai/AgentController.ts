@@ -2565,6 +2565,10 @@ export abstract class AgentController<
         messages,
         turn,
         threadId,
+        // Beside other runs, a new message leaves their questions open
+        // (#1355): a run started parallel, or a turn that asked to be one
+        // and found the thread free (the other turns parked on questions).
+        ...(mode.parallel || requested === "parallel" ? { keepOtherTurnsOpen: true } : {}),
         // The run reports each message as it finishes it, the user's turn
         // first and before the model is asked anything. Only the store hears
         // about most of them here: the app's `onMessage` runs after the run,
