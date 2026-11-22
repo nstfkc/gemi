@@ -11989,6 +11989,9 @@ protected maxThreadRuns(req: HttpRequest, { threadId, owner, body }) {
 }
 ```
 
+- `max` is a positive whole number (or `Infinity`) and `overflow` is `"queue"` or `"reject"`. Any other answer fails the turn with a `TypeError`, so a typo can't turn the limit off.
+- A queued turn waits like `ifBusy: "queue"`. It has no time limit: it holds its request open until a run ends. When several are waiting, they look again in roughly the order they arrived, and each one that finds no free slot waits again. A client that disconnects while waiting still gets its run started, so its message is answered and stored; `useChat({ watch: true })` shows it when the chat comes back. The limit and the queue are per process, like `LiveRuns`: runs on another instance aren't counted.
+
 - `stop` with only a `threadId` stops every run on the thread the caller may stop. `attach` with a `runId` attaches to that run; without one, to the newest. `watch` announces each run going on the thread. `useChat`'s `reattach()` resumes the run the chat was following, one run. With `watch: true`, the watch stream announces every run going on the thread each time it connects, and the chat attaches to each.
 - `maxThreadRuns` counts every run on the thread, whoever started it. On a thread several users share, one of them can use up its limit; count per owner in `maxThreadRuns` (`owner`, and `this.liveRuns.running({ threadId })` with `this.liveRuns.ownerOf(runId)`) if that matters.
 - A parallel run leaves out the answers other runs are still writing, but not their user messages, so the model can see a question that is not answered yet before its own message. It usually answers only its own; say so in the instructions if it should.
@@ -12031,6 +12034,16 @@ Its parameters:
 | `turn` | The new message. |
 
 `running` holds every run on the thread, other users' included, with their messages' text and files. It is for the server to decide with; don't send it to a client.
+
+`running[].messageId` is `undefined` for a moment after a run starts, before it has taken its turn in, so check for it:
+
+```typescript
+protected busyPolicy(req: HttpRequest, { running, body }: BusyPolicyParams<Body>) {
+  // Join only the run answering the same page, once it is known which turn it answers.
+  const same = running.find((run) => run.messageId !== undefined && (run.body as Body).pageId === body.pageId);
+  return same ? "join" : "parallel";
+}
+```
 
 An answer that isn't an `ifBusy` value fails the turn. `"skip"` answers a chat request `409` with code `thread_busy`. A regenerate always supersedes and does not ask. Like the other hooks, it can be passed in `defineAgentHooks`.
 

@@ -17,6 +17,8 @@ What to check:
 - **Code that groups messages itself** by "a user message starts a turn" mis-groups parallel runs. Use `splitTurns`, or group by `message.turn ?? <the legacy rule>`.
 - **Code that reads `message.joined`**: read `message.turn` instead, which every message has, not only joined ones. A joined message has both, with the same value.
 - **A `maxThreadRuns` override that calls `super.maxThreadRuns()`** now gets `ThreadRunLimit` (`number | { max, overflow }`) back, not `number`. The default still answers a number.
+- **Hand-built test objects** stop type-checking: `AgentHookContext` now requires `turn`, and `AgentRunningTurn` (each `running[]` entry `busyPolicy` gets) requires `messageId` and `body`. Add them (`turn: undefined`, `messageId: undefined`, `body: undefined` is enough). `AgentRun.turn` is optional, so a hand-written `AgentRun` still type-checks.
+- **`maxThreadRuns` answers are now checked**: anything but a positive whole number, `Infinity` or `{ max, overflow: "queue" | "reject" }` fails the turn with a `TypeError`. Before, a `NaN` silently turned the limit off.
 - **A store that keeps messages in its own columns** (not the built-in stores, which store the message as JSON) should keep `turn`, or every message it loads falls back to the legacy rule.
 
 # 0.229.0

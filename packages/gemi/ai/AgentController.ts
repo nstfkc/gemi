@@ -1071,6 +1071,23 @@ export const DEFAULT_MAX_CONCURRENT_RUNS = 5;
  */
 export type ThreadRunLimit = number | { max: number; overflow: "queue" | "reject" };
 
+/**
+ * `maxThreadRuns`'s answer, checked: a typo must not turn the limit off
+ * (`NaN` is never reached) or turn a queue into a refusal. Throws, which
+ * fails the turn, as a `busyPolicy` answer it does not know does.
+ */
+function threadRunLimit(limit: ThreadRunLimit): { max: number; overflow: "queue" | "reject" } {
+  const { max, overflow } =
+    typeof limit === "number" ? { max: limit, overflow: "reject" as const } : (limit ?? ({} as never));
+  const whole = max === Infinity || (Number.isInteger(max) && max > 0);
+  if (!whole || (overflow !== "queue" && overflow !== "reject")) {
+    throw new TypeError(
+      `AgentController.maxThreadRuns answers a positive whole number (or Infinity), or { max, overflow: "queue" | "reject" }; got ${JSON.stringify(limit)}.`,
+    );
+  }
+  return { max, overflow };
+}
+
 /** `AgentController.maxThreadRuns`'s default. */
 export const DEFAULT_MAX_THREAD_RUNS = 3;
 /** The cap on `attach` and `stop` bodies, which carry ids and nothing else. */
@@ -2929,9 +2946,9 @@ export abstract class AgentController<
           });
           return { waitFor: Promise.race([all, limit]).finally(() => clearTimeout(timer)) };
         }
-        const limit = await this.maxThreadRuns(busy.req, { threadId, owner, body: busy.body });
-        const { max, overflow } =
-          typeof limit === "number" ? { max: limit, overflow: "reject" as const } : limit;
+        const { max, overflow } = threadRunLimit(
+          await this.maxThreadRuns(busy.req, { threadId, owner, body: busy.body }),
+        );
         if (running.length >= max) {
           // Looked at again once one has ended: another turn may have taken
           // the slot by then, and this one waits again.

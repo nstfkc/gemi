@@ -6744,7 +6744,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         ? userTurnMessage(event ? event.text : turn?.text, turn?.files, event)
         : undefined;
     const answers = [...new Set((turn?.toolResults ?? []).map((answer) => answer.toolCallId))];
-    const id = opening?.id ?? this.continuedTurn(open[0]?.message);
+    // The turn of the call answered, not of the first call open: with
+    // parallel runs, two turns can each be waiting on a question. A request
+    // answering calls of both carries on the turn of the first answer it
+    // lists.
+    const answered = answers
+      .map((toolCallId) => open.find(({ call }) => call.toolCallId === toolCallId))
+      .find((entry) => entry !== undefined);
+    const id = opening?.id ?? this.continuedTurn((answered ?? open[0])?.message);
     // An empty thread continued with nothing has no turn to name.
     this.turn = id
       ? {
