@@ -349,6 +349,7 @@ export type {
 export type {
   MeasuredUsage,
   MeteredUsage,
+  ModelPrices,
   UsageLine,
   UsageMeter,
   UsageMeterOptions,

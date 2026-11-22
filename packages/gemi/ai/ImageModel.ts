@@ -1,7 +1,7 @@
 import type { ImageProvider } from "./ImageProvider";
 import type { ImageResponse } from "./providers/images";
 import type { Usage } from "./types";
-import { recordUsage } from "./usageMeter";
+import { recordUsage, withCost } from "./usageMeter";
 
 /**
  * A named image model with its settings, the way `Agent` is a named text model
@@ -225,7 +225,8 @@ export class ImageModel {
   /** The response as returned, its usage recorded on any open meter. */
   private present(response: ImageResponse): GeneratedImage {
     recordUsage(this.provider.model, response.usage);
-    return present(response);
+    // Priced like a text call (#1146): `usage.costUsd` at the table in effect.
+    return present({ ...response, usage: withCost(this.provider.model, response.usage) });
   }
 
   /** Per-call params over the model's defaults, validated as one. */

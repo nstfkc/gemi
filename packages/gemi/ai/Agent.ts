@@ -22,13 +22,23 @@ import {
   appendText,
   bestEffortParse,
   emptyUsage,
+  addCost,
   outputFormat,
   parseOutput,
   raceAbort,
   resolveRope,
   RunAborted,
+  withoutCost,
 } from "./runtime";
-import { openMeter, recordStopped, recordUsage, type UsageMeter, type UsageTotals } from "./usageMeter";
+import {
+  eventWithCost,
+  openMeter,
+  recordStopped,
+  recordUsage,
+  withCost,
+  type UsageMeter,
+  type UsageTotals,
+} from "./usageMeter";
 import { supportsStrict } from "./Schema";
 import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
@@ -3774,7 +3784,21 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    */
   private readonly unreported = new Set<AgentMessage>();
 
+  /**
+   * The run's usage, without its cost: this is what the `usage` frame and
+   * hooks see. The cost (`Usage.costUsd`, #1146) is kept apart in `cost` and
+   * put back only on `result().usage`, so it never reaches a client frame or
+   * a stored message.
+   */
   private usage: Usage = emptyUsage();
+  private cost: number | null | undefined;
+
+  /** Adds `usage` to the run: its tokens to `usage`, its cost to `cost`. */
+  private addSpent(usage: Usage | undefined) {
+    if (!usage) return;
+    this.usage = addUsage(this.usage, withoutCost(usage));
+    this.cost = addCost(this.cost, usage.costUsd);
+  }
   /** The run's own model calls and executed tool calls, for `usageLimits` (#1124). */
   private modelSteps = 0;
   private toolCallCount = 0;
@@ -4155,7 +4179,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     for (const join of this.joins.splice(0)) join.resolve(null);
     if (this.limiter) {
       try {
-        await this.limiter.report(this.spent(), true);
+        await this.limiter.report(this.spent(), true, this.cost);
       } catch (error) {
         this.writeLog(`[gemi/ai] agent "${this.config.name}" could not record its usage`, {
           error,
@@ -4178,7 +4202,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       runId: this.runId,
       messages: this.produced as AgentMessage<ToolShapes, unknown>[],
       finishReason: this.finishReason,
-      usage: this.usage,
+      usage: this.cost === undefined ? this.usage : { ...this.usage, costUsd: this.cost },
       metered: this.meter.totals(),
       output: this.output,
       // Only when there is one, so a successful result has the same keys it
@@ -4431,7 +4455,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       const outcome = await this.runStep(message, step);
       this.modelSteps++;
       this.lastStep = { reason: outcome.reason, usage: message.usage };
-      await this.limiter?.report(this.spent());
+      await this.limiter?.report(this.spent(), false, this.cost);
 
       // A call cut at `maxToolArgumentChars` that goes back to the model
       // (#1259) instead of failing the run. It has its result already.
@@ -4472,7 +4496,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
 
       const pending = calls.length > 0 ? await this.runTools(message, calls, step) : [];
-      await this.limiter?.report(this.spent());
+      await this.limiter?.report(this.spent(), false, this.cost);
       // A tool call refused by a limit ends the run once its step is closed:
       // another model call would only meet the same refusal. A step that left
       // a question for the user ends as that instead, below.
@@ -4846,8 +4870,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     for (;;) {
       const next = await raceAbort(Promise.resolve(iterator.next()), signal).catch((error: unknown) => {
         if (callSoFar && error instanceof RunAborted) {
-          this.usage = addUsage(this.usage, callSoFar.usage);
-          recordStopped(callSoFar, provider.model);
+          this.addSpent(eventWithCost(callSoFar, provider.model, provider).usage);
+          recordStopped(callSoFar, provider.model, provider);
           message.usage = addUsage(message.usage ?? emptyUsage(), callSoFar.usage);
           callSoFar = undefined;
         }
@@ -4963,8 +4987,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
         case "finish": {
           callSoFar = undefined;
-          this.usage = addUsage(this.usage, event.usage);
-          recordUsage(event.model ?? provider.model, event.usage);
+          if (event.usage) this.addSpent(withCost(event.model ?? provider.model, event.usage, provider));
+          recordUsage(event.model ?? provider.model, event.usage, provider);
           // This step's own cost, on the message the step wrote (#467). The run
           // total above is the whole turn — every step plus tools' sub-runs,
           // `generate()` calls and images — and putting it on the last message
@@ -5175,7 +5199,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
             signal: this.controller.signal,
             // Billed whether or not the summary came out, as `ctx.generate` is.
             onUsage: (usage) => {
-              this.usage = addUsage(this.usage, usage);
+              this.addSpent(usage);
             },
             memo: this.compactMemo,
           })
@@ -5976,7 +6000,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // way, and a stopped turn throws `RunAborted` rather than a
         // `throwOnError` rejection the tool might catch and carry on from.
         settled: (result) => {
-          this.usage = addUsage(this.usage, result.usage);
+          this.addSpent(result.usage);
           if (turn.aborted) throw new RunAborted();
         },
       },
@@ -6251,7 +6275,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         label,
         messages,
         finishReason: result.finishReason,
-        usage: resuming ? addUsage(recorded.usage ?? emptyUsage(), result.usage) : result.usage,
+        usage: withoutCost(resuming ? addUsage(recorded.usage ?? emptyUsage(), result.usage) : result.usage),
         // A parked record is what the next turn re-enters the tool on, and in
         // stateless mode it comes back from the browser. Signed here, by the
         // run that knows it is true, over where the sub-run parked, what it is
@@ -6279,7 +6303,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       write(record);
       // Only what this turn actually spent. A memoized sub-run adds nothing,
       // above, because the turn that ran it already counted it.
-      this.usage = addUsage(this.usage, result.usage);
+      this.addSpent(result.usage);
       return { result, record };
     })();
 
@@ -6529,7 +6553,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // Counted against the run exactly as a nested agent's is, so
       // `AgentRunResult.usage` is the whole cost of the turn and not only its
       // text. `imageInputTokens` keeps the image share legible inside it.
-      this.usage = addUsage(this.usage, image.usage);
+      this.addSpent(image.usage);
 
       const extension = image.mimeType === "image/jpeg" ? "jpg" : "png";
       const record = await park(

@@ -76,7 +76,33 @@ export function addUsage(total: Usage, next: Usage | undefined): Usage {
       merged[key] = (total[key] ?? 0) + (next[key] ?? 0);
     }
   }
+  // A cost unknown on either side makes the sum unknown; a side that was
+  // never priced (absent) adds nothing (#1146).
+  const cost = addCost(total.costUsd, next.costUsd);
+  if (cost !== undefined) merged.costUsd = cost;
   return merged;
+}
+
+/**
+ * `usage` without `costUsd`: what reaches a client frame or a stored message.
+ * The cost is the app's to show or not (#1146), so it stays on the server.
+ */
+export function withoutCost(usage: Usage): Usage;
+export function withoutCost(usage: Usage | undefined): Usage | undefined;
+export function withoutCost(usage: Usage | undefined): Usage | undefined {
+  if (!usage || !("costUsd" in usage)) return usage;
+  const { costUsd: _cost, ...rest } = usage;
+  return rest;
+}
+
+/** Two `Usage.costUsd` values summed: `null` wins, absent adds nothing. */
+export function addCost(
+  total: number | null | undefined,
+  next: number | null | undefined,
+): number | null | undefined {
+  if (total === null || next === null) return null;
+  if (total === undefined && next === undefined) return undefined;
+  return (total ?? 0) + (next ?? 0);
 }
 
 const USAGE_BREAKDOWNS = [

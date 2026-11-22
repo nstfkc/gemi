@@ -431,6 +431,16 @@ export abstract class AgentProvider {
    * envelope as OpenAI, and the one place it differs — the content filter's
    * code, buried in `innererror` — is handled by reading both.
    */
+  /**
+   * What a prompt-cache write costs, as a multiple of the input price, for
+   * `model`'s calls (#1146): the default of `ModelPrice.cacheWriteInput` when
+   * `Usage.costUsd` and meters price `Usage.cacheWriteInputTokens`. 1 unless
+   * the vendor bills writes above input (Anthropic's 5-minute cache: 1.25).
+   * Optional, so a provider that implements this class rather than extending
+   * it still type-checks; absent means 1.
+   */
+  cacheWriteFactor?(model: string): number;
+
   normalizeError(error: unknown): AgentError {
     return normalizeProviderError(error);
   }
@@ -581,6 +591,11 @@ export class AnthropicProvider extends AgentProvider {
     this.model = model;
     this.capabilities = { ...capabilitiesForClaude(model), ...claudeRequestFeatures() };
     this.config = config;
+  }
+
+  /** The 5-minute cache gemi asks for (`cache_control: ephemeral`) bills writes at 1.25x input. */
+  cacheWriteFactor(_model: string): number {
+    return 1.25;
   }
 
   /**

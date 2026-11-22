@@ -1,3 +1,18 @@
+# 0.237.0
+
+## `usage.costUsd`: each model call priced when it finishes (#1146)
+
+**Feature (minor version).** With a price table in `Usage.configure({ pricing })` (now named `ModelPrices`), every model call's usage gets `costUsd` in USD when it finishes, and the sums carry it. That covers agent steps, `generate`, sub-runs and `ImageModel` images. So `result().usage.costUsd`, `generate`'s `result.usage.costUsd`, `image.usage.costUsd` and `usageLimits.onUsage`'s `report.costUsd` (`delta`, `total`) say what the work cost.
+
+- **No guessed prices.** A model that isn't in the table gives `costUsd: null`, and any total that includes it is `null` too. Its first call logs one warning. With no pricing, or with a pricing function, `costUsd` is absent.
+- **Cache writes are priced per provider.** `cacheWriteInput` used to default to `input`. It now defaults to `input` times the provider's `cacheWriteFactor(model)`: 1.25 on Anthropic, 1 elsewhere. A `FallbackProvider` asks the leg that served the call. This applies in meters too, so **a meter's `cost` for Anthropic calls that write the cache goes up** unless the table sets `cacheWriteInput`.
+- **Server-side only.** `costUsd` is stripped from every client frame (`usage`, `message-end`) and from stored messages (`AgentMessage.usage`, sub-run transcripts).
+
+What to check:
+- If your price table covers Anthropic models without `cacheWriteInput`, their metered cost now includes the 1.25x write price. That's the vendor's real bill. Set `cacheWriteInput` if you have a different rate.
+- A provider of your own can declare `cacheWriteFactor(model)`. Without it, the factor is 1.
+- If you added up costs by hand from `result.usage`, `result.usage.costUsd` now gives you that.
+
 # 0.235.0
 
 ## Usage on failed, cut, retried and stopped model calls (#1353)

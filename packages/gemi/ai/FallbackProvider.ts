@@ -288,6 +288,17 @@ export class FallbackProvider extends AgentProvider {
     return first.deleteFile(fileId);
   }
 
+  /**
+   * The factor of the leg that serves `model`: the one named so, else one
+   * whose model the reported id starts with (a dated id); 1 when none is.
+   */
+  cacheWriteFactor(model: string): number {
+    const leg =
+      this.entries.find((entry) => entry.provider.model === model) ??
+      this.entries.find((entry) => model.startsWith(entry.provider.model));
+    return leg ? (leg.provider.cacheWriteFactor?.(model) ?? 1) : 1;
+  }
+
   normalizeError(error: unknown): AgentError {
     return this.entries[0]!.provider.normalizeError(error);
   }

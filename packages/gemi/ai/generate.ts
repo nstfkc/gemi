@@ -16,7 +16,7 @@ import {
 } from "./runtime";
 import type { Infer, Schema } from "./Schema";
 import type { AgentError, AgentMessage, FinishReason, ProviderErrorDetail, Usage } from "./types";
-import { recordStopped, recordUsage } from "./usageMeter";
+import { eventWithCost, recordStopped, recordUsage, withCost } from "./usageMeter";
 
 /**
  * One model call with an output schema: no tools, no loop, no stream to a client.
@@ -515,8 +515,8 @@ async function callModel<O extends Schema<any>>(
         // must not be able to hold a stopped call open.
         const next = await raceAbort(Promise.resolve(iterator.next()), signal).catch((thrown: unknown) => {
           if (callSoFar && thrown instanceof RunAborted) {
-            usage = addUsage(usage, callSoFar.usage);
-            recordStopped(callSoFar, params.provider.model);
+            usage = addUsage(usage, eventWithCost(callSoFar, params.provider.model, params.provider).usage);
+            recordStopped(callSoFar, params.provider.model, params.provider);
             callSoFar = undefined;
           }
           throw thrown;
@@ -552,8 +552,10 @@ async function callModel<O extends Schema<any>>(
             // nothing already failed. A content filter reports an error and
             // then closes the call with a finish that still bills — the same
             // rule `AgentRunImpl.runStep` follows.
-            usage = addUsage(usage, event.usage);
-            recordUsage(event.model ?? params.provider.model, event.usage);
+            if (event.usage) {
+              usage = addUsage(usage, withCost(event.model ?? params.provider.model, event.usage, params.provider));
+            }
+            recordUsage(event.model ?? params.provider.model, event.usage, params.provider);
             if (!error) reason = event.reason;
             break;
           case "error":
