@@ -1883,8 +1883,8 @@ describe("settledBy (#1355, #1380)", () => {
     ...(turn ? { turn } : {}),
     content: toolCallIds.map((toolCallId) => ({ type: "tool-call", toolCallId, name: "publish", input: {} })),
   });
-  const settled = (messages: AgentMessage[], pending: PendingToolCall[], ids: string[]) =>
-    [...settledBy(messages, pending, new Set(ids))].sort();
+  const settled = (_messages: AgentMessage[], pending: PendingToolCall[], ids: string[]) =>
+    [...settledBy(pending, new Set(ids))].sort();
 
   test("only the answered call: the reply's other question stays open (#1380)", () => {
     expect(settled([], [call("a1", { turn: "A" }), call("a2", { turn: "A" }), call("b1", { turn: "B" })], ["a1"])).toEqual([

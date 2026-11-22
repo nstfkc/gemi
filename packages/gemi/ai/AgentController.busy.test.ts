@@ -1188,7 +1188,11 @@ describe.each(stores)("one reply's questions answered one at a time (#1380, $nam
     ]);
     const one = await Chat.startTurn({ threadId, turn: { toolResults: [approval(q1)] } });
     release(calls());
-    expect((await one.result()).text).toBe("home is live");
+    const oneResult = await one.result();
+    expect(oneResult.text).toBe("home is live");
+    // The turn result says it still needs input, and what.
+    expect(oneResult.finishReason).toBe("awaiting-input");
+    expect(oneResult.pending.map((call) => call.toolCallId)).toEqual(["q2"]);
     let stored = (await store.loadThread(threadId))!;
     expect(resultOf(stored, "q1")?.status).toBe("ok");
     expect(resultOf(stored, "q2")).toBeUndefined();
@@ -1220,7 +1224,8 @@ describe.each(stores)("one reply's questions answered one at a time (#1380, $nam
     expect(calls()).toBe(2);
     release(1);
     const first = await framesOf(one);
-    expect(first.at(-1)!.event).toMatchObject({ type: "run-end", finishReason: "stop" });
+    // Still waiting on q2 when it ends.
+    expect(first.at(-1)!.event).toMatchObject({ type: "run-end", finishReason: "awaiting-input" });
     await until(() => calls() === 3);
     release(2);
     const second = await framesOf(await two);

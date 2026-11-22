@@ -67,6 +67,8 @@ const resultOf = (messages: AgentMessage[], id: string) =>
   messages
     .flatMap((message) => message.content)
     .find((part): part is ToolResultPart => part.type === "tool-result" && part.toolCallId === id);
+const textOf = (message: AgentMessage) =>
+  message.content.map((part) => (part.type === "text" ? part.text : "")).join("");
 const pendingIds = (messages: AgentMessage[]) =>
   messages.flatMap((message) => message.pending ?? []).map((call) => call.toolCallId);
 
@@ -95,7 +97,18 @@ describe("a reply's questions are answered one at a time (#1380)", () => {
     });
     const one = await drain(second);
     expect(second.turn).toEqual({ id: turn, continues: true, answers: ["q1"] });
-    expect(one.result.finishReason).toBe("stop");
+    // The run ends waiting on the open one, saying so on the stream; the
+    // reply itself ended as the model ended it.
+    expect(one.result.finishReason).toBe("awaiting-input");
+    expect(awaiting(one.events)!.map((call) => [call.toolCallId, call.turn])).toEqual([
+      ["q2", turn],
+    ]);
+    expect((one.result.messages.at(-1) as AgentMessage).finishReason).toBe("stop");
+    expect(one.events.findIndex((event) => event.type === "awaiting-input")).toBeLessThan(
+      one.events.findIndex((event) => event.type === "run-end"),
+    );
+    // Answered on the last message: nothing extra at the end of the input.
+    expect(textOf(provider.calls[1]!.messages.at(-1)!)).not.toContain("has now answered");
     const afterOne = upsert(history, one.result.messages as AgentMessage[]);
     expect(resultOf(afterOne, "q1")).toMatchObject({ status: "ok" });
     // Still open: no result, and still asked on its message, with its turn.
@@ -125,6 +138,13 @@ describe("a reply's questions are answered one at a time (#1380)", () => {
     });
     const two = await drain(third);
     expect(third.turn).toEqual({ id: turn, continues: true, answers: ["q2"] });
+    expect(two.result.finishReason).toBe("stop");
+    expect(awaiting(two.events)).toBeUndefined();
+    // The model replied past q2 since it was asked: its input ends saying the
+    // user has now answered it.
+    expect(textOf(provider.calls[2]!.messages.at(-1)!)).toContain(
+      'has now answered the question for "publish"',
+    );
     const afterTwo = upsert(afterOne, two.result.messages as AgentMessage[]);
     expect(resultOf(afterTwo, "q2")).toMatchObject({ status: "ok" });
     expect(pendingIds(afterTwo)).toEqual([]);

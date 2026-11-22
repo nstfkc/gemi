@@ -3244,6 +3244,17 @@ function trailingMessage(text: string, turn: string | undefined): AgentMessage {
  * The line, sent after the conversation, that stands in for a forced `toolChoice` on a provider that
  * cannot force one (#1261).
  */
+/**
+ * What the first model call of a turn is told when it answers a question the
+ * model had replied past (#1380). The result is where the call was, several
+ * items back, and the model's own last message may still say it is waiting.
+ */
+function answeredEarlierLine(tools: string[]): string | undefined {
+  if (tools.length === 0) return undefined;
+  const names = tools.map((name) => `"${name}"`).join(", ");
+  return `The user has now answered the question for ${names}: its result is with the call, above. Carry on from it.`;
+}
+
 function forcedToolLine(choice: ProviderToolChoice): string {
   return typeof choice === "object"
     ? `In this step, call the tool "${choice.name}". The turn is not done until you have called it.`
@@ -3860,6 +3871,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * `awaiting-input` frame.
    */
   private readonly siblingsOpen = new Map<string, PendingToolCall[]>();
+  /**
+   * The tools of the calls this turn answered that are not on the last
+   * message of the history (#1380): a question answered after the model had
+   * already replied past it. The first model call is told so at the end of
+   * its input, where it reads what is new, since the result sits back where
+   * the call was.
+   */
+  private answeredEarlier: string[] = [];
   /** Messages `join` accepted, waiting for the next model call to take them. */
   private readonly joins: {
     turn: AgentJoinTurn;
@@ -4164,6 +4183,23 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         this.finishReason = "error";
       } else {
         await this.loop();
+        // The turn is still waiting on a question an earlier answer left
+        // open (#1380): the run ends saying so, as one that asked would. A
+        // client keeps the card from this frame (an older one included, whose
+        // answer took every card of the turn off), and `AgentTurnResult`
+        // and `onAwaitingInput` see a turn that needs input. The message keeps
+        // the reason the model gave; the run's is `awaiting-input` when that
+        // was `stop`.
+        if (
+          this.depth === 0 &&
+          this.siblingsOpen.size > 0 &&
+          this.finishReason !== "awaiting-input" &&
+          this.finishReason !== "error" &&
+          this.finishReason !== "aborted"
+        ) {
+          this.emit({ type: "awaiting-input", runId: this.runId, pending: this.withSiblings([]) });
+          if (this.finishReason === "stop") this.finishReason = "awaiting-input";
+        }
       }
     } catch (error) {
       if (error instanceof RunAborted || this.controller.signal.aborted) {
@@ -4847,7 +4883,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // A provider that does not place a trailing context itself is sent it
     // as a last user message (#1345). Never in the history.
     const trailing =
-      [request.trailingContext, emulating ? forcedToolLine(request.toolChoice!) : undefined]
+      [
+        request.trailingContext,
+        step === 1 ? answeredEarlierLine(this.answeredEarlier) : undefined,
+        emulating ? forcedToolLine(request.toolChoice!) : undefined,
+      ]
         .filter(Boolean)
         .join("\n\n") || undefined;
     const placesTrailing = provider.capabilities.trailingContext === true;
@@ -7113,6 +7153,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // user answers them one at a time. Only a question the user was shown
       // (in its message's `pending`), and only at the top level: a sub-run's
       // questions resolve together, because its tool is re-entered once.
+      const last = this.history.at(-1)?.id;
+      this.answeredEarlier = [
+        ...new Set(
+          open
+            .filter((entry) => answered.has(entry.call.toolCallId) && entry.message.id !== last)
+            .map((entry) => String(entry.call.name)),
+        ),
+      ];
       // A call the request named and did not get answered (a bad signature,
       // a rewritten input) is refused, as before.
       const named = new Set(
@@ -7866,7 +7914,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // question (#1355).
       if (this.othersTurn(entry.message)) continue;
       // Nor the questions of its own turn the user has yet to answer (#1380):
-      // this run did not ask them, and stopping it does not answer them.
+      // this run did not ask them, and stopping it does not answer them. The
+      // call this run *answered* is still closed as `stopped` here if its
+      // approved tool had not finished: what a second answer that supersedes
+      // this run (another tab, an app sending it itself) does to the first.
       if (this.siblingsOpen.has(entry.call.toolCallId)) continue;
       this.attachToHistory(entry, {
         type: "tool-result",

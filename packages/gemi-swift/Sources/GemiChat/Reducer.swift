@@ -625,7 +625,7 @@ func othersTurns(messages: [AgentMessage], pending: [PendingToolCall], next: [Pe
 /// the other questions of a sub-agent run one of them was asked in (its tool
 /// is re-entered once). Every other held call stays open: another turn's
 /// question (gemi #1355), and another question of the same reply (gemi #1380).
-func settledBy(messages _: [AgentMessage], pending: [PendingToolCall], ids: Set<String>) -> Set<String> {
+func settledBy(pending: [PendingToolCall], ids: Set<String>) -> Set<String> {
   let runs = Set(pending.filter { ids.contains($0.toolCallId) && !($0.path ?? []).isEmpty }.map(hostOf))
   return Set(
     pending.filter { call in

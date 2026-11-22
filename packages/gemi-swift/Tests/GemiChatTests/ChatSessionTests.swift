@@ -244,6 +244,53 @@ func eventually(_ condition: () -> Bool) async {
     #expect(chat.status == .awaitingInput)
   }
 
+  @Test func aReplysSecondAnswerWaitsForTheFirstInsteadOfCuttingIt() async {
+    // gemi #1380: one reply asks two things; the second answer, given while
+    // the first one's reply streams, goes out once it ends. No stop is posted.
+    let first = OpenStream()
+    let transport = FakeTransport { request in
+      if request.url!.path.hasSuffix("/stop") { return json(status: 200, ["stopped": true]) }
+      let results = JSONValue.parse(request.httpBody!)?["turn"]?["toolResults"]?.arrayValue
+      if results?.first?["toolCallId"] == "tc_1" { return first.response }
+      if results?.first?["toolCallId"] == "tc_2" { return sse(answer("Both done.", run: "run_3", message: "m3")) }
+      return sse([
+        ["type": "run-start", "runId": "run_1"],
+        [
+          "type": "awaiting-input", "runId": "run_1",
+          "pending": [
+            ["toolCallId": "tc_1", "name": "publish", "input": [:], "kind": "approval", "signature": "s1", "turn": "t"],
+            ["toolCallId": "tc_2", "name": "publish", "input": [:], "kind": "approval", "signature": "s2", "turn": "t"],
+          ],
+        ],
+        ["type": "run-end", "runId": "run_1", "finishReason": "awaiting-input"],
+      ])
+    }
+    let chat = UntypedChatSession(endpoint: endpoint, transport: transport)
+    await chat.send("Publish both")
+
+    let one = chat.approve("tc_1", true)
+    first.emit(["type": "run-start", "runId": "run_2"])
+    await eventually { chat.status == .awaitingInput && transport.requests.count == 2 }
+    #expect(chat.pending.map(\.toolCallId) == ["tc_2"])
+    let two = chat.approve("tc_2", true)
+    // A second tap on the waiting card is the same answer.
+    let again = chat.approve("tc_2", true)
+    try? await Task.sleep(nanoseconds: 20_000_000)
+    #expect(transport.requests.count == 2)
+
+    first.emit(["type": "run-end", "runId": "run_2", "finishReason": "stop"])
+    first.finish()
+    await one.value
+    await two.value
+    await again.value
+
+    #expect(!transport.requests.contains { $0.path.hasSuffix("/stop") })
+    let answers = transport.requests.filter { $0.body["turn"]?["toolResults"] != nil }
+    #expect(answers.count == 2)
+    #expect(answers[1].body["turn"]?["toolResults"]?.arrayValue?.first?["toolCallId"] == "tc_2")
+    #expect(chat.pending.isEmpty)
+  }
+
   @Test func approvalsGivenTogetherGoOutAsOneTurn() async {
     let transport = FakeTransport { request in
       if request.url!.path.hasSuffix("support"),

@@ -51,10 +51,9 @@ private func corpus(_ name: String) throws -> [JSONObject] {
       expectSame(state.fixtureJSON, expected, label)
 
     case "settledBy":
-      let messages = (entry["messages"]?.arrayValue ?? []).map { AgentMessage(json: $0.objectValue ?? [:]) }
       let pending = (entry["pending"]?.arrayValue ?? []).map { PendingToolCall(json: $0.objectValue ?? [:]) }
       let ids = Set((entry["ids"]?.arrayValue ?? []).compactMap(\.stringValue))
-      let got = settledBy(messages: messages, pending: pending, ids: ids).sorted()
+      let got = settledBy(pending: pending, ids: ids).sorted()
       expectSame(.array(got.map(JSONValue.string)), expected, label)
 
     default:

@@ -183,11 +183,8 @@ const hostOf = (call: { toolCallId: string; path?: string[] }) => call.path?.[0]
  * answering re-enters that run's tool once. Every other held call stays open
  * on the server and here: another turn's question is that turn's to answer
  * (#1355), and so is another question of the same reply (#1380).
- *
- * `messages` is unused since #1380 and kept so the signature does not change.
  */
 export function settledBy(
-  _messages: readonly AgentMessage<any, any>[],
   pending: readonly PendingToolCall<any>[],
   ids: ReadonlySet<string>,
 ): Set<string> {

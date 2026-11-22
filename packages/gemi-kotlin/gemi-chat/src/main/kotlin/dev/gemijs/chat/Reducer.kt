@@ -538,8 +538,7 @@ internal fun othersTurns(messages: List<AgentMessage>, pending: List<PendingTool
  * is re-entered once). Every other held call stays open: another turn's
  * question (gemi #1355), and another question of the same reply (gemi #1380).
  */
-@Suppress("UNUSED_PARAMETER")
-internal fun settledBy(messages: List<AgentMessage>, pending: List<PendingToolCall>, ids: Set<String>): Set<String> {
+internal fun settledBy(pending: List<PendingToolCall>, ids: Set<String>): Set<String> {
   val runs = pending.filter { it.toolCallId in ids && !it.path.isNullOrEmpty() }.map(::hostOf).toSet()
   return pending
     .filter { call -> call.toolCallId in ids || (!call.path.isNullOrEmpty() && hostOf(call) in runs) }

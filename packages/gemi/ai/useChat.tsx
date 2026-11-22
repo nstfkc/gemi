@@ -961,6 +961,53 @@ function turnFrom(message: AgentMessage): ClientTurn {
  * dropped, while `progress` is not. The client's own copy is untouched: this
  * shapes the request body only, so a UI still renders every yield it received.
  */
+/** Answers going out as one turn, and the turns of the calls they answer (`undefined` when one names none). */
+type AnswerBatch = {
+  results: ClientToolResult[];
+  flushed: Promise<void>;
+  turns?: ReadonlySet<string>;
+};
+
+/** The turns of the held calls `results` answer, or `undefined` when one can't be told. */
+function turnsOf(pending: readonly PendingToolCall[], results: readonly ClientToolResult[]) {
+  const turns = new Set<string>();
+  for (const result of results) {
+    const turn = pending.find((call) => call.toolCallId === result.toolCallId)?.turn;
+    if (!turn) return undefined;
+    turns.add(turn);
+  }
+  return turns;
+}
+
+/** Whether two answers are to different turns' questions, both known. */
+function besideEachOther(a: ReadonlySet<string> | undefined, b: ReadonlySet<string> | undefined) {
+  return a !== undefined && b !== undefined && ![...a].some((turn) => b.has(turn));
+}
+
+/**
+ * `next` with the `answering` mark kept on the calls `previous` had marked
+ * (#1380). An `awaiting-input` frame restates every open question of its
+ * turn, a card whose answer is waiting to go out among them, and the reducer
+ * takes the frame's copies. Untouched when nothing was marked.
+ */
+function keepAnswering<S extends { pending: PendingToolCall[] }>(previous: S, next: S): S {
+  if (next === previous || next.pending === previous.pending) return next;
+  const marked = new Set(
+    (previous.pending as ChatPendingToolCall[])
+      .filter((call) => call.answering)
+      .map((call) => `${(call.path ?? []).join("/")}#${call.toolCallId}`),
+  );
+  if (marked.size === 0) return next;
+  let changed = false;
+  const pending = (next.pending as ChatPendingToolCall[]).map((call) => {
+    if (call.answering || !marked.has(`${(call.path ?? []).join("/")}#${call.toolCallId}`))
+      return call;
+    changed = true;
+    return { ...call, answering: true as const };
+  });
+  return changed ? { ...next, pending } : next;
+}
+
 /**
  * `history` with each held call in the `pending` of the message that made it
  * (the top-level call, for a sub-agent's question), as a stored thread keeps
@@ -1319,7 +1366,10 @@ export function useChat<P extends keyof AgentRoutes>(
         if (frame.event.type === "run-start") flight.runId = frame.event.runId;
         setPhaseSafe("streaming");
         const previous = stateRef.current!;
-        const next = applyRunFrame(previous, flight.runId ?? flight.asked, frame);
+        const next = keepAnswering(
+          previous,
+          applyRunFrame(previous, flight.runId ?? flight.asked, frame),
+        );
         // `runs` (#1344): streaming from its first frame, and its turn from
         // the message a frame names: a `message-start`, or for an attach
         // whose tail began after it, the message already in the transcript.
@@ -1449,19 +1499,7 @@ export function useChat<P extends keyof AgentRoutes>(
             flight.turns === "new" ||
             ![...flight.turns].some((id) => answerTurns.has(id)),
         );
-      // An answer while this chat streams the reply an earlier answer
-      // carried on (#1380): the reply asked two questions, the first answer
-      // is running, and this is the second. It waits for that run to end
-      // (`queue`) rather than cutting it off: the question stays open on the
-      // server until it is answered. Not behind a new message, which a send
-      // cuts as before.
-      const answersOnly = Boolean(turn.toolResults?.length) && !turn.text && !turn.files?.length;
-      const behind =
-        !beside &&
-        answersOnly &&
-        stateRef.current!.threadId !== undefined &&
-        [...flightsRef.current].some((flight) => flight.turns !== "new");
-      const ifBusy = beside ? "parallel" : behind ? "queue" : asked;
+      const ifBusy = beside ? "parallel" : asked;
       // Whether this send cuts off what this chat is streaming itself. Asked
       // for anything else, the server decides, and the streams show it.
       const cuts = ifBusy === undefined || ifBusy === "supersede";
@@ -1585,7 +1623,6 @@ export function useChat<P extends keyof AgentRoutes>(
           : [];
       const answered = turn.toolResults?.length
         ? settledBy(
-            previous.messages,
             previous.pending,
             new Set(turn.toolResults.map((result) => result.toolCallId)),
           )
@@ -1743,13 +1780,15 @@ export function useChat<P extends keyof AgentRoutes>(
    * microtask is what makes the declared per-call signature safe to use the way
    * it reads.
    */
-  const queued = useRef<{ results: ClientToolResult[]; flushed: Promise<void> } | null>(null);
+  const queued = useRef<AnswerBatch | null>(null);
   // The answer turn that has gone out and not settled yet, so an answer given
   // while it flies (a double click) resolves with it instead of sending a
   // second turn that would supersede it (#1106).
   // One per turn being answered: answers for two turns' questions fly side
   // by side (#1355).
-  const answering = useRef<{ results: ClientToolResult[]; flushed: Promise<void> }[]>([]);
+  const answering = useRef<AnswerBatch[]>([]);
+  /** Bumped by `stop()`, so an answer held behind another (#1380) is not sent after it. */
+  const stops = useRef(0);
 
   const queueResult = useCallback(
     (result: ClientToolResult) => {
@@ -1765,7 +1804,7 @@ export function useChat<P extends keyof AgentRoutes>(
             ...current,
             pending: withAnswering(
               current.pending,
-              settledBy(current.messages, current.pending, new Set([result.toolCallId])),
+              settledBy(current.pending, new Set([result.toolCallId])),
               true,
             ),
           });
@@ -1776,8 +1815,23 @@ export function useChat<P extends keyof AgentRoutes>(
       const flushed: Promise<void> = Promise.resolve().then(async () => {
         const batch = queued.current!;
         queued.current = null;
+        batch.turns = turnsOf(stateRef.current!.pending as PendingToolCall[], results);
+        // Another card of a reply whose earlier answer is still going out or
+        // streaming (#1380) waits for it here, then goes out with the history
+        // that answer left: nothing on the server overlaps, a stateless chat
+        // posts the first answer's result, and no run is cut. An answer to
+        // another turn's questions does not wait (it runs beside, #1355).
+        const ahead = answering.current.filter(
+          (other) => !besideEachOther(other.turns, batch.turns),
+        );
         answering.current = [...answering.current, batch];
         try {
+          if (ahead.length > 0) {
+            const stopped = stops.current;
+            await Promise.allSettled(ahead.map((other) => other.flushed));
+            // `stop()` put the card back to plain pending; it is not sent.
+            if (stops.current !== stopped || !mountedRef.current) return;
+          }
           await send({ toolResults: results });
         } finally {
           answering.current = answering.current.filter((other) => other !== batch);
@@ -1791,7 +1845,7 @@ export function useChat<P extends keyof AgentRoutes>(
         ...current,
         pending: withAnswering(
           current.pending,
-          settledBy(current.messages, current.pending, new Set([result.toolCallId])),
+          settledBy(current.pending, new Set([result.toolCallId])),
           true,
         ),
       });
@@ -1939,6 +1993,7 @@ export function useChat<P extends keyof AgentRoutes>(
     const flights = [...flightsRef.current];
     for (const flight of flights) flight.controller.abort();
     flightsRef.current.clear();
+    stops.current++;
     syncRuns();
     const stopped = markAllAborted(stateRef.current!);
     commit({
