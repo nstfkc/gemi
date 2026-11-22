@@ -26,6 +26,10 @@ status 404 on a page load, and on an in-app navigation too.
   into the URL raw and now goes in as `%20` or `%25`.
 - `<Page params>` in `gemi/testing` takes decoded values, as `useParams()`
   returns them.
+- The client router looks a view's data up under the path it is on, as the
+  server filed it, not under one rebuilt from the params. A page such as
+  `/u/john@x.com` or `/u/c++` keeps its loader data, and a `:` in the path
+  (`/u/a:b`) no longer throws `Missing parameter` on the first render.
 
 # 0.225.2
 
