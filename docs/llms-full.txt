@@ -14723,6 +14723,12 @@ rollback on throw.
 Nesting is a **savepoint**: an inner failure rolls back to the savepoint and leaves the outer
 transaction usable.
 
+Work a transaction starts but doesn't wait for (a `setTimeout`, an un-awaited call, an emitter
+callback) carries its scope too. While the transaction is open, that work's queries and nested
+`transaction()` calls join it, as awaited ones do. Once it has committed or rolled back, they run
+outside it: a `transaction()` call opens a transaction of its own (on SQLite it waits its turn), and a
+plain query runs on its own. So that work's writes don't depend on how the transaction that started it ended.
+
 **On SQLite, transactions queue.** Bun's SQLite client runs every statement on one connection,
 where a second `BEGIN` while a transaction is open fails ("cannot start a transaction within a
 transaction"). So a `Model.transaction` or `DB.transaction` that starts while another one is

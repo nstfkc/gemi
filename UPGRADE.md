@@ -1,3 +1,12 @@
+# 0.237.3
+
+## Detached work after a transaction settles runs outside it (#1376)
+
+**Fix (patch version).** Work a transaction starts but doesn't wait for (a `setTimeout`, `void service.record()`, an emitter callback) inherits the transaction's scope. When that work ran after the transaction had committed or rolled back, its `Model.transaction` / `DB.transaction` still became a savepoint of the finished transaction, and its queries still used the finished transaction's handle. Now, once the transaction has settled, a nested `transaction()` opens a transaction of its own (on SQLite it queues like any other), and plain queries run on the pool. While the transaction is still open, nothing changes: a nested call is a savepoint and queries join it.
+
+What to check:
+- Detached work that used to fail with an error from the finished transaction (a savepoint or a statement on a closed transaction) now succeeds, and its writes are kept even when the transaction that started it rolled back. If that work should only happen when the transaction commits, run it from `afterCommit`.
+
 # 0.237.1
 
 ## SQLite transactions queue instead of failing at `BEGIN` (#1362)
