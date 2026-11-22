@@ -179,7 +179,7 @@ export const ormContext = new AsyncLocalStorage<OrmScope>();
 
 /**
  * The ambient scope, without its transaction once that transaction has
- * settled (#1376).
+ * finished (#1376).
  *
  * Work a transaction starts and doesn't wait for (a `setTimeout`, an
  * un-awaited call, an emitter callback) inherits its scope, handle included.
@@ -188,12 +188,17 @@ export const ormContext = new AsyncLocalStorage<OrmScope>();
  * transaction it is outside one, as it is: its `transaction()` opens one of
  * its own, and its statements run on the pool. While the transaction is
  * still open it stays inside it (nested calls the transaction awaits look
- * the same).
+ * the same). `deferUntilCommit` reads the raw scope: it goes by how the
+ * transaction ended.
+ *
+ * "Finished" starts when the transaction's callback is done with it, before
+ * `COMMIT` or `ROLLBACK` is sent: during that round-trip the handle takes
+ * statements outside any transaction.
  */
 function liveScope(): OrmScope | undefined {
   const store = ormContext.getStore();
   if (store?.tx === undefined || store.afterCommit === undefined) return store;
-  if (!settledLists.has(store.afterCommit)) return store;
+  if (!finishedLists.has(store.afterCommit)) return store;
   return {
     ...store,
     tx: undefined,
@@ -327,7 +332,11 @@ export function deferUntilCommit(callback: AfterCommitCallback): boolean {
   // transaction settled, through a scope that still carries its handle and its
   // list. Pushing then would queue onto a list already drained (or discarded),
   // and the work would silently never run. A committed list answers "run it
-  // now"; a rolled-back one keeps the promise that nothing runs.
+  // now"; a rolled-back one keeps the promise that nothing runs: the callback
+  // may announce the transaction's own writes (#875). During COMMIT the
+  // outcome isn't known yet, so it is queued and runs if the commit does.
+  // Detached work that opened a transaction of its own (#1376) is on that
+  // one's list instead.
   const settled = settledLists.get(store.afterCommit);
   if (settled === "committed") return false;
   if (settled === "rolled_back") return true;
@@ -335,6 +344,12 @@ export function deferUntilCommit(callback: AfterCommitCallback): boolean {
   store.afterCommit.push(callback);
   return true;
 }
+
+/**
+ * The after-commit lists of outermost transactions whose callback is done
+ * (committing, rolled back or settled): what `liveScope` drops.
+ */
+const finishedLists = new WeakSet<AfterCommitCallback[]>();
 
 /**
  * How each outermost transaction's after-commit list ended, once it has. Keyed
@@ -1068,13 +1083,19 @@ function openTransaction<T>(
               if (!options?.deferSettings) {
                 await applySettings(tx, current?.settings, applied);
               }
-              const result = await fn(tx);
-              await awaitDependencies(dependencies, 0);
-              // Throws "current transaction is aborted" when a failed statement
-              // was swallowed on Postgres, so `begin` rolls back and rejects
-              // instead of resolving over a `COMMIT` that rolled back.
-              if (statementFailed.value) await tx.unsafe("select 1");
-              return result;
+              try {
+                const result = await fn(tx);
+                await awaitDependencies(dependencies, 0);
+                // Throws "current transaction is aborted" when a failed statement
+                // was swallowed on Postgres, so `begin` rolls back and rejects
+                // instead of resolving over a `COMMIT` that rolled back.
+                if (statementFailed.value) await tx.unsafe("select 1");
+                return result;
+              } finally {
+                // Done with it, before Bun sends COMMIT or ROLLBACK: work
+                // that runs from now on is outside it (#1376).
+                finishedLists.add(deferred);
+              }
             },
           ),
         )

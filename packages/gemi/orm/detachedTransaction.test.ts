@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { DatabaseManager } from "../database/DatabaseManager";
 import { DB } from "../facades/DB";
 import { Application } from "../foundation/Application";
-import { currentTransaction, transactionDepth } from "./context";
+import { afterCommit, currentTransaction, transactionDepth } from "./context";
 import { Model } from "./Model";
 import { clearRegistry, register } from "./registry";
 import type { FieldSchema, ModelSchema } from "./schema";
@@ -64,18 +64,18 @@ const backends = [
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 /** Runs `work` from a timer the transaction doesn't wait for, and hands back its outcome. */
-function detached<T>(work: () => Promise<T>): Promise<PromiseSettledResult<T>> {
+function detached<T>(work: () => Promise<T>, delay = 20): Promise<PromiseSettledResult<T>> {
   return new Promise((resolve) => {
     setTimeout(() => {
       work().then(
         (value) => resolve({ status: "fulfilled", value }),
         (reason: unknown) => resolve({ status: "rejected", reason }),
       );
-    }, 20);
+    }, delay);
   });
 }
 
-describe.each(backends)("a transaction started by detached work ($name)", ({ url, ddl }) => {
+describe.each(backends)("a transaction started by detached work ($name)", ({ name, url, ddl }) => {
   let database: DatabaseManager;
   let previous: Application | undefined;
 
@@ -167,6 +167,87 @@ describe.each(backends)("a transaction started by detached work ($name)", ({ url
     });
     expect(await wrote).toMatchObject({ status: "fulfilled" });
     expect(await bodies()).toEqual(["later"]);
+  });
+
+  test("after the outer one rolls back, its afterCommit runs in a transaction of its own, and outside one is dropped", async () => {
+    const ran: string[] = [];
+    let done!: Promise<PromiseSettledResult<void>>;
+    await expect(
+      Note.transaction(async () => {
+        done = detached(async () => {
+          await Note.create({ data: { body: "kept" } });
+          await afterCommit(() => {
+            ran.push("plain");
+          });
+          await Note.transaction(async () => {
+            await afterCommit(() => {
+              ran.push("own transaction");
+            });
+          });
+        });
+        throw new Error("outer rolls back");
+      }),
+    ).rejects.toThrow("outer rolls back");
+
+    expect(await done).toEqual({ status: "fulfilled", value: undefined });
+    // Outside a transaction it may announce the rolled-back writes (#875).
+    expect(ran).toEqual(["own transaction"]);
+    expect(await bodies()).toEqual(["kept"]);
+  });
+
+  test("its afterCommit runs after the outer one commits", async () => {
+    const ran: string[] = [];
+    let done!: Promise<PromiseSettledResult<void>>;
+    await Note.transaction(async () => {
+      done = detached(() =>
+        afterCommit(() => {
+          ran.push("detached");
+        }),
+      );
+    });
+    expect(await done).toEqual({ status: "fulfilled", value: undefined });
+    expect(ran).toEqual(["detached"]);
+  });
+
+  // A deferred constraint trigger makes COMMIT take 300ms, and the detached
+  // work fires 100ms in: the outer transaction's callback is done, but `begin`
+  // hasn't resolved yet. Postgres only (SQLite's COMMIT gives a timer no turn).
+  test.skipIf(name !== "postgres")("during the outer one's COMMIT, it is a transaction of its own", async () => {
+    const slow = `${table}_slow`;
+    const sql = database.connection().sql;
+    await sql.unsafe(`CREATE TABLE "${slow}" (id INT)`);
+    await sql.unsafe(
+      `CREATE FUNCTION "${slow}_fn"() RETURNS trigger AS $$ BEGIN PERFORM pg_sleep(0.3); RETURN NULL; END $$ LANGUAGE plpgsql`,
+    );
+    await sql.unsafe(
+      `CREATE CONSTRAINT TRIGGER "${slow}_t" AFTER INSERT ON "${slow}" DEFERRABLE INITIALLY DEFERRED ` +
+        `FOR EACH ROW EXECUTE FUNCTION "${slow}_fn"()`,
+    );
+    try {
+      let outerSettled = false;
+      let committing!: boolean;
+      let done!: Promise<PromiseSettledResult<number | null>>;
+      await Note.transaction(async () => {
+        await currentTransaction()!.unsafe(`INSERT INTO "${slow}" VALUES (1)`);
+        await Note.create({ data: { body: "outer" } });
+        done = detached(() => {
+          committing = !outerSettled;
+          return Note.transaction(async () => {
+            await Note.create({ data: { body: "during commit 1" } });
+            await Note.create({ data: { body: "during commit 2" } });
+            return transactionDepth();
+          });
+        }, 100);
+      });
+      outerSettled = true;
+
+      expect(await done).toEqual({ status: "fulfilled", value: 0 });
+      expect(committing).toBe(true);
+      expect(await bodies()).toEqual(["outer", "during commit 1", "during commit 2"]);
+    } finally {
+      await sql.unsafe(`DROP TABLE "${slow}"`);
+      await sql.unsafe(`DROP FUNCTION "${slow}_fn"()`);
+    }
   });
 
   test("while the outer one is still open, it stays a savepoint", async () => {
