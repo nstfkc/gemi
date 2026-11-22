@@ -714,7 +714,7 @@ describe("parallel: each message names its turn (#1339)", () => {
   });
 
   /** Two parallel turns, each parked on an approval: "publish home" (asked first), then "publish about". */
-  async function twoParked(replies: ProviderEvent[][]) {
+  async function twoParked(replies: ProviderEvent[][], options: { nestedB?: boolean } = {}) {
     const approve = AgentTool.create({
       name: "publish",
       description: "Publish",
@@ -722,11 +722,26 @@ describe("parallel: each message names its turn (#1339)", () => {
       requiresApproval: true,
       execute: async ({ page }: { page: string }) => `published ${page}`,
     });
-    const ask = (id: string, page: string): ProviderEvent[] => [
-      { type: "tool-call", toolCallId: id, name: "publish", args: JSON.stringify({ page }) },
+    const ask = (id: string, page: string, name = "publish"): ProviderEvent[] => [
+      { type: "tool-call", toolCallId: id, name, args: JSON.stringify({ page }) },
       finish(),
     ];
-    const harness = await setup([ask("cA", "home"), ask("cB", "about"), ...replies], { tools: [approve] });
+    // With `nestedB`, B's question is asked by a sub-agent under B's call.
+    const clerk = Agent.create({
+      name: "clerk",
+      provider: fakeProvider(ask("s1", "about"), [{ type: "text-delta", delta: "clerk done" }, finish()]),
+      tools: [approve],
+    });
+    const delegate = AgentTool.create({
+      name: "delegate",
+      description: "Delegate",
+      inputSchema: s.object({ page: s.string() }),
+      execute: async ({ page }: { page: string }, ctx: any) => (await ctx.runAgent(clerk, { prompt: page })).finishReason,
+    });
+    const harness = await setup(
+      [ask("cA", "home"), ask("cB", "about", options.nestedB ? "delegate" : "publish"), ...replies],
+      { tools: [approve, delegate] },
+    );
     const { store, Chat, release, calls } = harness;
     const { threadId } = await store.createThread({});
     const a = await Chat.startTurn({ threadId, text: "publish home" });
@@ -735,12 +750,13 @@ describe("parallel: each message names its turn (#1339)", () => {
     release(0);
     release(1);
     const [parkedA, parkedB] = await Promise.all([a.result(), b.result()]);
-    const approval = (pending: { toolCallId: string; signature?: string }) => ({
+    const approval = (pending: { toolCallId: string; signature?: string; path?: string[] }) => ({
       toolCallId: pending.toolCallId,
       signature: pending.signature!,
+      ...(pending.path ? { path: pending.path } : {}),
       approve: true,
     });
-    const answer = async (...pending: { toolCallId: string; signature?: string }[]) => {
+    const answer = async (...pending: { toolCallId: string; signature?: string; path?: string[] }[]) => {
       const turn = await Chat.startTurn({ threadId, turn: { toolResults: pending.map(approval) } });
       release(calls());
       return { turn, result: await turn.result() };
@@ -776,7 +792,7 @@ describe("parallel: each message names its turn (#1339)", () => {
     messages
       .flatMap((message) => message.content)
       .find((part) => part.type === "tool-result" && part.toolCallId === toolCallId) as
-      | { status: string }
+      | { status: string; cause?: string }
       | undefined;
 
   test.each([
@@ -816,6 +832,34 @@ describe("parallel: each message names its turn (#1339)", () => {
     const { messages } = await stored();
     expect(resultOf(messages, A.toolCallId)?.status).toBe(status);
     expect(resultOf(messages, B.toolCallId)?.status).toBe(status);
+    if (status) {
+      expect(resultOf(messages, A.toolCallId)?.cause).toBe("refused");
+      expect(resultOf(messages, B.toolCallId)?.cause).toBe("refused");
+    }
+  });
+
+  test("the same answer sent twice ends the second as stale, and refuses nothing", async () => {
+    const { A, B, answer, stored, calls } = await twoParked([say("about is live")]);
+    await answer(B);
+    const before = calls();
+    const again = await answer(B);
+    expect(again.result.finishReason).toBe("error");
+    expect(again.result.error?.code).toBe("invalid_tool_result");
+    expect(calls()).toBe(before);
+    const { messages } = await stored();
+    expect(resultOf(messages, A.toolCallId)).toBeUndefined();
+    expect(messages.some((message) => message.pending?.some((call) => call.toolCallId === A.toolCallId))).toBe(true);
+  });
+
+  test("an answer to a sub-agent's question in turn B carries on B, and leaves A open", async () => {
+    const { A, B, answer, stored } = await twoParked([say("about is live")], { nestedB: true });
+    expect(B).toMatchObject({ toolCallId: "s1", path: ["cB"] });
+    const { turn, result } = await answer(B);
+    expect(result.text).toBe("about is live");
+    const { messages, byText } = await stored();
+    expect(turn.run.turn?.id).toBe(byText("publish about").id);
+    expect(resultOf(messages, "cB")?.status).toBe("ok");
+    expect(resultOf(messages, A.toolCallId)).toBeUndefined();
   });
 
   test("a stop ends the stopped run's turn, not the question another turn waits on", async () => {

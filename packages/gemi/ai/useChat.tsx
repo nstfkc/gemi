@@ -994,6 +994,12 @@ type Flight = {
    * answered with another run's tail.
    */
   asked?: string;
+  /**
+   * The turns this send carries on (#1355): the turns of the calls an
+   * answer answers, or `"new"` for a new message, which is a turn of its
+   * own. Unknown for an attach, or an answer to calls without a `turn`.
+   */
+  turns?: ReadonlySet<string> | "new";
 };
 
 /** How often a run announced mid-stream checks whether the chat is free to attach it. */
@@ -1303,7 +1309,33 @@ export function useChat<P extends keyof AgentRoutes>(
       const { base: url, extraBody, ifBusy: defaultIfBusy } = requestRef.current;
       // Only on a thread: a stateless chat has no run on the server to join or
       // run beside, so it supersedes as it always has.
-      const ifBusy = stateRef.current!.threadId ? (options.ifBusy ?? defaultIfBusy) : undefined;
+      const asked = stateRef.current!.threadId ? (options.ifBusy ?? defaultIfBusy) : undefined;
+      // The turns an answer carries on, when every answered call names one.
+      const held = stateRef.current!.pending as ChatPendingToolCall[];
+      const answerTurns = (() => {
+        if (!turn.toolResults?.length || turn.text || turn.files?.length) return undefined;
+        const turns = new Set<string>();
+        for (const result of turn.toolResults) {
+          const call = held.find((candidate) => candidate.toolCallId === result.toolCallId);
+          if (!call?.turn) return undefined;
+          turns.add(call.turn);
+        }
+        return turns;
+      })();
+      // An answer to another turn's question than the ones this chat is
+      // streaming (#1355) is that turn's to carry on: it runs beside them
+      // (`parallel`), and cuts nothing. Without this, answering A while B's
+      // answer streams stopped B.
+      const beside =
+        stateRef.current!.threadId !== undefined &&
+        answerTurns !== undefined &&
+        flightsRef.current.size > 0 &&
+        [...flightsRef.current].every(
+          (flight) =>
+            flight.turns === "new" ||
+            (flight.turns !== undefined && ![...flight.turns].some((id) => answerTurns.has(id))),
+        );
+      const ifBusy = beside ? "parallel" : asked;
       // Whether this send cuts off what this chat is streaming itself. Asked
       // for anything else, the server decides, and the streams show it.
       const cuts = ifBusy === undefined || ifBusy === "supersede";
@@ -1333,7 +1365,11 @@ export function useChat<P extends keyof AgentRoutes>(
       }
       const clientRunId = localId();
       const controller = new AbortController();
-      const flight: Flight = { controller, clientRunId };
+      const flight: Flight = {
+        controller,
+        clientRunId,
+        ...(answerTurns ? { turns: answerTurns } : turn.text || turn.files?.length ? { turns: "new" as const } : {}),
+      };
       const wasBusy = flightsRef.current.size > 0;
       flightsRef.current.add(flight);
 
@@ -1443,11 +1479,18 @@ export function useChat<P extends keyof AgentRoutes>(
         // server takes it (`settle`), so a failed answer can be sent again.
         // A new message beside other turns (`ifBusy: "parallel"`) leaves
         // their questions open on the server (#1355), so they stay here too.
+        // Asked otherwise, calls that name their turn stay until the server
+        // says what it did with them: refused (a `tool-result` frame each,
+        // which takes the card away), or left open because the app's
+        // `busyPolicy` ran the message beside them. Calls without a turn
+        // (an older server) go now, as before.
         pending: answered
           ? withAnswering(previous.pending, answered, true)
           : ifBusy === "parallel" && authored.length > 0
             ? previous.pending
-            : [],
+            : authored.length > 0 && stateRef.current!.threadId
+              ? previous.pending.filter((call: ChatPendingToolCall) => call.turn !== undefined)
+              : [],
       });
       // A reply still streaming beside this send keeps the chat `streaming`.
       if (!wasBusy || phaseRef.current !== "streaming") setPhaseSafe("submitted");
@@ -1545,7 +1588,9 @@ export function useChat<P extends keyof AgentRoutes>(
   // The answer turn that has gone out and not settled yet, so an answer given
   // while it flies (a double click) resolves with it instead of sending a
   // second turn that would supersede it (#1106).
-  const answering = useRef<{ results: ClientToolResult[]; flushed: Promise<void> } | null>(null);
+  // One per turn being answered: answers for two turns' questions fly side
+  // by side (#1355).
+  const answering = useRef<{ results: ClientToolResult[]; flushed: Promise<void> }[]>([]);
 
   const queueResult = useCallback(
     (result: ClientToolResult) => {
@@ -1572,11 +1617,11 @@ export function useChat<P extends keyof AgentRoutes>(
       const flushed: Promise<void> = Promise.resolve().then(async () => {
         const batch = queued.current!;
         queued.current = null;
-        answering.current = batch;
+        answering.current = [...answering.current, batch];
         try {
           await send({ toolResults: results });
         } finally {
-          if (answering.current === batch) answering.current = null;
+          answering.current = answering.current.filter((other) => other !== batch);
         }
       });
       queued.current = { results, flushed };
@@ -1676,16 +1721,19 @@ export function useChat<P extends keyof AgentRoutes>(
       toolCallId: string,
       build: (base: { toolCallId: string; signature: string; path?: string[] }) => ClientToolResult,
     ): Promise<void> => {
-      const inFlight = answering.current;
-      if (!queued.current && inFlight) {
+      const flying = answering.current;
+      if (!queued.current && flying.length > 0) {
         const call = (stateRef.current!.pending as ChatPendingToolCall[]).find(
           (candidate) => candidate.toolCallId === toolCallId,
         );
         if (call?.answering) {
           const result = resultFor(toolCallId, build);
           if (!result) return Promise.resolve();
-          const sent = inFlight.results.find((sentResult) => sentResult.toolCallId === toolCallId);
-          if (sent && JSON.stringify(sent) === JSON.stringify(result)) return inFlight.flushed;
+          const inFlight = flying.find((batch) =>
+            batch.results.some((sentResult) => sentResult.toolCallId === toolCallId),
+          );
+          const sent = inFlight?.results.find((sentResult) => sentResult.toolCallId === toolCallId);
+          if (inFlight && sent && JSON.stringify(sent) === JSON.stringify(result)) return inFlight.flushed;
           fail({
             code: "invalid_tool_result",
             message: sent

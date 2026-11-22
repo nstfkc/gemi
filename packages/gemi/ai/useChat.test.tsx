@@ -488,15 +488,16 @@ describe("questions of parallel turns (#1355)", () => {
     { seq: 4, event: { type: "run-end", runId, finishReason: "awaiting-input" } },
   ];
 
-  async function twoParked() {
-    const mounted = mount({ threadId: "th_9", attach: false, ifBusy: "parallel" });
+  async function twoParked(params: Record<string, unknown> = { ifBusy: "parallel" }) {
+    const mounted = mount({ threadId: "th_9", attach: false, ...params });
     fetchMock.mockResolvedValueOnce(streamed(parks("run_a", "ma", "turn_a", "tc_a")));
     await act(async () => {
       await mounted.box.api.sendMessage("publish home");
     });
     fetchMock.mockResolvedValueOnce(streamed(parks("run_b", "mb", "turn_b", "tc_b")));
     await act(async () => {
-      await mounted.box.api.sendMessage("publish about");
+      // Parallel on the hook, or for this message alone.
+      await mounted.box.api.sendMessage("publish about", { ifBusy: "parallel" });
     });
     return mounted;
   }
@@ -535,6 +536,89 @@ describe("questions of parallel turns (#1355)", () => {
     });
     expect(bodyOf(3).turn).toEqual({ toolResults: [{ toolCallId: "tc_a", signature: "sig_tc_a", approve: true }] });
     expect(box.api.pending).toEqual([]);
+  });
+
+  test("answering A while B's answer streams runs beside it: B is not cut or stopped", async () => {
+    // A default chat: no `ifBusy` on the hook.
+    const { box } = await twoParked({});
+    const b = controlled();
+    fetchMock.mockResolvedValueOnce(b.response);
+    let bDone!: Promise<void>;
+    await act(async () => {
+      bDone = box.api.approve("tc_b", true);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      b.push({ seq: 0, event: { type: "run-start", runId: "run_b2", threadId: "th_9" } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const before = calls().length;
+
+    await act(async () => {
+      await box.api.approve("tc_a", true);
+    });
+    const sent = calls().slice(before);
+    expect(sent.map(([url]) => url).some((url) => String(url).includes("stop"))).toBe(false);
+    expect(rawBodyOf(before).ifBusy).toBe("parallel");
+    expect(rawBodyOf(before).turn.toolResults.map((result: { toolCallId: string }) => result.toolCallId)).toEqual(["tc_a"]);
+
+    // B's stream is still read to its end.
+    await act(async () => {
+      b.push(
+        { seq: 1, event: { type: "message-start", messageId: "mb2", role: "assistant" } },
+        { seq: 2, event: { type: "text-delta", messageId: "mb2", delta: "about is live" } },
+        { seq: 3, event: { type: "message-end", messageId: "mb2", finishReason: "stop" } },
+        { seq: 4, event: { type: "run-end", runId: "run_b2", finishReason: "stop" } },
+      );
+      b.close();
+      await bDone;
+    });
+    expect(box.api.messages.some((message) => message.id === "mb2")).toBe(true);
+    expect(box.api.pending).toEqual([]);
+  });
+
+  test.each([
+    ["refuses them", true, []],
+    ["runs the message beside them (busyPolicy)", false, ["tc_a", "tc_b"]],
+  ])("a plain new message: the cards stay until the server %s", async (_name, refuses, left) => {
+    const { box } = await twoParked({});
+    const refusal = (seq: number, toolCallId: string): AgentStreamFrame => ({
+      seq,
+      event: {
+        type: "tool-result",
+        messageId: toolCallId === "tc_a" ? "ma" : "mb",
+        part: { type: "tool-result", toolCallId, name: "publish", status: "denied", cause: "refused" },
+      },
+    });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_c", threadId: "th_9" } },
+        ...(refuses ? [refusal(1, "tc_a"), refusal(2, "tc_b")] : []),
+        { seq: 3, event: { type: "message-start", messageId: "mc", role: "assistant" } },
+        { seq: 4, event: { type: "text-delta", messageId: "mc", delta: "Footer done." } },
+        { seq: 5, event: { type: "message-end", messageId: "mc", finishReason: "stop" } },
+        { seq: 6, event: { type: "run-end", runId: "run_c", finishReason: "stop" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("and the footer");
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(left);
+  });
+
+  test("an error frame keeps other turns' cards", async () => {
+    const { box } = await twoParked();
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_b2", threadId: "th_9" } },
+        { seq: 1, event: { type: "error", error: { code: "provider_error", message: "down", retryable: true } } },
+        { seq: 2, event: { type: "run-end", runId: "run_b2", finishReason: "error" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.approve("tc_b", true);
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a"]);
   });
 
   test("calls without a turn (an older server) settle together, as before", async () => {

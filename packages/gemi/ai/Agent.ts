@@ -3782,6 +3782,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private readonly onPending: "escalate" | "deny";
   /** How many tool calls were open when the client's turn arrived. */
   private openedWith = 0;
+  /** Whether an answer of the client's turn named a call that was open (#1355). */
+  private answeredOpen = false;
   /** Messages `join` accepted, waiting for the next model call to take them. */
   private readonly joins: {
     turn: AgentJoinTurn;
@@ -4618,8 +4620,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
   /**
    * Whether `message` (one holding an open call) belongs to a turn other
-   * than this run's (#1355). A run with no turn, or a message whose turn
-   * cannot be told, is not another's: the run settles it, as before.
+   * than this run's (#1355). Never for a sub-run or a run with no turn. A
+   * message's turn is its own `turn`, or for one stored without it, the turn
+   * start before it (`continuedTurn`); only an empty history has none, and
+   * then the run settles it, as before.
    */
   private othersTurn(message: AgentMessage): boolean {
     if (!this.turn || this.depth > 0) return false;
@@ -6780,9 +6784,18 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // parallel runs, two turns can each be waiting on a question. A request
     // answering calls of both carries on the turn of the first answer it
     // lists.
-    const answered = answers
-      .map((toolCallId) => open.find(({ call }) => call.toolCallId === toolCallId))
+    //
+    // Found by the call this run made: the answer's own id for a top-level
+    // call, the host (`path`) for a sub-agent's question.
+    const answered = (turn?.toolResults ?? [])
+      .map((answer) => {
+        const below = pathBelow(answer.path, this.pathPrefix);
+        if (below === null) return undefined;
+        const host = below[0] ?? answer.toolCallId;
+        return open.find(({ call }) => call.toolCallId === host);
+      })
       .find((entry) => entry !== undefined);
+    this.answeredOpen = answered !== undefined;
     const id = opening?.id ?? this.continuedTurn((answered ?? open[0])?.message);
     // An empty thread continued with nothing has no turn to name.
     this.turn = id
@@ -6942,12 +6955,20 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // is waiting on, and a parallel run's message does not either. Left
       // open, the call keeps its `pending`, and the provider's request
       // builder pairs it for the model as for any call still running.
-      const settled = open.filter(
-        (entry) =>
-          answered.has(entry.call.toolCallId) ||
-          !this.othersTurn(entry.message) ||
-          (opening !== undefined && this.params.keepOtherTurnsOpen !== true),
-      );
+      //
+      // A request of answers alone that matched no open call (the same answer
+      // sent twice, a retried submit, an id that was never asked) settles
+      // nothing: it has no turn of its own to settle, and borrowing another
+      // turn's would refuse a question nobody answered. It ends as stale.
+      const stale = this.answersOnly() && !this.answeredOpen;
+      const settled = stale
+        ? []
+        : open.filter(
+            (entry) =>
+              answered.has(entry.call.toolCallId) ||
+              !this.othersTurn(entry.message) ||
+              (opening !== undefined && this.params.keepOtherTurnsOpen !== true),
+          );
       for (const entry of settled) {
         if (answered.has(entry.call.toolCallId)) continue;
         // The turn said something else. That is a refusal — the honest reading,
@@ -7164,9 +7185,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * history the turn arrived with.
    */
   private answersOnlyStale(): boolean {
+    return this.answersOnly() && (this.openedWith === 0 || !this.answeredOpen);
+  }
+
+  /** Whether the client's turn is answers and nothing else. */
+  private answersOnly(): boolean {
     const turn = this.params.turn;
-    if (!turn?.toolResults?.length || turn.text || turn.files?.length) return false;
-    return this.openedWith === 0;
+    return Boolean(turn?.toolResults?.length) && !turn?.text && !turn?.files?.length && !(this.depth === 0 && this.params.event);
   }
 
   /**

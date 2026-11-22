@@ -732,7 +732,12 @@ function reduce<T extends ToolShapes, O>(
       // Clearing `pending` here is what keeps "pending is non-empty exactly
       // when the UI is awaiting input" true: a run that errored is not holding
       // a question any more, it is holding a failure.
-      return { ...state, error: event.error, pending: [] };
+      //
+      // Calls that name their turn are kept (#1355): they are other turns'
+      // questions, still open on the server. A run's own turn holds none by
+      // the time it fails, since it settled them on the way in, and
+      // `awaiting-input` is terminal.
+      return { ...state, error: event.error, pending: state.pending.filter((call) => call.turn !== undefined) };
 
     case "run-end":
       return {
