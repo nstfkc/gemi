@@ -43,6 +43,7 @@ describe("the boot warning (#1341)", () => {
 
   test("a chosen driver, a memory queue, or a non-production process is not", async () => {
     vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("SECRET", "s");
     // Chosen on purpose: one instance, say.
     await boot({ queue: { driver: "database" }, ratelimiter: { driver: new InMemoryRateLimiter() } });
     await boot({ queue: { driver: () => ({}) } }, {});
@@ -54,6 +55,32 @@ describe("the boot warning (#1341)", () => {
     await boot({});
     vi.stubEnv("NODE_ENV", "development");
     await boot({ queue: { driver: "database" } });
+    expect(warning).not.toHaveBeenCalled();
+  });
+});
+
+describe("the database limiter's secret (#1363)", () => {
+  const database = (options = {}) => ({
+    ratelimiter: { driver: new DatabaseRateLimiter({ store: new MemoryLockStore(), ...options }) },
+  });
+
+  test("no SECRET fails a production boot, and warns elsewhere", async () => {
+    vi.stubEnv("SECRET", "");
+    vi.stubEnv("NODE_ENV", "production");
+    await expect(boot(database())).rejects.toThrow("SECRET is not set");
+    vi.stubEnv("NODE_ENV", "development");
+    await boot(database());
+    expect(warning).toHaveBeenCalledOnce();
+    expect(warning.mock.calls[0]![0]).toContain("SECRET is not set");
+  });
+
+  test("a SECRET, a secret of its own, or no hashing boots quietly", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("SECRET", "");
+    await boot(database({ hashKeys: "own" }));
+    await boot(database({ hashKeys: false }));
+    vi.stubEnv("SECRET", "s");
+    await boot(database());
     expect(warning).not.toHaveBeenCalled();
   });
 });

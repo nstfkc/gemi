@@ -3972,12 +3972,15 @@ await RateLimiter.enforce(`starts:visitor:${visitor.id}`, { limit: 3, window: 86
 | `store` | a `DatabaseLockStore` on the default connection | another `LockStore`, or `() => LockStore` built on the first call |
 | `pruneEvery` | `1000` | every this many calls, delete ended windows in the background; `0` turns it off |
 | `pruneBatch` | `1000` | the most rows one prune deletes |
+| `hashKeys` | `true` | store each key as its HMAC-SHA256 under `SECRET`; a string keys with that secret instead, `false` stores keys as given |
+
+**What is stored.** Each key gets one row: the prefix in clear plus an HMAC of the key (`ratelimit:#3f9a…`), a count and the window's end. The key itself never reaches the database, so a client address (`RateLimitMiddleware` keys on it) or an email (the email-code limits) isn't kept. A row stays until its window ends and the next prune deletes it: the window plus up to `pruneEvery` calls, or your cron interval with `pruneEvery: 0`. For a daily limit that can be more than a day. Without `SECRET` (and no `hashKeys` secret given), a production boot fails, a development boot warns, and every limited call fails rather than storing keys in clear. Set a `SECRET` in test environments too. Changing `SECRET` starts every budget again.
 
 Unlike the other two drivers it counts a **fixed window**: the window starts at the first call after the last window ended and lasts `window`. A client that spends its whole budget at the end of one window gets a new budget when the next one starts. That suits quotas (so many a day). For a burst limit on a busy route, the sliding window of the memory and Redis drivers is smoother.
 
 Each call is one guarded write, so concurrent calls never admit more than the limit. On Postgres and SQLite that is a single upsert (one round trip), with one more read when it refuses. On MySQL it is three statements: insert the row if missing, update it, read it back. `allowed` is exact everywhere. `remaining` is exact for an allowed call on Postgres and SQLite; on MySQL, and `retryAfter` on a refusal everywhere, are read just after the decision and may already include other instances' calls, so treat them as hints.
 
-Costs are whole numbers (a fractional `cost` is rounded up). A `cost` above the limit is always refused, and a `cost` of `0` always passes: it reads the budget without checking it. A key longer than 150 characters is stored as its SHA-256. A database error rejects the call, so the request fails rather than going unlimited.
+Costs are whole numbers (a fractional `cost` is rounded up). A `cost` above the limit is always refused, and a `cost` of `0` always passes: it reads the budget without checking it. With `hashKeys: false`, a key longer than 150 characters is stored as its SHA-256. A database error rejects the call, so the request fails rather than going unlimited.
 
 **Old windows are deleted as it goes.** Each key is one row, and a per-IP limit sees a new key for every new address, so every `pruneEvery` calls the limiter deletes up to `pruneBatch` windows that have ended, in the background. It deletes only rows under its own `prefix` (compared as a string, not a `LIKE` pattern), never a lock's. To prune on a schedule instead, set `pruneEvery: 0` and call `prune()` from a cron job:
 

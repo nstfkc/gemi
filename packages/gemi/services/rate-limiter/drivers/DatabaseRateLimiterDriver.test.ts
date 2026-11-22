@@ -43,7 +43,7 @@ async function prepare(
     dialect,
     table,
     limiter(options = {}) {
-      return new DatabaseRateLimiter({ ...options, store: this.store() });
+      return new DatabaseRateLimiter({ hashKeys: "test-secret", ...options, store: this.store() });
     },
     store() {
       const sql = dialect === "sqlite" ? new SQL(url) : new SQL(url, { max: 2 });
@@ -125,7 +125,7 @@ for (const backend of backends) {
       const db = await backend.open();
       try {
         // `rl_` would match `rlX` as a LIKE pattern; it must not here.
-        const limiter = db.limiter({ prefix: "rl_", pruneEvery: 0 });
+        const limiter = db.limiter({ prefix: "rl_", pruneEvery: 0, hashKeys: false });
         for (const key of ["a", "b", "c"]) await limiter.consume({ key, limit: 5, window: 100 });
         await limiter.consume({ key: "open", limit: 5, window: 60_000 });
         const store = db.store();
@@ -161,10 +161,37 @@ for (const backend of backends) {
       }
     });
 
+    test("keys are stored hashed: no row holds the address or email it counts", async () => {
+      const db = await backend.open();
+      try {
+        const limiter = db.limiter({ prefix: "rl:", pruneEvery: 0 });
+        const keys = ["203.0.113.7:/api/auth/email-code", "email-code:someone@example.test"];
+        for (const key of keys) {
+          expect((await limiter.consume({ key, limit: 1, window: 100 })).allowed).toBe(true);
+          expect((await limiter.consume({ key, limit: 1, window: 100 })).allowed).toBe(false);
+        }
+        const names = await db.names();
+        expect(names).toHaveLength(2);
+        for (const name of names) {
+          expect(name.startsWith("rl:#")).toBe(true);
+          for (const raw of ["203.0.113.7", "someone", "example.test", "email-code"]) expect(name).not.toContain(raw);
+        }
+        // Another secret, other rows: the hash is keyed, not a bare SHA-256.
+        await db.limiter({ prefix: "rl:", pruneEvery: 0, hashKeys: "another" }).consume({ key: keys[0]!, limit: 1, window: 100 });
+        expect(await db.names()).toHaveLength(3);
+        // Prune finds them by the prefix, as before.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        expect(await limiter.prune()).toBe(3);
+        expect(await db.names()).toEqual([]);
+      } finally {
+        await db.dispose();
+      }
+    });
+
     test("a key longer than the name column is stored by its hash, and still counted apart", async () => {
       const db = await backend.open();
       try {
-        const limiter = db.limiter();
+        const limiter = db.limiter({ hashKeys: false });
         const long = (suffix: string) => ({ key: `${"x".repeat(400)}${suffix}`, limit: 1, window: 60_000 });
         expect((await limiter.consume(long("a"))).allowed).toBe(true);
         expect((await limiter.consume(long("a"))).allowed).toBe(false);
@@ -179,7 +206,7 @@ for (const backend of backends) {
 describe("DatabaseRateLimiter", () => {
   test("keeps its rows apart from locks with a prefix, and rounds a fractional cost up", async () => {
     const store = new MemoryLockStore();
-    const limiter = new DatabaseRateLimiter({ store, prefix: "rl:" });
+    const limiter = new DatabaseRateLimiter({ store, prefix: "rl:", hashKeys: false });
     expect(await limiter.consume({ key: "k", limit: 2, window: 60_000, cost: 1.2 })).toMatchObject({
       allowed: true,
       remaining: 0,
@@ -189,9 +216,33 @@ describe("DatabaseRateLimiter", () => {
     expect(await store.hit("rl:k", 2, 60_000)).toMatchObject({ allowed: false });
   });
 
+  test("by default keys are keyed with SECRET, and an unset SECRET fails the call", async () => {
+    const previous = process.env.SECRET;
+    try {
+      delete process.env.SECRET;
+      const limiter = new DatabaseRateLimiter({ store: new MemoryLockStore() });
+      await expect(limiter.consume({ key: "k", limit: 1, window: 1_000 })).rejects.toThrow("SECRET");
+      process.env.SECRET = "app-secret";
+      const store = new MemoryLockStore();
+      const keyed = new DatabaseRateLimiter({ store });
+      const explicit = new DatabaseRateLimiter({ store, hashKeys: "app-secret" });
+      expect((await keyed.consume({ key: "k", limit: 1, window: 1_000 })).allowed).toBe(true);
+      // The same row: the default is SECRET.
+      expect((await explicit.consume({ key: "k", limit: 1, window: 1_000 })).allowed).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.SECRET;
+      else process.env.SECRET = previous;
+    }
+  });
+
+  test("an empty hashKeys secret is refused at construction", () => {
+    expect(() => new DatabaseRateLimiter({ store: new MemoryLockStore(), hashKeys: "" })).toThrow("empty");
+  });
+
   test("a store given as a function is built on the first call, once", async () => {
     let built = 0;
     const limiter = new DatabaseRateLimiter({
+      hashKeys: "s",
       store: () => {
         built++;
         return new MemoryLockStore();
