@@ -2,7 +2,7 @@ import type { SQL } from "bun";
 
 import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
-import { runOnConnection, withTransaction } from "../../orm/context";
+import { queuedOnSqlite, runOnConnection, withTransaction } from "../../orm/context";
 import { LockLostError, type LockStore } from "./LockStore";
 
 export type DatabaseLockStoreOptions = {
@@ -191,12 +191,15 @@ export class DatabaseLockStore implements LockStore {
 
     const connection = this.connection;
     if (connection === undefined) {
-      return (await this.sql.begin((tx) => body(tx))) as T;
+      const begin = async () => (await this.sql.begin((tx) => body(tx))) as T;
+      // In the pool's queue on SQLite, with every other transaction on it (#1362).
+      return this.dialect === "sqlite" ? queuedOnSqlite(this.sql, begin) : begin();
     }
     // An ORM transaction on the store's own connection, so model writes in
     // `fn` join it and commit only while the hold is current.
     return withTransaction(this.sql, (tx) => runOnConnection(connection, () => body(tx)), {
       connection,
+      dialect: this.dialect,
     });
   }
 

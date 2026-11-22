@@ -1620,6 +1620,32 @@ rollback on throw.
 Nesting is a **savepoint**: an inner failure rolls back to the savepoint and leaves the outer
 transaction usable.
 
+**On SQLite, transactions queue.** Bun's SQLite client runs every statement on one connection,
+where a second `BEGIN` while a transaction is open fails ("cannot start a transaction within a
+transaction"). So a `Model.transaction` or `DB.transaction` that starts while another one is
+open on the same connection, from another request in the process, waits for it, and starts once
+it commits or rolls back. gemi's database stores on the same connection (locks and the database
+rate limiter, agent threads, agent jobs) take the same turns. SQLite allows one writer at a time anyway, so this changes the order,
+not the throughput. Savepoints don't queue, and the next transaction starts at the commit,
+before the after-commit callbacks run, so a callback can open a transaction of its own.
+
+- Several processes on one database file aren't queued against each other: SQLite's own locking
+  (`SQLITE_BUSY`) applies there.
+- A transaction started from inside an open one on the same connection, but outside its scope,
+  waits its turn like any other: it may be work the open transaction doesn't wait for (a
+  `setTimeout`, an un-awaited call). If it is still waiting on the transaction it started inside
+  5 seconds later, the open transaction must be waiting on it, so it fails with
+  `TransactionQueueDeadlockError` instead of waiting forever. That's a store's own `begin`, or an
+  in-process API call or channel message (which leave the caller's scope on purpose), awaited
+  inside a transaction. Run that work after the commit (`afterCommit`), or inside the transaction.
+- A transaction that waits on one started elsewhere that queued behind it (a shared promise
+  another request started outside any transaction) can't be told apart, and waits. In
+  development, a transaction that has waited in the queue for 5 seconds logs a warning with
+  where it was queued. The 5 seconds are fixed; `database.slowTransactionThreshold: false` turns
+  the warning off.
+- Plain statements outside a transaction don't queue, and on SQLite they run inside whichever
+  transaction is open on the connection ([#1375](https://github.com/nstfkc/gemi/issues/1375)).
+
 ### Two things that will bite you
 
 **Catching an error inside a transaction, on Postgres.** Any failed statement aborts the whole

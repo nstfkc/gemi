@@ -166,9 +166,11 @@ for (const backend of backends) {
       try {
         const limiter = db.limiter({ prefix: "rl:", pruneEvery: 0 });
         const keys = ["203.0.113.7:/api/auth/email-code", "email-code:someone@example.test"];
+        // A second-long window, not 100ms: a slow CI step between the two
+        // consumes must not end it.
         for (const key of keys) {
-          expect((await limiter.consume({ key, limit: 1, window: 100 })).allowed).toBe(true);
-          expect((await limiter.consume({ key, limit: 1, window: 100 })).allowed).toBe(false);
+          expect((await limiter.consume({ key, limit: 1, window: 1_000 })).allowed).toBe(true);
+          expect((await limiter.consume({ key, limit: 1, window: 1_000 })).allowed).toBe(false);
         }
         const names = await db.names();
         expect(names).toHaveLength(2);
@@ -177,10 +179,10 @@ for (const backend of backends) {
           for (const raw of ["203.0.113.7", "someone", "example.test", "email-code"]) expect(name).not.toContain(raw);
         }
         // Another secret, other rows: the hash is keyed, not a bare SHA-256.
-        await db.limiter({ prefix: "rl:", pruneEvery: 0, hashKeys: "another" }).consume({ key: keys[0]!, limit: 1, window: 100 });
+        await db.limiter({ prefix: "rl:", pruneEvery: 0, hashKeys: "another" }).consume({ key: keys[0]!, limit: 1, window: 1_000 });
         expect(await db.names()).toHaveLength(3);
         // Prune finds them by the prefix, as before.
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
         expect(await limiter.prune()).toBe(3);
         expect(await db.names()).toEqual([]);
       } finally {

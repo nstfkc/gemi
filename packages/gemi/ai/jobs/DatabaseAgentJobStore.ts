@@ -98,7 +98,7 @@ export class DatabaseAgentJobStore implements AgentJobStore {
     // A store built from a bare `{ sql, dialect }` has no connection name, so
     // it cannot tell its own transaction from another one, and runs without.
     if (this.connection === undefined || this.joinable()) return fn();
-    return withTransaction(this.sql, () => fn(), { connection: this.connection });
+    return withTransaction(this.sql, () => fn(), { connection: this.connection, dialect: this.dialect });
   }
 
   async create(job: NewAgentJobRecord): Promise<AgentJobRecord> {

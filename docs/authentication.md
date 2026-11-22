@@ -166,8 +166,8 @@ export default defineAuthConfig({
   never picked up the new cookie — deletes that session too. Once it no longer resolves to
   it, it no longer revokes it either: only the new token can then.
 - **A sign-out and a conversion never interleave.** Both run in one transaction under a lock
-  on the old token (`UserProvider.withLegacySessionLock`: an advisory lock on Postgres, a
-  queue in the process on SQLite), and a conversion writes the new session only if it is the
+  on the old token (`UserProvider.withLegacySessionLock`: an advisory lock on Postgres, the
+  transaction queue on SQLite), and a conversion writes the new session only if it is the
   one that deleted the old row. A sign-out that lands while a request is converting the same
   token either ends the session that request wrote or leaves it nothing to write.
 - **Concurrent requests share one session.** Requests converting the same token at once all
@@ -741,10 +741,9 @@ export default defineAuthConfig({
   Two verifies at once for a new address (a double submit, a retry) create the user once:
   with an issued code the second is `"invalid_code"` (the code is spent); with the fixed
   development code it signs in to the same user, with `isNewUser: false`. `onUserCreated`
-  runs once. On SQLite, gemi's sign-in transactions queue one after another in the process,
-  each releasing the next at its commit. The queue doesn't cover the app's own
-  `Model.transaction` calls in other requests, or several processes on one database file
-  ([#1362](https://github.com/nstfkc/gemi/issues/1362)).
+  runs once. On SQLite, transactions queue one after another in the process, each releasing
+  the next at its commit ([Transactions](./orm.md#transactions)). The queue doesn't cover
+  several processes on one database file.
 
 Both answer 404 unless `enabled`. On the client:
 

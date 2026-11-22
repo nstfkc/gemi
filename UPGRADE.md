@@ -1,3 +1,21 @@
+# 0.237.1
+
+## SQLite transactions queue instead of failing at `BEGIN` (#1362)
+
+**Fix (patch version).** On SQLite, a `Model.transaction` or `DB.transaction` that started while another one was open on the same connection (another request in the process) failed with `SQLiteError: cannot start a transaction within a transaction`. Now it waits and starts once the open one commits or rolls back.
+- The next one starts at the commit, before the after-commit callbacks, so a callback can open a transaction of its own.
+- Savepoints (nested transactions) don't queue.
+- gemi's database stores on the same connection take the same turns: the lock store, which also backs the database rate limiter, the agent store and the agent job store.
+- `UserProvider.transaction` and `withLegacySessionLock` used their own queue for this (#1356). They now use the ORM's.
+
+Postgres and MySQL are unchanged.
+
+A transaction started from inside an open one on the same connection, but outside its scope, waits its turn too, in case the open one doesn't wait for it. If it's still waiting on that transaction 5 seconds later, it fails with `TransactionQueueDeadlockError` instead of hanging. That's a store's own `begin`, or an in-process API call or channel message, awaited inside a transaction. Before, it failed at `BEGIN` at once. In development, any transaction that waits in the queue for 5 seconds logs a warning.
+
+What to check:
+- On SQLite, a transaction that awaits work which queued its own top-level transaction elsewhere (a shared promise started outside any transaction) waits for it. Look for the development warning.
+- Plain statements outside a transaction still run inside whichever transaction is open on the connection (#1375).
+
 # 0.237.0
 
 ## `usage.costUsd`: each model call priced when it finishes (#1146)
