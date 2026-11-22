@@ -40,8 +40,9 @@ export type ModelPrice = {
   /** For `Usage.cacheWriteInputTokens`: a contract rate, or a longer cache
    *  TTL. Wins over the provider's factor. */
   cacheWriteInput?: number;
-  /** For image tokens (`Usage.imageInputTokens` / `imageOutputTokens`);
-   *  they're priced as text when these are absent. */
+  /** For image tokens (`Usage.imageInputTokens` / `imageOutputTokens`).
+   *  Without them a call with image tokens has `Usage.costUsd` `null`, and a
+   *  meter prices them as text. */
   imageInput?: number;
   imageOutput?: number;
 };
@@ -125,15 +126,18 @@ class Meter implements UsageMeter {
   /** The meters around this one, outermost first, and this one last. */
   readonly stack: readonly Meter[];
   readonly pricing: UsagePricing | undefined;
+  /** Where an unpriced model is told for calls inside: a run's log. */
+  readonly warn: CostWarn | undefined;
   private usage: UsageType = emptyUsage();
   private cost = 0;
   private readonly byModel = new Map<string, UsageLine>();
   private readonly byLabel = new Map<string, UsageLine>();
   private readonly unpriced = new Set<string>();
 
-  constructor(parents: readonly Meter[], options: UsageMeterOptions) {
+  constructor(parents: readonly Meter[], options: UsageMeterOptions & { warn?: CostWarn }) {
     this.label = options.label;
     this.pricing = options.pricing;
+    this.warn = options.warn;
     this.stack = [...parents, this];
   }
 
@@ -211,7 +215,7 @@ function openStack(): readonly Meter[] {
  * anything yet: an agent run opens its own with this, runs its loop in it
  * (`run`) and closes it when the loop settles. `Usage.meter` is the outside.
  */
-export function openMeter(options: UsageMeterOptions = {}): {
+export function openMeter(options: UsageMeterOptions & { warn?: CostWarn } = {}): {
   meter: UsageMeter;
   run: <T>(fn: () => T) => T;
   close: () => void;
@@ -299,10 +303,11 @@ export type CostWarn = (message: string, extra: Record<string, unknown>) => void
  * `usage` with `costUsd` (#1146), priced at the `ModelPrices` table in
  * effect, with no guessing:
  *
- * - `null` for a model the table lacks, and for a call with cache reads (or
- *   writes) the table has no price for: no `cachedInput` (no
- *   `cacheWriteInput`, and no provider factor). Warned once per model and
- *   reason.
+ * - `null` for a model the table lacks, and for a call with tokens the table
+ *   has no price for: cache reads without `cachedInput`, cache writes without
+ *   `cacheWriteInput` or a provider factor, image tokens without `imageInput`
+ *   / `imageOutput`. Warned once per model and reason, to the given log, else
+ *   the innermost run's log around the call, else the console.
  * - `null` under a pricing function: its unit is the app's, not USD, and a
  *   run that mixes it with table-priced calls must not answer a partial sum.
  * - Unchanged with no pricing at all.
@@ -327,13 +332,20 @@ export function withCost(
       ? "a cachedInput price"
       : (usage.cacheWriteInputTokens ?? 0) > 0 && price.cacheWriteInput === undefined && factor === undefined
         ? "a cacheWriteInput price"
-        : undefined;
+        : (usage.imageInputTokens ?? 0) > 0 && price.imageInput === undefined
+          ? "an imageInput price"
+          : (usage.imageOutputTokens ?? 0) > 0 && price.imageOutput === undefined
+            ? "an imageOutput price"
+            : undefined;
   if (missing) {
     const key = `${model}\u0000${missing}`;
     if (!warnedUnpriced.has(key)) {
       warnedUnpriced.add(key);
       const message = `[gemi/ai] no ${missing} for model "${model}" in Usage.configure({ pricing }): its usage.costUsd is null`;
-      if (warn) warn(message, { model });
+      // The given log, else the innermost run's around the call (a tool's
+      // `generate` or image), else the console.
+      const sink = warn ?? [...openStack()].reverse().find((meter) => meter.warn)?.warn;
+      if (sink) sink(message, { model });
       else console.warn(message);
     }
     return { ...usage, costUsd: null };
