@@ -1,3 +1,34 @@
+# 0.241.0
+
+## The local storage driver refuses symbolic links inside the store (#1324)
+
+**Behaviour change (minor version).** See [File Storage: symbolic links](docs/file-storage.md#symbolic-links).
+
+`FileSystemDriver` now checks every existing entry between its storage folder
+and the object. A link at the object's name or in any parent directory is
+refused, whether its target is inside the store, outside it, or missing.
+
+- `read()`, `fetch()` and `size()` reject with `FileNotFoundError`, so a stream
+  route answers 404. Before, a link such as `covers/latest.jpg` was served even
+  though `objects()` never listed it.
+- `put()`, `putStream()` and `delete()` reject. Nothing is written or removed
+  through the link, and the link itself is left in place.
+- `put()` now writes a temporary file next to the target and renames it into
+  place, as `putStream()` already did. A failed or aborted `put()` leaves the
+  previous version untouched, and replacing an object gives it a new inode.
+- A storage folder that is a link to a missing directory now fails writes with
+  `The storage folder "…" is a symbolic link to a missing directory` instead
+  of `EEXIST`.
+- `objects()` still skips links. A prefix whose directory is or passes through
+  a link now lists nothing, and `deletePrefix()` refuses it. Links found inside a
+  prefix are left in place, with their targets.
+- The storage folder itself may still be a link, for example a `storage` link to
+  a directory shared between releases. Use that layout instead of links inside
+  the store. Replace aliases inside the store with copies.
+- `fetch()` of a missing object now rejects with `FileNotFoundError`. Before, it
+  answered `200` and the body failed once it was read.
+  The file is open once `fetch()` resolves, so consume or cancel the body.
+
 # 0.240.0
 
 ## A reply's questions stay open until each one is answered (#1380)

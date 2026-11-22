@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { FileNotFoundError } from "../../../http/errors";
 import { FileSystemDriver } from "./FileSystemDriver";
@@ -364,5 +364,297 @@ describe("FileSystemDriver.putStream()", () => {
     await expect(driver.putStream({ name: "../x.txt", body: streamOf("x") })).rejects.toThrow(
       /outside the storage folder/,
     );
+  });
+});
+
+/**
+ * Symbolic links below the storage folder (#1324).
+ *
+ * A link at the object name or in any parent directory is refused, wherever
+ * it points: reads see a missing object, writes and deletes reject and leave
+ * both the link and its target as they were. Only the storage folder itself
+ * may be a link.
+ */
+describe("FileSystemDriver symbolic links", () => {
+  let base: string;
+  let store: string;
+  let outside: string;
+  let driver: FileSystemDriver;
+
+  beforeEach(async () => {
+    base = await mkdtemp(join(tmpdir(), "gemi-fs-links-"));
+    store = join(base, "store");
+    outside = join(base, "outside");
+    await mkdir(join(store, "real", "sub"), { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(store, "real", "a.txt"), "inside");
+    await writeFile(join(store, "real", "sub", "b.txt"), "nested");
+    await writeFile(join(outside, "secret.txt"), "secret");
+    driver = new FileSystemDriver(store);
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  async function names(prefix: string) {
+    const out: string[] = [];
+    for await (const object of driver.objects(prefix)) out.push(object.name);
+    return out;
+  }
+
+  const streamOf = (text: string) => new Blob([text]).stream();
+
+  // `link` is the entry under the store that is a link; `target` is the file
+  // the name would reach through it (missing for the dangling link).
+  const cases = [
+    {
+      label: "a linked file whose target is inside the store",
+      name: "latest.txt",
+      setup: () => symlink(join(store, "real", "a.txt"), join(store, "latest.txt")),
+      link: "latest.txt",
+      target: () => join(store, "real", "a.txt"),
+      targetContent: "inside",
+    },
+    {
+      label: "a linked parent directory inside the store",
+      name: "linked/a.txt",
+      setup: () => symlink(join(store, "real"), join(store, "linked")),
+      link: "linked",
+      target: () => join(store, "real", "a.txt"),
+      targetContent: "inside",
+    },
+    {
+      label: "a dangling link",
+      name: "dangling.txt",
+      setup: () => symlink(join(store, "nowhere.txt"), join(store, "dangling.txt")),
+      link: "dangling.txt",
+      target: () => join(store, "nowhere.txt"),
+      targetContent: null,
+    },
+    {
+      label: "a linked file pointing outside the store",
+      name: "out.txt",
+      setup: () => symlink(join(outside, "secret.txt"), join(store, "out.txt")),
+      link: "out.txt",
+      target: () => join(outside, "secret.txt"),
+      targetContent: "secret",
+    },
+    {
+      label: "a linked parent directory pointing outside the store",
+      name: "outdir/secret.txt",
+      setup: () => symlink(outside, join(store, "outdir")),
+      link: "outdir",
+      target: () => join(outside, "secret.txt"),
+      targetContent: "secret",
+    },
+  ];
+
+  async function expectUntouched(link: string, target: string, content: string | null) {
+    expect((await lstat(join(store, link))).isSymbolicLink()).toBe(true);
+    if (content === null) {
+      expect(existsSync(target)).toBe(false);
+    } else {
+      expect(await readFile(target, "utf8")).toBe(content);
+    }
+  }
+
+  for (const { label, name, setup, link, target, targetContent } of cases) {
+    describe(label, () => {
+      beforeEach(async () => {
+        await setup();
+      });
+
+      test("reads, fetches and size lookups see a missing object", async () => {
+        await expect(driver.read(name)).rejects.toBeInstanceOf(FileNotFoundError);
+        await expect(driver.fetch(name)).rejects.toBeInstanceOf(FileNotFoundError);
+        await expect(driver.size(name)).rejects.toBeInstanceOf(FileNotFoundError);
+      });
+
+      test("put() is refused and writes nothing through the link", async () => {
+        await expect(driver.put({ name, body: new Blob(["overwritten"]) })).rejects.toThrow(/symbolic link/);
+        await expectUntouched(link, target(), targetContent);
+      });
+
+      test("putStream() is refused before a temporary file exists", async () => {
+        const before = await readdir(dirname(target())).catch(() => []);
+        await expect(driver.putStream({ name, body: streamOf("overwritten") })).rejects.toThrow(/symbolic link/);
+        await expectUntouched(link, target(), targetContent);
+        expect(await readdir(dirname(target())).catch(() => [])).toEqual(before);
+        expect((await readdir(store)).some((entry) => entry.endsWith(".partial"))).toBe(false);
+      });
+
+      test("delete() is refused and removes neither the link nor its target", async () => {
+        await expect(driver.delete(name)).rejects.toThrow(/symbolic link/);
+        await expectUntouched(link, target(), targetContent);
+      });
+
+      test("listing skips the link", async () => {
+        expect(await names("")).toEqual(["real/a.txt", "real/sub/b.txt"]);
+        expect(await names(name)).toEqual([]);
+      });
+    });
+  }
+
+  test("a prefix whose directory is a link lists nothing and is refused for deletion", async () => {
+    await symlink(join(store, "real"), join(store, "linked"));
+    await symlink(outside, join(store, "outdir"));
+    await symlink(join(store, "real", "sub"), join(store, "real", "sublink"));
+
+    for (const prefix of ["linked/", "linked/sub/", "outdir/", "real/sublink/"]) {
+      expect(await names(prefix)).toEqual([]);
+      await expect(driver.deletePrefix(prefix)).rejects.toThrow(/symbolic link/);
+    }
+    expect(await names("")).toEqual(["real/a.txt", "real/sub/b.txt"]);
+    expect(await readFile(join(outside, "secret.txt"), "utf8")).toBe("secret");
+  });
+
+  test("deletePrefix leaves links found during the walk, and their targets, in place", async () => {
+    await mkdir(join(store, "mixed"));
+    await writeFile(join(store, "mixed", "own.txt"), "own");
+    await symlink(join(outside, "secret.txt"), join(store, "mixed", "file-link.txt"));
+    await symlink(outside, join(store, "mixed", "dir-link"));
+    await symlink(join(store, "real", "a.txt"), join(store, "mixed", "inside-link.txt"));
+
+    expect(await names("mixed/")).toEqual(["mixed/own.txt"]);
+    expect(await driver.deletePrefix("mixed/")).toBe(1);
+
+    expect(existsSync(join(store, "mixed", "own.txt"))).toBe(false);
+    for (const entry of ["file-link.txt", "dir-link", "inside-link.txt"]) {
+      expect((await lstat(join(store, "mixed", entry))).isSymbolicLink()).toBe(true);
+    }
+    expect(await readFile(join(outside, "secret.txt"), "utf8")).toBe("secret");
+    expect(await readFile(join(store, "real", "a.txt"), "utf8")).toBe("inside");
+  });
+
+  test("putStream() refuses a link that appears at the name while the stream runs", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await symlink(join(outside, "secret.txt"), join(store, "late.txt"));
+        controller.enqueue(new TextEncoder().encode("overwritten"));
+        controller.close();
+      },
+    });
+
+    await expect(driver.putStream({ name: "late.txt", body })).rejects.toThrow(/symbolic link/);
+    expect((await lstat(join(store, "late.txt"))).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(outside, "secret.txt"), "utf8")).toBe("secret");
+    expect((await readdir(store)).some((entry) => entry.endsWith(".partial"))).toBe(false);
+  });
+
+  test("a storage folder that is itself a link works like a plain one", async () => {
+    const shared = join(base, "shared");
+    await mkdir(shared);
+    await symlink(shared, join(base, "current"));
+    const linkedRoot = new FileSystemDriver(join(base, "current"));
+
+    await linkedRoot.put({ name: "images/a.txt", body: new Blob(["a"]) });
+    await linkedRoot.putStream({ name: "images/b.txt", body: streamOf("b") });
+
+    expect(await readFile(join(shared, "images", "a.txt"), "utf8")).toBe("a");
+    expect(await (await linkedRoot.fetch("images/b.txt")).text()).toBe("b");
+    expect(await linkedRoot.size("images/a.txt")).toBe(1);
+    const listed: string[] = [];
+    for await (const object of linkedRoot.objects("images/")) listed.push(object.name);
+    expect(listed).toEqual(["images/a.txt", "images/b.txt"]);
+
+    await linkedRoot.delete("images/a.txt");
+    expect(existsSync(join(shared, "images", "a.txt"))).toBe(false);
+    expect(await linkedRoot.deletePrefix("images/")).toBe(1);
+    expect(await readdir(shared)).toEqual([]);
+  });
+
+  test("an ordinary nested write into a fresh store creates its folders and reads back", async () => {
+    const fresh = new FileSystemDriver(join(base, "fresh"));
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+
+    await fresh.put({ name: "images/covers/front.jpg", body: new Blob([bytes]) });
+    const result = await fresh.read("images/covers/front.jpg");
+    expect(new Uint8Array(await new Response(result.body as Blob).arrayBuffer())).toEqual(bytes);
+
+    await fresh.putStream({ name: "images/backs/back.jpg", body: new Blob([bytes]).stream() });
+    expect(new Uint8Array(await (await fresh.fetch("images/backs/back.jpg")).arrayBuffer())).toEqual(bytes);
+  });
+
+  test("fetch() of a missing object rejects like read()", async () => {
+    await expect(driver.fetch("real/missing.txt")).rejects.toBeInstanceOf(FileNotFoundError);
+  });
+
+  test("put() refuses a link that appears at the name while the body is read", async () => {
+    class LinkingBlob extends Blob {
+      override async arrayBuffer() {
+        await symlink(join(outside, "secret.txt"), join(store, "late.txt"));
+        return super.arrayBuffer();
+      }
+    }
+
+    await expect(driver.put({ name: "late.txt", body: new LinkingBlob(["overwritten"]) })).rejects.toThrow(
+      /symbolic link/,
+    );
+    expect((await lstat(join(store, "late.txt"))).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(outside, "secret.txt"), "utf8")).toBe("secret");
+    expect((await readdir(store)).some((entry) => entry.endsWith(".partial"))).toBe(false);
+  });
+
+  test("put() replaces an existing file through a temporary one and leaves nothing behind", async () => {
+    await driver.put({ name: "real/a.txt", body: new Blob(["replaced"]) });
+    await driver.put({ name: "real/c.txt", body: Buffer.from("buffer") });
+
+    expect(await readFile(join(store, "real", "a.txt"), "utf8")).toBe("replaced");
+    expect(await readFile(join(store, "real", "c.txt"), "utf8")).toBe("buffer");
+    expect((await readdir(join(store, "real"))).sort()).toEqual(["a.txt", "c.txt", "sub"]);
+  });
+
+  test("an aborted put() leaves neither the file nor a temporary one", async () => {
+    const controller = new AbortController();
+    class AbortingBlob extends Blob {
+      override async arrayBuffer() {
+        controller.abort();
+        return super.arrayBuffer();
+      }
+    }
+
+    await expect(
+      driver.put({ name: "aborted.txt", body: new AbortingBlob(["x"]) }, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect((await readdir(store)).sort()).toEqual(["real"]);
+  });
+
+  test("a link swapped in at the final name after the check is refused when the file is opened", async () => {
+    await symlink(join(outside, "secret.txt"), join(store, "swapped.txt"));
+    // Stands in for a swap between the per-component check and the open: the
+    // check passes, and only `O_NOFOLLOW` is left to refuse the link.
+    vi.spyOn(driver as any, "resolveObjectPath").mockResolvedValue(join(store, "swapped.txt"));
+    try {
+      await expect(driver.read("swapped.txt")).rejects.toBeInstanceOf(FileNotFoundError);
+      await expect(driver.fetch("swapped.txt")).rejects.toBeInstanceOf(FileNotFoundError);
+      await expect(driver.size("swapped.txt")).rejects.toBeInstanceOf(FileNotFoundError);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  test("fetch() streams the whole object from the opened file, with its headers", async () => {
+    const res = await driver.fetch("real/sub/b.txt");
+    expect(res.headers.get("Content-Type")).toMatch(/^text\/plain/);
+    expect(res.headers.get("Content-Length")).toBe("6");
+    expect(await res.text()).toBe("nested");
+  });
+
+  test("a storage folder that is a dangling link gets a clear error on write", async () => {
+    const current = join(base, "current");
+    await symlink(join(base, "shared-not-created"), current);
+    const dangling = new FileSystemDriver(current);
+
+    for (const write of [
+      () => dangling.put({ name: "a.txt", body: new Blob(["a"]) }),
+      () => dangling.putStream({ name: "a.txt", body: streamOf("a") }),
+    ]) {
+      await expect(write()).rejects.toThrow(
+        `The storage folder "${current}" is a symbolic link to a missing directory`,
+      );
+    }
+    await expect(dangling.read("a.txt")).rejects.toBeInstanceOf(FileNotFoundError);
+    expect(existsSync(join(base, "shared-not-created"))).toBe(false);
   });
 });
