@@ -34,6 +34,7 @@ import {
   createWorkflowSourceTableStatements,
   createWorkflowTableStatements,
 } from "./workflow/DatabaseWorkflowStore";
+import { retriesSqliteBusy } from "../../database/sqliteClient";
 
 export type DatabaseQueueDriverOptions = {
   /**
@@ -292,7 +293,10 @@ export class DatabaseQueueDriver implements QueueDriver {
    * later one.
    */
   private configure(): Promise<void> {
-    if (this.dialect !== "sqlite" || this.busyTimeout === 0) return Promise.resolve();
+    // A SQLite file's client waits for the lock in JS instead (#1375).
+    if (this.dialect !== "sqlite" || this.busyTimeout === 0 || retriesSqliteBusy(this.sql)) {
+      return Promise.resolve();
+    }
     this.configured ??= (async () => {
       const [current] = (await this.sql.unsafe("PRAGMA busy_timeout")) as Array<{
         timeout: number | string;

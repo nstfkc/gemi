@@ -1653,8 +1653,36 @@ before the after-commit callbacks run, so a callback can open a transaction of i
   development, a transaction that has waited in the queue for 5 seconds logs a warning with
   where it was queued. The 5 seconds are fixed; `database.slowTransactionThreshold: false` turns
   the warning off.
-- Plain statements outside a transaction don't queue, and on SQLite they run inside whichever
-  transaction is open on the connection ([#1375](https://github.com/nstfkc/gemi/issues/1375)).
+
+**On a SQLite file, statements outside a transaction use a second connection** ([#1375](https://github.com/nstfkc/gemi/issues/1375)).
+A connection to a SQLite file opens two Bun clients on it: transactions run on one, and every
+statement outside a transaction (a `Model.create` outside `transaction()`, `DB.sql`, the stores'
+plain writes) runs on the other. So a plain statement never joins another request's open
+transaction: it doesn't see its uncommitted rows, and a rollback doesn't take it back.
+
+- The file is put in WAL mode, so a read never waits for a writer. WAL keeps two files next to the
+  database, `<name>-wal` and `<name>-shm`; copy or delete all three together. WAL doesn't work on
+  network filesystems (NFS, SMB): keep the file on a local disk.
+- A plain write that meets the open transaction's lock (`SQLITE_BUSY`) waits its turn in the
+  transaction queue and then runs, after that transaction commits or rolls back. The wait is in
+  JS, so the process keeps serving other requests. SQLite's own wait (`busy_timeout`) would block
+  the event loop, since Bun runs SQLite on the JavaScript thread, so gemi keeps it at 0 on both
+  connections; don't set it.
+- A statement that has its turn and still meets a lock (another process's) is retried with a short
+  backoff for up to 5 seconds, then fails with the `SQLITE_BUSY` error. So is a `BEGIN`.
+- Transactions start with `BEGIN IMMEDIATE`, so one that reads first can't fail at its first
+  write because a plain write landed in between.
+- A multi-statement string (`sql.unsafe("…; …")`, `sql.file(...)`) waits its turn before it runs,
+  so it never meets this process's open transaction, and it is never run twice: if it still meets
+  another process's lock, it fails with `SqliteBusyError`, since the statements before the one
+  that failed may have committed.
+- Code inside a transaction that writes through the pool (`DB.sql`, a raw client) instead of the
+  transaction's handle no longer joins the transaction. That write waits for the transaction,
+  which is waiting for it, so after 5 seconds it fails with `TransactionQueueDeadlockError`. Use
+  the ORM (which joins the open transaction), `DB.query`, or the handle `transaction()` gives you.
+  Reads through the pool work, and see what was committed before the transaction.
+- `:memory:` databases keep one connection, since a second one would open a second, empty
+  database. Postgres and MySQL are unchanged.
 
 ### Two things that will bite you
 

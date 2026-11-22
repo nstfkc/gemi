@@ -1,3 +1,23 @@
+# 0.239.0
+
+## SQLite: statements outside a transaction use their own connection (#1375)
+
+**Behaviour change (minor version).** On a SQLite file database, a plain statement outside a transaction (a `Model.create` outside `transaction()`, `DB.sql`, a rate-limiter or lock-store write) ran on the same connection as every transaction, so while another request's transaction was open it ran *inside* it: it saw that transaction's uncommitted rows, and committed or rolled back with it. A rate-limit hit during a sign-up that rolled back was lost with it.
+
+Now a SQLite file connection opens two Bun clients on the file: transactions run on one, plain statements on the other.
+- **WAL mode.** gemi switches the file to WAL, so reads don't wait for writers. The database gets two companion files, `<name>-wal` and `<name>-shm`: copy, back up or delete all three together, and add them to `.gitignore` if the database file is listed there. WAL doesn't work on network filesystems (NFS, SMB); keep the file on a local disk.
+- **Waiting for the lock.** A plain write while a transaction is open meets SQLite's lock (`SQLITE_BUSY`). It waits its turn in the transaction queue (#1362), without blocking the event loop, and runs after that transaction ends. With its turn, a lock still held by another process is retried with a short backoff for up to 5 seconds, and so is a transaction's `BEGIN`. `busy_timeout` stays 0 on both connections (SQLite's own wait would block the event loop): the database lock store and queue driver no longer set it on these connections, and an app shouldn't either.
+- **`BEGIN IMMEDIATE`.** Transactions take the write lock at `BEGIN`, so a transaction that read first can't fail later because a plain write landed in between.
+- **Multi-statement strings are never run twice.** `sql.unsafe("…; …")` and `sql.file(...)` wait their turn before running, so they don't meet this process's open transaction. If one still meets another process's lock, it fails with `SqliteBusyError` instead of being retried, because the statements before the one that failed may have committed.
+- `:memory:` keeps one connection. Postgres and MySQL are unchanged.
+
+What to check:
+- Code inside a transaction that writes through the pool (`DB.sql`, `connection.sql`) instead of the transaction's handle used to join the open transaction on SQLite. Now that write waits for the transaction, which waits for it, and after 5 seconds fails with `TransactionQueueDeadlockError`. Write through the ORM, `DB.query` or the handle `transaction()` passes instead. Reads through the pool still work, and see only committed rows, as on Postgres.
+- Deployments that keep the SQLite file on a network filesystem, or copy only the main database file while the app runs.
+- `TransactionQueueDeadlockError`, `queuedOnSqlite` and `slowTransactionThreshold` are still exported from `orm/context`; they now live in `database/`.
+
+Renumber this entry if another minor version ships first.
+
 # 0.238.0
 
 ## `scriptedProvider`: `exhausted` takes a step (#1378)

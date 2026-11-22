@@ -4,6 +4,7 @@ import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
 import { queuedOnSqlite, runOnConnection, withTransaction } from "../../orm/context";
 import { LockLostError, type LockStore } from "./LockStore";
+import { retriesSqliteBusy } from "../../database/sqliteClient";
 
 export type DatabaseLockStoreOptions = {
   /**
@@ -350,7 +351,10 @@ export class DatabaseLockStore implements LockStore {
 
   /** See `DatabaseQueueDriver.configure`. */
   private configure(): Promise<void> {
-    if (this.dialect !== "sqlite" || this.busyTimeout === 0) return Promise.resolve();
+    // A SQLite file's client waits for the lock in JS instead (#1375).
+    if (this.dialect !== "sqlite" || this.busyTimeout === 0 || retriesSqliteBusy(this.sql)) {
+      return Promise.resolve();
+    }
     this.configured ??= (async () => {
       const [current] = (await this.sql.unsafe("PRAGMA busy_timeout")) as Array<{
         timeout: number | string;

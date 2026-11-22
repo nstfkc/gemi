@@ -112,3 +112,36 @@ export function databaseConfigDefaults(): DatabaseConfig {
 export const SLOW_TRANSACTION_THRESHOLD = 2_000;
 
 export type { SQL };
+
+/**
+ * The warning threshold in milliseconds, or `null` when the warning is off.
+ *
+ * `configured` is `database.slowTransactionThreshold` — see `DatabaseConfig`.
+ * It arrives as a value rather than being read from here so that this file
+ * keeps knowing nothing about the container: `withTransaction` is reachable
+ * with a bare pool, and its tests use one.
+ *
+ * Exported for its own tests. The behaviour worth pinning is the fallback —
+ * that a malformed threshold lands on the default rather than disabling — and
+ * that cannot be observed through `withTransaction`: "no warning fired" is what
+ * a disabled warning looks like too, so a behavioural test of it passes just as
+ * happily when the fallback is gone. Asserting the number directly is the only
+ * form of that test that can fail.
+ */
+export function slowTransactionThreshold(configured?: number | false): number | null {
+  // Read per call, never cached at module scope. `scripts/build.ts` rewrites
+  // `process.env.NODE_ENV` to `Bun.env.NODE_ENV` precisely so mode stays a
+  // runtime question in the built framework; caching it here would undo that.
+  if (process.env.NODE_ENV !== "development") return null;
+
+  // The one way to switch it off, and it has to be spelled. Everything else
+  // falls back, so the warning is never lost to a mistyped value — only to an
+  // explicit `false`.
+  if (configured === false) return null;
+
+  if (configured === undefined) return SLOW_TRANSACTION_THRESHOLD;
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return SLOW_TRANSACTION_THRESHOLD;
+  }
+  return configured;
+}
