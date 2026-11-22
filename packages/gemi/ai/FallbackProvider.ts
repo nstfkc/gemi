@@ -647,6 +647,8 @@ function intersect(all: ProviderCapabilities[]): ProviderCapabilities {
     parallelToolCalls: all.every((c) => c.parallelToolCalls),
     toolSearch: all.every((c) => c.toolSearch),
     supportsForcedToolChoice: all.every((c) => c.supportsForcedToolChoice !== false),
+    trailingContext: all.every((c) => c.trailingContext === true),
+    allowedTools: all.every((c) => c.allowedTools === true),
   };
 }
 

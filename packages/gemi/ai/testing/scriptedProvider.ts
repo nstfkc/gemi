@@ -62,6 +62,8 @@ export type ScriptedCall = {
   messages: AgentMessage[];
   /** The user turn the call answers: `turnOf(messages)`. */
   turn: ScriptedTurn | undefined;
+  /** The text sent after the conversation (`AgentStreamParams.trailingContext`), if any. */
+  trailingContext: string | undefined;
   params: ProviderStreamParams;
 };
 
@@ -139,6 +141,9 @@ const CAPABILITIES: ProviderCapabilities = {
   fileInput: true,
   parallelToolCalls: true,
   toolSearch: true,
+  // Handed the trailing context as `params.trailingContext` rather than as a
+  // last message, so `turn` stays the person's message and a test can assert it.
+  trailingContext: true,
 };
 
 /**
@@ -211,6 +216,7 @@ export class ScriptedProvider extends AgentProvider {
       index: this.calls.filter((other) => other.agent === agent).length,
       messages: params.messages,
       turn: turnOf(params.messages),
+      trailingContext: params.trailingContext,
       params,
     };
     this.calls.push(call);

@@ -714,7 +714,7 @@ describe("parallel: each message names its turn (#1339)", () => {
   });
 
   /** Two parallel turns, each parked on an approval: "publish home" (asked first), then "publish about". */
-  async function twoParked(replies: ProviderEvent[][]) {
+  async function twoParked(replies: ProviderEvent[][], options: { nestedB?: boolean } = {}) {
     const approve = AgentTool.create({
       name: "publish",
       description: "Publish",
@@ -722,11 +722,26 @@ describe("parallel: each message names its turn (#1339)", () => {
       requiresApproval: true,
       execute: async ({ page }: { page: string }) => `published ${page}`,
     });
-    const ask = (id: string, page: string): ProviderEvent[] => [
-      { type: "tool-call", toolCallId: id, name: "publish", args: JSON.stringify({ page }) },
+    const ask = (id: string, page: string, name = "publish"): ProviderEvent[] => [
+      { type: "tool-call", toolCallId: id, name, args: JSON.stringify({ page }) },
       finish(),
     ];
-    const harness = await setup([ask("cA", "home"), ask("cB", "about"), ...replies], { tools: [approve] });
+    // With `nestedB`, B's question is asked by a sub-agent under B's call.
+    const clerk = Agent.create({
+      name: "clerk",
+      provider: fakeProvider(ask("s1", "about"), [{ type: "text-delta", delta: "clerk done" }, finish()]),
+      tools: [approve],
+    });
+    const delegate = AgentTool.create({
+      name: "delegate",
+      description: "Delegate",
+      inputSchema: s.object({ page: s.string() }),
+      execute: async ({ page }: { page: string }, ctx: any) => (await ctx.runAgent(clerk, { prompt: page })).finishReason,
+    });
+    const harness = await setup(
+      [ask("cA", "home"), ask("cB", "about", options.nestedB ? "delegate" : "publish"), ...replies],
+      { tools: [approve, delegate] },
+    );
     const { store, Chat, release, calls } = harness;
     const { threadId } = await store.createThread({});
     const a = await Chat.startTurn({ threadId, text: "publish home" });
@@ -735,12 +750,13 @@ describe("parallel: each message names its turn (#1339)", () => {
     release(0);
     release(1);
     const [parkedA, parkedB] = await Promise.all([a.result(), b.result()]);
-    const approval = (pending: { toolCallId: string; signature?: string }) => ({
+    const approval = (pending: { toolCallId: string; signature?: string; path?: string[] }) => ({
       toolCallId: pending.toolCallId,
       signature: pending.signature!,
+      ...(pending.path ? { path: pending.path } : {}),
       approve: true,
     });
-    const answer = async (...pending: { toolCallId: string; signature?: string }[]) => {
+    const answer = async (...pending: { toolCallId: string; signature?: string; path?: string[] }[]) => {
       const turn = await Chat.startTurn({ threadId, turn: { toolResults: pending.map(approval) } });
       release(calls());
       return { turn, result: await turn.result() };
@@ -749,7 +765,7 @@ describe("parallel: each message names its turn (#1339)", () => {
       const messages = (await store.loadThread(threadId))!;
       return { messages, byText: (text: string) => messages.find((message) => textOf(message) === text)! };
     };
-    return { ...harness, A: parkedA.pending[0]!, B: parkedB.pending[0]!, answer, stored };
+    return { ...harness, threadId, A: parkedA.pending[0]!, B: parkedB.pending[0]!, answer, stored };
   }
 
   test("answering the later of two turns' questions carries on that turn, not the first one stored", async () => {
@@ -759,11 +775,105 @@ describe("parallel: each message names its turn (#1339)", () => {
     const { byText } = await stored();
     expect(turn.run.turn).toEqual({ id: byText("publish about").id, continues: true, answers: [B.toolCallId] });
     expect(byText("about is live").turn).toBe(byText("publish about").id);
-    // A's question, refused by the turn that answered something else, stays in A's turn.
+    // A's question is A's to answer: still open, still pending, in A's turn (#1355).
     const asking = (await stored()).messages.find((message) =>
       message.content.some((part) => part.type === "tool-call" && part.toolCallId === A.toolCallId),
     )!;
     expect(asking.turn).toBe(byText("publish home").id);
+    expect(asking.pending?.map((call) => [call.toolCallId, call.turn])).toEqual([[A.toolCallId, byText("publish home").id]]);
+    expect(asking.content.some((part) => part.type === "tool-result")).toBe(false);
+    // The frames name each question's turn, which is what lets a client keep A's card.
+    expect(A.turn).toBe(byText("publish home").id);
+    expect(B.turn).toBe(byText("publish about").id);
+  });
+
+  /** The tool result a stored message holds for `toolCallId`, if any. */
+  const resultOf = (messages: AgentMessage[], toolCallId: string) =>
+    messages
+      .flatMap((message) => message.content)
+      .find((part) => part.type === "tool-result" && part.toolCallId === toolCallId) as
+      | { status: string; cause?: string }
+      | undefined;
+
+  test.each([
+    ["B then A", (A: any, B: any) => [B, A]],
+    ["A then B", (A: any, B: any) => [A, B]],
+  ])("two turns' questions answered one at a time (%s): each stays open until its own answer (#1355)", async (_name, order) => {
+    const { A, B, answer, stored } = await twoParked([say("first is live"), say("second is live")]);
+    const [first, second] = order(A, B) as [typeof A, typeof B];
+    const one = await answer(first);
+    expect(one.result.finishReason).toBe("stop");
+    // The other question is still open after the first answer.
+    expect(resultOf((await stored()).messages, second.toolCallId)).toBeUndefined();
+
+    const two = await answer(second);
+    expect(two.result.finishReason).toBe("stop");
+    expect(two.result.error).toBeUndefined();
+
+    const { messages, byText } = await stored();
+    expect(resultOf(messages, A.toolCallId)?.status).toBe("ok");
+    expect(resultOf(messages, B.toolCallId)?.status).toBe("ok");
+    const turnOf = (pending: { toolCallId: string }) => (pending === A ? "publish home" : "publish about");
+    expect(one.turn.run.turn?.id).toBe(byText(turnOf(first)).id);
+    expect(two.turn.run.turn?.id).toBe(byText(turnOf(second)).id);
+    expect(byText("first is live").turn).toBe(byText(turnOf(first)).id);
+    expect(byText("second is live").turn).toBe(byText(turnOf(second)).id);
+    expect(messages.every((message) => message.pending === undefined)).toBe(true);
+  });
+
+  test.each([
+    ["parallel", "parallel" as const, undefined],
+    ["the default", undefined, "denied"],
+  ])("a new message asked as %s: the questions other turns wait on stay open, or are refused as before", async (_name, ifBusy, status) => {
+    const { A, B, stored, Chat, threadId, release, calls } = await twoParked([say("noted")]);
+    const turn = await Chat.startTurn({ threadId, text: "something else", ...(ifBusy ? { ifBusy } : {}) });
+    release(calls());
+    await turn.result();
+    const { messages } = await stored();
+    expect(resultOf(messages, A.toolCallId)?.status).toBe(status);
+    expect(resultOf(messages, B.toolCallId)?.status).toBe(status);
+    if (status) {
+      expect(resultOf(messages, A.toolCallId)?.cause).toBe("refused");
+      expect(resultOf(messages, B.toolCallId)?.cause).toBe("refused");
+    }
+  });
+
+  test("the same answer sent twice ends the second as stale, and refuses nothing", async () => {
+    const { A, B, answer, stored, calls } = await twoParked([say("about is live")]);
+    await answer(B);
+    const before = calls();
+    const again = await answer(B);
+    expect(again.result.finishReason).toBe("error");
+    expect(again.result.error?.code).toBe("invalid_tool_result");
+    expect(calls()).toBe(before);
+    const { messages } = await stored();
+    expect(resultOf(messages, A.toolCallId)).toBeUndefined();
+    expect(messages.some((message) => message.pending?.some((call) => call.toolCallId === A.toolCallId))).toBe(true);
+  });
+
+  test("an answer to a sub-agent's question in turn B carries on B, and leaves A open", async () => {
+    const { A, B, answer, stored } = await twoParked([say("about is live")], { nestedB: true });
+    expect(B).toMatchObject({ toolCallId: "s1", path: ["cB"] });
+    const { turn, result } = await answer(B);
+    expect(result.text).toBe("about is live");
+    const { messages, byText } = await stored();
+    expect(turn.run.turn?.id).toBe(byText("publish about").id);
+    expect(resultOf(messages, "cB")?.status).toBe("ok");
+    expect(resultOf(messages, A.toolCallId)).toBeUndefined();
+  });
+
+  test("a stop ends the stopped run's turn, not the question another turn waits on", async () => {
+    const { A, B, stored, Chat, threadId, calls } = await twoParked([say("never")]);
+    const turn = await Chat.startTurn({
+      threadId,
+      turn: { toolResults: [{ toolCallId: B.toolCallId, signature: B.signature!, approve: true }] },
+    });
+    await until(() => calls() === 3);
+    await turn.stop();
+    expect((await turn.result()).finishReason).toBe("aborted");
+    const { messages } = await stored();
+    expect(resultOf(messages, B.toolCallId)?.status).toBe("ok");
+    expect(resultOf(messages, A.toolCallId)).toBeUndefined();
   });
 
   test("one request answering both, the later first: it carries on the turn of the first answer it lists", async () => {

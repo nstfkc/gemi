@@ -30,7 +30,10 @@ export type ResponsesRequest = {
   instructions?: string;
   tools?: ResponsesTool[];
   parallel_tool_calls?: boolean;
-  tool_choice?: string | { type: "function"; name: string };
+  tool_choice?:
+    | string
+    | { type: "function"; name: string }
+    | { type: "allowed_tools"; mode: "auto" | "required"; tools: { type: "function"; name: string }[] };
   text?: { format: Record<string, unknown> };
   reasoning?: { effort: string; summary?: "auto" };
   temperature?: number;
@@ -50,17 +53,42 @@ export function buildResponsesRequest(
     stream: true,
   };
 
+  // After the conversation, so the prefix the cache holds ends before it
+  // (#1345). A developer message: it is the app speaking, not the user.
+  if (params.trailingContext) {
+    body.input.push({
+      role: "developer",
+      content: [{ type: "input_text", text: params.trailingContext }],
+    });
+  }
+
   if (params.systemPrompt) body.instructions = params.systemPrompt;
 
-  const tools = toResponsesTools(params.tools, capabilities);
+  // A step held to some of the tools (#1345): the full list goes out and
+  // `allowed_tools` names what this call may use, so the tool list (the
+  // start of the cached prefix) stays the same. It names functions only: a
+  // list with namespaces or tool search is narrowed instead, as before.
+  let tools = toResponsesTools(params.tools, capabilities);
+  let allowed: string[] | undefined;
+  if (params.allowedTools) {
+    if (tools.every((tool) => tool.type === "function")) {
+      allowed = params.allowedTools;
+    } else {
+      tools = toResponsesTools(narrowTools(params.tools ?? [], params.allowedTools), capabilities);
+    }
+  }
   if (tools.length > 0) {
     body.tools = tools;
     if (!capabilities.parallelToolCalls) body.parallel_tool_calls = false;
-    if (params.toolChoice !== undefined) {
-      body.tool_choice =
-        typeof params.toolChoice === "string"
-          ? params.toolChoice
-          : { type: "function", name: params.toolChoice.name };
+    const choice = params.toolChoice;
+    if (allowed && choice !== "none" && typeof choice !== "object") {
+      body.tool_choice = {
+        type: "allowed_tools",
+        mode: choice === "required" ? "required" : "auto",
+        tools: allowed.map((name) => ({ type: "function", name })),
+      };
+    } else if (choice !== undefined) {
+      body.tool_choice = typeof choice === "string" ? choice : { type: "function", name: choice.name };
     }
   }
 
@@ -783,6 +811,19 @@ export function toResponsesTools(
   if (anyDeferred) out.push({ type: "tool_search" });
 
   return out;
+}
+
+/** `tools` cut to the names in `allowed`: a namespace keeps the members named. */
+function narrowTools(
+  tools: (ProviderToolSpec | ProviderToolNamespace)[],
+  allowed: readonly string[],
+): (ProviderToolSpec | ProviderToolNamespace)[] {
+  const wanted = new Set(allowed);
+  return tools.flatMap((tool): (ProviderToolSpec | ProviderToolNamespace)[] => {
+    if (!isNamespace(tool)) return wanted.has(tool.name) ? [tool] : [];
+    const members = tool.tools.filter((member) => wanted.has(member.name));
+    return members.length > 0 ? [{ ...tool, tools: members }] : [];
+  });
 }
 
 function functionTool(tool: ProviderToolSpec, allowDeferred: boolean): ResponsesTool {

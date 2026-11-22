@@ -88,6 +88,7 @@ const provider = scriptedProvider({
 | `index` | Which of this agent's calls it is, from 0. |
 | `messages` | What the call sent. |
 | `turn` | The user turn it answers: `turnOf(messages)`. |
+| `trailingContext` | The text sent after the conversation ([`trailingContext`](./ai-agent-context.md)), if any. The scripted provider declares `capabilities.trailingContext`, so it is here and not a last message. |
 | `params` | The whole `ProviderStreamParams`: `systemPrompt`, `tools`, `toolChoice` and the rest. |
 
 ```ts
