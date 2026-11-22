@@ -589,8 +589,16 @@ export class RecordingProvider extends AgentProvider {
     // `promptCacheKey` is derived from the prompt and the tools (#1228): it
     // changes whenever they are reworded, and recordings made before it have
     // none. It says nothing the request doesn't already say, so it is neither
-    // matched nor fingerprinted (#1231).
-    const { signal: _signal, promptCacheKey: _cacheKey, messages, tools, ...rest } = params;
+    // matched nor fingerprinted (#1231). Nor is `agent`, which names who
+    // asked rather than what was asked (#1343).
+    const {
+      signal: _signal,
+      promptCacheKey: _cacheKey,
+      agent: _agent,
+      messages,
+      tools,
+      ...rest
+    } = params;
     const sent = messages.map(({ role, content }) => ({
       role,
       content: withoutTranscripts(content),

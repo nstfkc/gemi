@@ -141,6 +141,14 @@ export interface ProviderStreamParams {
    * a cut is retried like any other retryable failure.
    */
   retryToolArgumentsTooLong?: boolean;
+  /**
+   * The agent making the call (#1343): its `name`, and `depth` (0 for the
+   * run, 1 for a sub-agent it called, and so on). For a provider shared by
+   * several agents that answers each its own way, for example a test's
+   * `scriptedProvider`. Not sent to the model. Unset on a call no agent
+   * makes (`generateText`, a compaction summary).
+   */
+  agent?: { name: string; depth: number };
   signal?: AbortSignal;
 }
 

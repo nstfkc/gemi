@@ -8649,7 +8649,7 @@ Models and other services are mocked the usual way (`vi.mock`), or bound in a te
 Under vitest (`VITEST` is set) gemi keeps two things from happening by accident:
 
 - **The cron schedule does not start.** Every test worker that boots the app would otherwise run the whole schedule against the test database. One line on stderr says so, once per test file that boots an app with cron jobs. Set `GEMI_SCHEDULE=1` for a test that needs it. See [Cron: In tests](./cron.md#in-tests).
-- **The built-in model providers do not reach the network.** An agent left on a real provider, with keys in the environment, would make real, billed calls. Its request fails with `LiveModelCallRefusedError` before it is sent, and the run ends with a `provider_error` naming the provider's address and `GEMI_AI_LIVE`. Give the agent a fake provider. Set `GEMI_AI_LIVE=1` to make real calls on purpose, for a live suite.
+- **The built-in model providers do not reach the network.** An agent left on a real provider, with keys in the environment, would make real, billed calls. Its request fails with `LiveModelCallRefusedError` before it is sent, and the run ends with a `provider_error` naming the provider's address and `GEMI_AI_LIVE`. Give the agent a fake provider: [`scriptedProvider`](./ai-scripted-provider.md) answers from a script. Set `GEMI_AI_LIVE=1` to make real calls on purpose, for a live suite.
 
   These are still let through, since none of them reaches a provider: a `fetchImpl` passed to the provider, a stubbed global `fetch` or `WebSocket` (`vi.stubGlobal`), and a provider pointed at this machine (`localhost`, `127.0.0.1`, `::1`). Under Bun, any `fetch` or `WebSocket` that is not Bun's own counts as stubbed, whether it was installed before or after gemi loaded. That includes a `fetch` wrapped by an APM or error tracker that a test setup file loads: its calls go out. Mock providers or keep such a library out of the test setup.
 
@@ -8666,6 +8666,7 @@ A process the tests start inherits their environment, `VITEST` included. A serve
 - [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, and the variant keys `queryData` mirrors.
 - [Internationalization](./i18n.md) — dictionaries and `useTranslator`.
 - [Navigation](./navigation.md) — `Link`, `useNavigate`, `useParams`.
+- [AI Scripted Provider](./ai-scripted-provider.md) — `scriptedProvider` and `turnOf`, for agent tests without a model.
 
 ---
 
@@ -11340,6 +11341,129 @@ The report keeps the samples in case order whatever the concurrency.
 ## What it doesn't do
 
 It has no CLI flags (read `--runs` and `--only` with `parseArgs` and pass them to `run`), and it doesn't store artifacts such as screenshots: write those from your task.
+
+---
+
+## AI Scripted Provider
+
+An agent test needs a model that answers what the test says, every time. `scriptedProvider`, from `gemi/ai/testing`, answers each model call with the next step of a script: a text reply, tool calls, structured output, an error, or a function of what was sent. Give it one script per agent, by name, and each agent takes its own steps, whatever order the calls come in.
+
+```ts
+import { expect, test } from "vitest";
+import { Agent, AgentTool, s } from "gemi/ai";
+import { scriptedProvider } from "gemi/ai/testing";
+
+test("the planner asks the researcher, then answers", async () => {
+  const provider = scriptedProvider({
+    planner: [{ toolCalls: [{ name: "research", input: { topic: "tea" } }] }, "Drink green tea in the morning."],
+    researcher: ["Green tea has less caffeine than coffee."],
+  });
+
+  const researcher = Agent.create({ name: "researcher", provider });
+  const research = AgentTool.create({
+    name: "research",
+    description: "Research a topic",
+    inputSchema: s.object({ topic: s.string() }),
+    execute: async ({ topic }, ctx) => {
+      const run = await ctx.runAgent(researcher, { prompt: topic });
+      return run.messages.at(-1)?.content;
+    },
+  });
+  const planner = Agent.create({ name: "planner", provider, tools: [research] });
+
+  const result = await planner.stream({ messages: [], turn: { text: "Plan my mornings" } }).result();
+
+  expect(result.finishReason).toBe("stop");
+  expect(provider.callsOf("researcher")[0]?.turn?.text).toBe("tea");
+  provider.assertDone();
+});
+```
+
+`scriptedProvider(steps)` with a plain list answers every call from that one list, whichever agent makes it.
+
+Calls no agent makes, such as `generate()` or a compaction summary through the run's provider, arrive without a name. In the per-agent form they take the script under `NO_AGENT`:
+
+```ts
+import { NO_AGENT, scriptedProvider } from "gemi/ai/testing";
+
+const provider = scriptedProvider({
+  writer: ["Here is the draft."],
+  [NO_AGENT]: ["The person asked for a draft; it was written."],
+});
+```
+
+## Steps
+
+| Step | The call answers |
+|---|---|
+| `"text"` | A text reply. |
+| `{ text?, reasoning?, output?, toolCalls?, finishReason?, usage? }` | A reply with any of these. `text` as a list streams each entry as its own delta, for a streaming UI. `output` is structured output (an agent with `output`), sent as its JSON. Each tool call is `{ name, input?, id? }`; `id` defaults to `call_<agent>_<call>_<n>`. Several tool calls in one step run as the model's parallel calls. `finishReason` defaults to `"stop"`, `usage` to one token in and one out; each step's `usage` adds up on the run's result. |
+| `{ events }` | These `ProviderEvent`s, for anything the shorthand doesn't cover, such as a `retry` event. |
+| `{ error }` | A failed call. An `Error` or a message ends the run with a `provider_error` that is not retryable. `{ code, message, retryable }` fails with exactly that error: a [`FallbackProvider`](./ai-providers.md) moves to its next provider on `retryable: true`, and a client sees the code and `retryable` it would get from a live model. |
+| `(call) => step` | The step this function answers, sync or async, from the call (below). |
+
+A tool call's result goes back to the model on the next call, and the agent's next step answers it. Tools run as they would with a live model: their schemas, approvals and errors all apply.
+
+### Sub-agents of the same name, in parallel
+
+A step with two calls to a sub-agent tool starts two runs of the same agent at once. Each takes the next step of that agent's script when it reaches the model, and which one gets there first depends on scheduling. So `researcher: ["about tea", "about coffee"]` can hand the coffee answer to the tea run. Answer from the call instead, with a function step:
+
+```ts
+import { scriptedProvider } from "gemi/ai/testing";
+
+const answer = ({ turn }: { turn?: { text: string } }) =>
+  turn?.text.includes("tea") ? "Green tea has less caffeine." : "Coffee has more.";
+
+const provider = scriptedProvider({
+  planner: [
+    { toolCalls: [{ name: "research", input: { topic: "tea" } }, { name: "research", input: { topic: "coffee" } }] },
+    "Tea in the morning, coffee after lunch.",
+  ],
+  researcher: [answer, answer],
+});
+```
+
+## Calls
+
+`provider.calls` lists every call in the order it was made; `provider.callsOf(name)` lists one agent's. A function step gets the same object:
+
+| | |
+|---|---|
+| `agent` | The agent's name. `undefined` for a call no agent made (`generate()`, a compaction summary); those take the `NO_AGENT` script. |
+| `depth` | 0 for the run, 1 for a sub-agent it called, and so on. |
+| `index` | Which of this agent's calls it is, from 0. |
+| `messages` | What the call sent. |
+| `turn` | The user turn it answers: `turnOf(messages)`. |
+| `params` | The whole `ProviderStreamParams`: `systemPrompt`, `tools`, `toolChoice` and the rest. |
+
+```ts
+import { scriptedProvider } from "gemi/ai/testing";
+
+const provider = scriptedProvider([({ turn }) => (turn?.text.includes("refund") ? "Sent to billing." : "How can I help?")]);
+```
+
+## The user turn: `turnOf`
+
+`turnOf(messages)` answers the user turn the last message belongs to: `{ message, text, messages }`, where `message` is the user message that started it and `messages` the whole turn. It groups as [`splitTurns`](./ai-context-window.md) does, so a tool's results, the files it showed and a message that joined the turn all stay in it. Read it rather than `messages.at(-1)`, which is a tool result or an assistant step as often as the user's message. It is `undefined` when no user message started the last turn.
+
+Your own fake provider can use it too: it takes the `messages` of `ProviderStreamParams`.
+
+## When the script runs out
+
+A call with no step left fails with a `ScriptedProviderError` naming the agent, the call and its turn (`Agent "planner" made call 3, and its script has 2 step(s) (turn: "Plan my mornings").`). With one list for every call, it names the step and whose call it was (`The script ran out at step 3 (planner's call 2): ...`). `scriptedProvider(steps, { exhausted: "stop" })` answers an empty reply instead.
+
+A call from an agent the scripts don't name fails either way, `exhausted: "stop"` or not: a misspelt or renamed agent is never what the test meant.
+
+`provider.assertDone()` throws when a step was never taken: a test that expected the agent to call a tool and saw it answer straight away fails there, not later.
+
+## The agent on each call
+
+Every call an agent makes carries `agent: { name, depth }` in `ProviderStreamParams`. A provider of your own can read it the same way. It is not sent to the model, and a [recording](./ai-recordings.md) neither keeps nor matches it.
+
+## Related
+
+- [AI Recordings](./ai-recordings.md): record a live model's calls once and replay them.
+- [Testing](./testing.md): what a test process does not do, including real model calls.
 
 ---
 
