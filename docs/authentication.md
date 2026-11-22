@@ -1300,6 +1300,12 @@ the other fails on the constraint, and the loser then signs in **only if** the i
 resolves — the database error alone is never taken as proof of who the user is. Without the
 constraint the lookups still work, but a race can write two rows for one account.
 
+The same holds for two password sign-ups at once for one address (a double submit): one
+creates the account, and the other is answered the validation error on `email` ("Email
+address already exists") it would have got a moment later, not a 500. Only a failed insert
+is read that way, and only when the user now exists; an `onUserCreated` that throws fails
+the request as before.
+
 `username` is the provider's handle where it has one (X). Google has none, so it is left
 empty; it used to hold the display name.
 

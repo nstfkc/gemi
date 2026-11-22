@@ -587,6 +587,13 @@ jobs:
         env:
           VITEST_MIN_PASSED: "3"
 
+      # Two OAuth or password sign-ups at once for a new person (#1361).
+      - name: Sign-up race on Postgres
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" auth/AuthController.signUpRace.test.ts -t "postgres"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "3"
+
       # The change feed's database driver on Postgres: the driver contract,
       # publishing inside transactions, and LISTEN/NOTIFY between instances
       # through the `postgres` package (this Bun's SQL cannot LISTEN before
