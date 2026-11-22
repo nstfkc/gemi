@@ -66,7 +66,7 @@ On MySQL, add `@db.Text` to `title` and `@db.LongText` to `summaries` and `messa
 ## How it behaves
 
 - **The whole message is kept**, as JSON, one row per message id, in the order the thread first saw it. A message written again (a run writes its assistant message as it streams, and a turn that answers a pending call writes the earlier message again with the result) replaces its row in place.
-- **One writer per thread at a time.** An append runs in a transaction that locks the thread's row first (the database's write lock on SQLite), so two appends to one thread cannot interleave. On SQLite, one client's transactions take turns; several clients on one file need a busy timeout.
+- **One writer per thread at a time.** An append runs in a transaction that locks the thread's row first (the database's write lock on SQLite), so two appends to one thread cannot interleave. On SQLite, transactions on one connection take turns, and a transaction that meets another process's lock on the file is retried for up to 5 seconds, without blocking the event loop (see [orm.md](./orm.md#transactions)).
 - **An unknown thread is `null`** from `loadThread`, and the controller answers 404, as with `MemoryAgentStore`. An append to it throws.
 - **Regenerate** (`removeMessages`) and **compaction summaries** (`loadSummaries`, `saveSummary`, `lockSummary`) are supported. Summaries live on the thread's row and are deleted with it. `lockSummary` is a compare-and-set on that row, so several instances do not summarise the same thread at once.
 - **Joins the ORM transaction** on its connection, when a call is made inside one, and rolls back with it.

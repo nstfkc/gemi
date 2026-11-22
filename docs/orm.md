@@ -1653,8 +1653,47 @@ before the after-commit callbacks run, so a callback can open a transaction of i
   development, a transaction that has waited in the queue for 5 seconds logs a warning with
   where it was queued. The 5 seconds are fixed; `database.slowTransactionThreshold: false` turns
   the warning off.
-- Plain statements outside a transaction don't queue, and on SQLite they run inside whichever
-  transaction is open on the connection ([#1375](https://github.com/nstfkc/gemi/issues/1375)).
+
+**On a SQLite file, statements outside a transaction use a second connection** ([#1375](https://github.com/nstfkc/gemi/issues/1375)).
+A connection to a SQLite file opens two Bun clients on it: transactions run on one, and every
+statement outside a transaction (a `Model.create` outside `transaction()`, `DB.sql`, the stores'
+plain writes) runs on the other. So a plain statement never joins another request's open
+transaction: it doesn't see its uncommitted rows, and a rollback doesn't take it back.
+
+- The file is put in WAL mode, so a read never waits for a writer. WAL keeps two files next to the
+  database, `<name>-wal` and `<name>-shm`; copy or delete all three together. WAL doesn't work on
+  network filesystems (NFS, SMB): keep the file on a local disk.
+- A plain write that meets the open transaction's lock (`SQLITE_BUSY`) waits its turn in the
+  transaction queue and then runs, after that transaction commits or rolls back. The wait is in
+  JS, so the process keeps serving other requests. SQLite's own wait (`busy_timeout`) would block
+  the event loop, since Bun runs SQLite on the JavaScript thread, so gemi keeps it at 0 on both
+  connections; don't set it.
+- A statement that has its turn and still meets a lock (another process's) is retried with a short
+  backoff for up to 5 seconds, then fails with the `SQLITE_BUSY` error. So is a `BEGIN`.
+- Transactions start with `BEGIN IMMEDIATE`, so one that reads first can't fail at its first
+  write because a plain write landed in between.
+- A multi-statement string (`sql.unsafe("…; …")`, `sql.file(...)`; a `;` inside a string
+  literal, a quoted name or a comment, or a trailing one, doesn't count) waits its turn before it runs,
+  so it never meets this process's open transaction, and it is never run twice: if it still meets
+  another process's lock, it fails with `SqliteBusyError`, since the statements before the one
+  that failed may have committed. Because it waits for the open transaction even when it only
+  reads, one issued through the pool inside a transaction fails after 5 seconds like a write; run
+  it on the transaction's handle.
+- A write through the pool inside a transaction doesn't join the transaction. It waits for the
+  transaction, which is waiting for it, so after 5 seconds it fails with
+  `TransactionQueueDeadlockError`. The error's `stack` (and `callSite`) points at the call that
+  issued the write, and its message quotes the statement. That covers `DB.sql` and a raw client,
+  and also gemi stores that write through the pool on purpose: a lock or a rate-limit hit
+  (`DatabaseLockStore`), an OAuth connection (`DatabaseConnectionStore`), a run
+  (`DatabaseRunStore`) or an agent job (`DatabaseAgentJobStore`), called inside `transaction()`.
+  Call those before the transaction or from `afterCommit`. For your own SQL, use the ORM (which
+  joins the open transaction), `DB.query`, or the handle `transaction()` gives you. Reads through
+  the pool work, and see what was committed before the transaction. On Postgres the same code
+  runs on another connection and works.
+- `:memory:` databases keep one connection, since a second one would open a second, empty
+  database. Postgres and MySQL are unchanged.
+- If the file can't be switched to WAL (another process holds it, a network filesystem), gemi
+  warns once at startup. The mode is stored in the file, so it stays WAL under an older gemi too.
 
 ### Two things that will bite you
 
@@ -2621,17 +2660,18 @@ same applies to identifiers and sort directions, which cannot be parameters in S
 is the same for those, and it is about where the value came from, not what it is.
 
 `DB.sql` is unchanged and still Bun's own tagged template, for a single self-contained statement
-that needs none of this. **Whether it joins the ambient transaction depends on the dialect**, so use
-`DB.query` when that matters:
+that needs none of this. **It never joins the ambient transaction**, so use `DB.query` when that
+matters:
 
-- On **Postgres** it does not. The pool hands it a different connection, so a `Model.transaction`
-  that rolls back leaves a `DB.sql` write behind.
-- On **SQLite** it does, because `DatabaseManager` gives SQLite a single connection and the
-  statement is therefore inside the open transaction.
+- On **Postgres** the pool hands it a different connection, so a `Model.transaction` that rolls
+  back leaves a `DB.sql` write behind.
+- On a **SQLite** file it runs on the connection for statements outside transactions (#1375). A
+  read sees only committed rows. A write waits for the open transaction's lock, and when the
+  transaction is waiting for that write, it fails with `TransactionQueueDeadlockError` after 5
+  seconds. (A `:memory:` database has one connection, so there the statement is inside the open
+  transaction.)
 
-The direction is the awkward one: a `DB.sql` write inside a transaction rolls back correctly in
-development on SQLite and survives the rollback in production on Postgres. `DB.query` and
-`DB.execute` join the transaction on both.
+`DB.query` and `DB.execute` join the transaction on both.
 
 ### Reading the live schema
 
