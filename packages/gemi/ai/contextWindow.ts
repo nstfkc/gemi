@@ -47,31 +47,45 @@ export function injectedMessageIds(messages: readonly AgentMessage[]): Set<strin
 /**
  * The index of the first message of every turn in `messages`.
  *
- * A turn starts at a user message that no tool injected, and runs until the
- * next one: the assistant's steps, their tool calls with their results (which
- * are stored on the same message as the call), any file a tool showed, and
- * any message that joined the turn while it ran (`AgentMessage.joined`;
- * `splitTurns` groups those by the turn they name, not by position).
- * Index 0 always starts a turn, so messages before the first user message (a
- * greeting, a run cut short before its turn was stored) belong to the first
- * turn rather than to none. Empty for an empty list.
+ * A turn starts at a message whose `turn` is its own id, and, for a message
+ * stored without `turn`, at a user message that no tool injected and that
+ * joined nothing. It runs until the next one: the assistant's steps, their
+ * tool calls with their results (which are stored on the same message as the
+ * call), any file a tool showed, and any message that joined the turn while
+ * it ran. A message whose `turn` names another message (or that `joined`
+ * one) never starts a turn; `splitTurns` groups it with the turn it names,
+ * not by position. Index 0 always starts a turn, so messages before the
+ * first user message (a greeting, a run cut short before its turn was
+ * stored) belong to the first turn rather than to none. Empty for an empty
+ * list.
  */
 export function turnStarts(messages: readonly AgentMessage[]): number[] {
   if (messages.length === 0) return [];
   const injected = injectedMessageIds(messages);
   const starts = [0];
   for (let index = 1; index < messages.length; index++) {
-    const message = messages[index]!;
-    if (message.role === "user" && !message.joined && !injected.has(message.id)) starts.push(index);
+    if (startsTurn(messages[index]!, injected)) starts.push(index);
   }
   return starts;
 }
 
+/** Whether `message` starts a turn: see `turnStarts`. */
+function startsTurn(message: AgentMessage, injected: ReadonlySet<string>): boolean {
+  if (message.turn !== undefined) return message.turn === message.id;
+  return message.role === "user" && !message.joined && !injected.has(message.id);
+}
+
+/** The turn start `message` names, if it names one other than itself. */
+function homeOf(message: AgentMessage): string | undefined {
+  if (message.turn !== undefined) return message.turn === message.id ? undefined : message.turn;
+  return message.joined;
+}
+
 /**
- * `messages` grouped into turns. See `turnStarts`. A joined message goes with
- * the turn it names (`AgentMessage.joined`), even when another turn's
- * messages were stored between; one naming a turn that is not in `messages`
- * stays where it is.
+ * `messages` grouped into turns. See `turnStarts`. A message whose `turn`
+ * (or `joined`) names a turn goes with that turn, even when another turn's
+ * messages were stored between, as with parallel runs; one naming a turn
+ * that is not in `messages`, or that comes later, stays where it is.
  */
 export function splitTurns(messages: readonly AgentMessage[]): AgentMessage[][] {
   const starts = turnStarts(messages);
@@ -80,7 +94,8 @@ export function splitTurns(messages: readonly AgentMessage[]): AgentMessage[][] 
   let turn = -1;
   messages.forEach((message, index) => {
     if (starts[turn + 1] === index) turn++;
-    const home = message.joined !== undefined ? turnOfId.get(message.joined) : undefined;
+    const named = homeOf(message);
+    const home = named !== undefined ? turnOfId.get(named) : undefined;
     turns[home ?? turn]!.push(message);
     turnOfId.set(message.id, home ?? turn);
   });
@@ -88,9 +103,10 @@ export function splitTurns(messages: readonly AgentMessage[]): AgentMessage[][] 
 }
 
 /**
- * The turn `first` cut moved back until no message kept after it joined a
- * turn before it: a cut between a joined message and its turn would send
- * the model an answer to a question it cannot see.
+ * The turn `first` cut moved back until no message kept after it belongs to
+ * a turn before it (by `turn`, or `joined`): a cut there would send the model
+ * a reply without the message it answers, or an answer to a question it
+ * cannot see.
  */
 function keepJoinedTurns(messages: readonly AgentMessage[], starts: number[], first: number): number {
   const turnOf = (index: number) => {
@@ -101,8 +117,8 @@ function keepJoinedTurns(messages: readonly AgentMessage[], starts: number[], fi
   const indexOf = new Map(messages.map((message, index) => [message.id, index]));
   let cut = first;
   for (let index = messages.length - 1; index >= starts[cut]!; index--) {
-    const joined = messages[index]!.joined;
-    const at = joined !== undefined ? indexOf.get(joined) : undefined;
+    const named = homeOf(messages[index]!);
+    const at = named !== undefined ? indexOf.get(named) : undefined;
     if (at !== undefined && at < starts[cut]!) cut = turnOf(at);
   }
   return cut;

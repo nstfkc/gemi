@@ -17,10 +17,11 @@ import {
   type BusyPolicyParams,
   MemoryAgentStore,
   MemoryLiveRuns,
+  type ThreadRunLimit,
 } from "./AgentController";
 import type { ProviderEvent } from "./AgentProvider";
 import { decodeSSE } from "./client/sse";
-import { turnStarts } from "./contextWindow";
+import { splitTurns, turnStarts } from "./contextWindow";
 import { fakeProvider } from "./providers/fakeProvider";
 import { s } from "./Schema";
 import { DatabaseAgentStore } from "./store/DatabaseAgentStore";
@@ -82,7 +83,7 @@ async function setup(
     store?: AgentStore;
     maxSteps?: number;
     busyPolicy?: (params: BusyPolicyParams<Body>) => AgentTurnBusyPolicy;
-    maxThreadRuns?: number;
+    maxThreadRuns?: ThreadRunLimit;
     maxConcurrentRuns?: number;
     tools?: any[];
   } = {},
@@ -682,6 +683,175 @@ describe("parallel limits", () => {
     const frames = await reading;
     expect(frames[0]!.event).toMatchObject({ type: "run-start", runId: first.runId });
     expect(liveRuns.running({ threadId })).toEqual([]);
+  });
+});
+
+describe("parallel: each message names its turn (#1339)", () => {
+  test("a reply stored after another run's messages still names its own question", async () => {
+    const { store, Chat, release, calls } = await setup([say("first answer"), say("second answer")]);
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "write the hero" });
+    await until(() => calls() === 1);
+    const second = await Chat.startTurn({ threadId, text: "what time is it", ifBusy: "parallel" });
+    release(1);
+    await second.result();
+    release(0);
+    await first.result();
+
+    const stored = (await store.loadThread(threadId))!;
+    const byText = (text: string) => stored.find((message) => textOf(message) === text)!;
+    expect(byText("write the hero").turn).toBe(byText("write the hero").id);
+    expect(byText("first answer").turn).toBe(byText("write the hero").id);
+    expect(byText("what time is it").turn).toBe(byText("what time is it").id);
+    expect(byText("second answer").turn).toBe(byText("what time is it").id);
+    // Each reply with its own question, wherever the store put it.
+    expect(splitTurns(stored).map((turn) => turn.map(textOf))).toEqual(
+      expect.arrayContaining([
+        ["write the hero", "first answer"],
+        ["what time is it", "second answer"],
+      ]),
+    );
+  });
+
+  /** Two parallel turns, each parked on an approval: "publish home" (asked first), then "publish about". */
+  async function twoParked(replies: ProviderEvent[][]) {
+    const approve = AgentTool.create({
+      name: "publish",
+      description: "Publish",
+      inputSchema: s.object({ page: s.string() }),
+      requiresApproval: true,
+      execute: async ({ page }: { page: string }) => `published ${page}`,
+    });
+    const ask = (id: string, page: string): ProviderEvent[] => [
+      { type: "tool-call", toolCallId: id, name: "publish", args: JSON.stringify({ page }) },
+      finish(),
+    ];
+    const harness = await setup([ask("cA", "home"), ask("cB", "about"), ...replies], { tools: [approve] });
+    const { store, Chat, release, calls } = harness;
+    const { threadId } = await store.createThread({});
+    const a = await Chat.startTurn({ threadId, text: "publish home" });
+    await until(() => calls() === 1);
+    const b = await Chat.startTurn({ threadId, text: "publish about", ifBusy: "parallel" });
+    release(0);
+    release(1);
+    const [parkedA, parkedB] = await Promise.all([a.result(), b.result()]);
+    const approval = (pending: { toolCallId: string; signature?: string }) => ({
+      toolCallId: pending.toolCallId,
+      signature: pending.signature!,
+      approve: true,
+    });
+    const answer = async (...pending: { toolCallId: string; signature?: string }[]) => {
+      const turn = await Chat.startTurn({ threadId, turn: { toolResults: pending.map(approval) } });
+      release(calls());
+      return { turn, result: await turn.result() };
+    };
+    const stored = async () => {
+      const messages = (await store.loadThread(threadId))!;
+      return { messages, byText: (text: string) => messages.find((message) => textOf(message) === text)! };
+    };
+    return { ...harness, A: parkedA.pending[0]!, B: parkedB.pending[0]!, answer, stored };
+  }
+
+  test("answering the later of two turns' questions carries on that turn, not the first one stored", async () => {
+    const { A, B, answer, stored } = await twoParked([say("about is live")]);
+    const { turn, result } = await answer(B);
+    expect(result.text).toBe("about is live");
+    const { byText } = await stored();
+    expect(turn.run.turn).toEqual({ id: byText("publish about").id, continues: true, answers: [B.toolCallId] });
+    expect(byText("about is live").turn).toBe(byText("publish about").id);
+    // A's question, refused by the turn that answered something else, stays in A's turn.
+    const asking = (await stored()).messages.find((message) =>
+      message.content.some((part) => part.type === "tool-call" && part.toolCallId === A.toolCallId),
+    )!;
+    expect(asking.turn).toBe(byText("publish home").id);
+  });
+
+  test("one request answering both, the later first: it carries on the turn of the first answer it lists", async () => {
+    const { A, B, answer, stored } = await twoParked([say("both are live")]);
+    const { turn } = await answer(B, A);
+    await turn.result();
+    const { byText } = await stored();
+    expect(turn.run.turn?.id).toBe(byText("publish about").id);
+    expect(byText("both are live").turn).toBe(byText("publish about").id);
+  });
+
+  test("busyPolicy sees each running run's turn id and the body that started it", async () => {
+    const { store, Chat, release, asked, calls } = await setup([say("a"), say("b")]);
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "write the hero", body: { pageId: "p_1" } });
+    await until(() => calls() === 1);
+    await Chat.startTurn({ threadId, text: "make it blue", ifBusy: "join" });
+    const stored = (await store.loadThread(threadId))!;
+    expect(asked[0]!.running[0]).toMatchObject({
+      runId: first.runId,
+      messageId: stored.find((message) => textOf(message) === "write the hero")!.id,
+      body: { pageId: "p_1" },
+    });
+    release(0);
+    release(1);
+    await first.result();
+    // The joined message names the turn it joined, as `joined` still does.
+    const after = (await store.loadThread(threadId))!;
+    const joined = after.find((message) => textOf(message) === "make it blue")!;
+    expect(joined.turn).toBe(asked[0]!.running[0]!.messageId);
+    expect(joined.joined).toBe(joined.turn);
+  });
+
+  test("overflow: queue holds a parallel turn past maxThreadRuns until a run ends, then starts it", async () => {
+    const { store, Chat, release, calls } = await setup([say("a"), say("b"), say("c")], {
+      maxThreadRuns: { max: 2, overflow: "queue" },
+    });
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "1" });
+    const second = await Chat.startTurn({ threadId, text: "2", ifBusy: "parallel" });
+    let third: AgentTurn | undefined;
+    const starting = Chat.startTurn({ threadId, text: "3", ifBusy: "parallel" }).then((turn) => {
+      third = turn as AgentTurn;
+    });
+    await until(() => calls() === 2);
+    await tick();
+    await tick();
+    // Held, not refused, while two are going.
+    expect(third).toBeUndefined();
+    expect(calls()).toBe(2);
+
+    release(1);
+    await second.result();
+    await starting;
+    expect(third!.joined).toBe(false);
+    await until(() => calls() === 3);
+    release(2);
+    expect((await third!.result()).text).toBe("c");
+    release(0);
+    await first.result();
+  });
+
+  test.each([
+    ["NaN", Number.NaN],
+    ["zero", 0],
+    ["a fraction", 1.5],
+    ["an unknown overflow", { max: 2, overflow: "Queue" }],
+  ])("a maxThreadRuns answer that is %s fails the turn", async (_name, limit) => {
+    const { store, Chat, release } = await setup([say("a")], { maxThreadRuns: limit as ThreadRunLimit });
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "1" });
+    await expect(Chat.startTurn({ threadId, text: "2", ifBusy: "parallel" })).rejects.toThrow(/maxThreadRuns/);
+    release(0);
+    await first.result();
+  });
+
+  test("overflow: reject is the bare number's 429", async () => {
+    const { store, Chat, release } = await setup([say("a"), say("b")], {
+      maxThreadRuns: { max: 1, overflow: "reject" },
+    });
+    const { threadId } = await store.createThread({});
+    const first = await Chat.startTurn({ threadId, text: "1" });
+    await expect(Chat.startTurn({ threadId, text: "2", ifBusy: "parallel" })).rejects.toMatchObject({
+      status: 429,
+      code: "too_many_runs",
+    });
+    release(0);
+    await first.result();
   });
 });
 
