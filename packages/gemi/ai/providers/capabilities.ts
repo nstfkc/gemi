@@ -134,6 +134,30 @@ function supportsToolSearch(family: Family): boolean {
 }
 
 /**
+ * What gemi's Responses request builder does on top of the model (#1345): it
+ * sends `trailingContext` as a last developer message, after the cached
+ * prefix, and holds a narrowed step to `allowedTools` with `tool_choice:
+ * allowed_tools` while sending the full tool list. `allowed_tools` is taken
+ * by the gpt-5 family, and by an id this file does not know (the same
+ * capable default as everywhere here); older models keep a narrowed list.
+ * Kept apart from `capabilitiesForModel`, which says what the model does.
+ */
+export function responsesRequestFeatures(model: string): Pick<ProviderCapabilities, "trailingContext" | "allowedTools"> {
+  const family = parseFamily(normalizeModelId(model));
+  return { trailingContext: true, allowedTools: !family || (family.kind === "gpt" && family.major >= 5) };
+}
+
+/**
+ * What gemi's Messages request builder does on top of the model (#1345): it
+ * sends `trailingContext` after the last message with the cache breakpoint
+ * before it. The Messages API has no `allowed_tools`, so a narrowed step is
+ * sent a narrowed list.
+ */
+export function claudeRequestFeatures(): Pick<ProviderCapabilities, "trailingContext" | "allowedTools"> {
+  return { trailingContext: true };
+}
+
+/**
  * What a Claude model can do, read off its id, with the same bias as
  * `capabilitiesForModel`: an id this does not know gets every capability that
  * is safe to guess.

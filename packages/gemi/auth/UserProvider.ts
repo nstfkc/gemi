@@ -1,5 +1,5 @@
 import * as registry from "../orm/registry";
-import { currentConnectionName, currentTransaction } from "../orm/context";
+import { currentConnectionName, currentTransaction, deferUntilCommit } from "../orm/context";
 import { DatabaseManager } from "../database/DatabaseManager";
 import type { DatabaseConnection } from "../database/Connection";
 import { app } from "../foundation/app";
@@ -114,9 +114,9 @@ function registryModels(): AuthModels {
 }
 
 /**
- * The tail of the last `withLegacySessionLock` on each SQLite connection. See
- * that method for why SQLite queues in the process instead of locking in the
- * database.
+ * The tail of the last `transaction` or `withLegacySessionLock` on each
+ * SQLite connection. See those methods for why SQLite queues in the process
+ * instead of locking in the database.
  */
 const sqliteLegacySessionQueues = new WeakMap<DatabaseConnection, Promise<unknown>>();
 
@@ -277,9 +277,47 @@ export class UserProvider<TSession = SessionWithUser> {
    * hoisting it here would silently suspend policies for `config.onUserCreated`
    * too, and an application's provisioning writes should run under the same
    * policy resolution as the rest of its code.
+   *
+   * On SQLite, transactions opened here queue in the process, one after
+   * another per connection, with the legacy-session ones
+   * (`withLegacySessionLock`): Bun's client runs every statement on one
+   * connection, where a second `BEGIN` while a transaction is open fails
+   * outright. Two sign-ups at once answered 500 there (#1356). Inside a
+   * transaction already, this is a savepoint and does not queue.
    */
   transaction<T>(fn: () => Promise<T>): Promise<T> {
-    return this.models.User.transaction(fn);
+    return this.queuedOnSqlite((release) =>
+      this.models.User.transaction(async () => {
+        deferUntilCommit(release);
+        return fn();
+      }),
+    );
+  }
+
+  /**
+   * `begin` now, or, on SQLite outside a transaction, after the transactions
+   * this provider queued on the connection before it.
+   *
+   * The next one may begin at COMMIT, not when `begin` resolves: the first
+   * after-commit callback lets it go. `begin` resolves only after every
+   * callback deferred until the commit has run (a sync event listener, say),
+   * and one of those that opened a transaction here would otherwise wait on
+   * the very transaction that waits on it, and every sign-in on the process
+   * behind both. A rollback runs no callbacks; settling lets it go then.
+   */
+  private queuedOnSqlite<T>(begin: (release: () => void) => Promise<T>): Promise<T> {
+    const none = () => {};
+    if (currentTransaction()) return begin(none);
+    const name = this.models.User.$connection ?? currentConnectionName();
+    const connection = app(DatabaseManager).connection(name);
+    if (connection.dialect !== "sqlite") return begin(none);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const previous = sqliteLegacySessionQueues.get(connection) ?? Promise.resolve();
+    sqliteLegacySessionQueues.set(connection, released);
+    const result = previous.then(() => begin(release));
+    result.then(release, release);
+    return result;
   }
 
   /**
@@ -306,24 +344,18 @@ export class UserProvider<TSession = SessionWithUser> {
   withLegacySessionLock<T>(token: string, fn: () => Promise<T>): Promise<T> {
     const name = this.models.User.$connection ?? currentConnectionName();
     const connection = app(DatabaseManager).connection(name);
-    const locked = () =>
-      this.transaction(async () => {
+    const locked = (release: () => void) =>
+      this.models.User.transaction(async () => {
+        deferUntilCommit(release);
         if (connection.dialect === "postgres") {
           const key = `gemi:legacy-session:${token}`;
           await currentTransaction()!`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
         }
         return fn();
       });
-    // Inside a transaction already, this one is a savepoint and opens nothing
-    // for the queue to keep apart — and waiting on the queue there could wait
-    // on a transaction that cannot begin until this one's has ended.
-    if (connection.dialect !== "sqlite" || currentTransaction()) {
-      return locked();
-    }
-    const previous = sqliteLegacySessionQueues.get(connection) ?? Promise.resolve();
-    const result = previous.then(locked, locked);
-    sqliteLegacySessionQueues.set(connection, result.catch(() => {}));
-    return result;
+    // Queued on SQLite like `transaction`; see `queuedOnSqlite`. Inside a
+    // transaction already, this one is a savepoint and does not queue.
+    return this.queuedOnSqlite(locked);
   }
 
   /**

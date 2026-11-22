@@ -1281,6 +1281,10 @@ export type AgentControllerHooks<Body extends object = object, Ctx = AgentContex
     req: HttpRequest<any, any>,
     extra: { body: Body; context: Ctx },
   ) => AgentUsageLimits | void | Promise<AgentUsageLimits | void>;
+  trailingContext?: (
+    req: HttpRequest<any, any>,
+    extra: { body: Body; context: Ctx },
+  ) => string | void | Promise<string | void>;
   /** Builds the run's context. `Ctx` is the agents' (see `defineAgentHooks`). */
   context?: (req: HttpRequest<any, any>, extra: { body: Body }) => Ctx | Promise<Ctx>;
   memoryScopes?: (
@@ -1754,6 +1758,34 @@ export abstract class AgentController<
     extra: { body: Body; context: ContextOf<A> },
   ): AgentRunTools | void | Promise<AgentRunTools | void> {
     return this.hooks?.runTools?.(req, extra);
+  }
+
+  /**
+   * TEXT AFTER THE CONVERSATION (#1345): what the model should know on this
+   * turn that is not part of it (the screen the person is on, the time, a
+   * small note on the app's state), sent after the last message on every
+   * model call of the run.
+   *
+   * ```ts
+   * protected trailingContext(req, { body }) {
+   *   return `The person is looking at the page "${body.pageTitle}".`;
+   * }
+   * ```
+   *
+   * Unlike `instructions()`, it is not part of the prompt the provider
+   * caches, so it can change on every turn without a cache miss; and unlike a
+   * message, it is never stored, so the thread does not fill up with notes.
+   * Called once per turn, after `context()`, on turns from `useChat`,
+   * `startTurn` and voice alike. Answer nothing to send none (the default).
+   * `prepareStep` can change it for one call
+   * (`PrepareStepResult.trailingContext`). `body` is client-controlled, as
+   * in `instructions()`: treat it as what the client says, not as fact.
+   */
+  protected trailingContext(
+    req: HttpRequest<any, any>,
+    extra: { body: Body; context: ContextOf<A> },
+  ): string | void | Promise<string | void> {
+    return this.hooks?.trailingContext?.(req, extra);
   }
 
   /**
@@ -2495,6 +2527,7 @@ export abstract class AgentController<
       const skills = (await this.skills(req, { body: extraBody })) || undefined;
       const runTools = (await this.runTools(req, { body: extraBody, context })) || undefined;
       const usageLimits = (await this.usageLimits(req, { body: extraBody, context })) || undefined;
+      const trailingContext = (await this.trailingContext(req, { body: extraBody, context })) || undefined;
       // Above the cancel check, not below it, and that placement is the whole
       // reason this is a separate statement rather than an argument on the call
       // below: the comment on that check says nothing yields between it and
@@ -2598,6 +2631,7 @@ export abstract class AgentController<
         // The turn's own tools and which tools are offered (#1123).
         ...(runTools?.tools && runTools.tools.length > 0 ? { tools: runTools.tools } : {}),
         ...(runTools?.activeTools ? { activeTools: runTools.activeTools } : {}),
+        ...(trailingContext ? { trailingContext } : {}),
         // Budgets on what the run may spend (#1124).
         ...(usageLimits ? { usageLimits } : {}),
         // Built from this request once, here, and the only thing the run knows
