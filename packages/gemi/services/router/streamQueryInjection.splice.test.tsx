@@ -63,7 +63,7 @@ describe("payload splicing (#404)", () => {
       injectQueryPayloads(source.stream, store),
     ).text();
 
-    // Byte-identical to what React did on folioai.com/pricing: the view filled
+    // Byte-identical to what React did on a real pricing page: the view filled
     // up in the middle of a `<link>`, and the queue was non-empty.
     source.write('<!doctype html><html><head><link rel="modulepre');
     source.write('load" href="/assets/dist.js"/><link rel="modulepreload" href="/b.js"/>');

@@ -18,6 +18,24 @@ What to check:
 - **A native UI that expected `pending` to empty after answering one card** now keeps another turn's cards. That only happens on servers that run turns side by side. Calls without a `turn` (older servers) behave as before.
 - The conformance fixtures (`client/__fixtures__/reducer.json`) have new cases. A port of the client outside this repo should replay them.
 
+# 0.235.0
+
+## Usage on failed, cut, retried and stopped model calls (#1353)
+
+**New API and behaviour changes (minor version).** See [Calls that don't end normally](docs/ai-usage.md#calls-that-dont-end-normally).
+
+- New `ProviderEvent` `{ type: "usage", usage }`: what a call has used so far, sent while it streams (the Anthropic providers send it on `message_start` and `message_delta`). The `finish` that closes the call replaces it.
+- A run, `generate()` call or compaction summary stopped mid-call now counts what the call had used, **on the Anthropic providers**: `result.usage`, the last message's `usage` and the meter include it, each `FallbackProvider` leg at its own model. Before, a stopped call counted nothing. **OpenAI and Azure OpenAI stream no usage before their last frame, so a stopped call there still counts nothing.**
+- A call cut or broken after some output ends with a `finish` (and an `error`, new `usage` field) carrying what the provider reported so far, instead of zero.
+- `retry` events (`ProviderRetryInfo.usage`, `onProviderRetry`) carry what the dropped attempt used. As before, it is also added to the closing `finish`.
+
+What to check:
+
+- **An exhaustive `switch` on `ProviderEvent`** (a custom provider wrapper, a consumer with a `never` check) needs a `case "usage"`. Passing it on, or ignoring it, are both fine.
+- **Recordings** made from now on contain `usage` events. Recordings made before replay as they did.
+- **Usage totals** go up a little for runs that were stopped or failed halfway: those calls are now counted.
+- **Tests that compare a provider's events with `toEqual`** see the new `usage` events (Anthropic), and `usage` on `error` and `retry`.
+
 # 0.234.0
 
 ## The database rate limiter stores keys hashed (#1363)

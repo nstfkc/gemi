@@ -276,6 +276,26 @@ export type ProviderEvent =
    */
   | { type: "finish"; reason: FinishReason; usage: Usage; model?: string }
   /**
+   * What the call has used so far (#1353), whenever the stream reports it
+   * before the end (Anthropic's `message_start` and `message_delta`): the
+   * whole call's, attempts dropped before it included, not a delta. The
+   * `finish` that closes the call has the final count and replaces it. What
+   * `Agent` bills for a call it stops, whose `finish` it never reads.
+   * Informational: a consumer that ignores it loses nothing but that. A
+   * provider need not send it.
+   */
+  | {
+      type: "usage";
+      usage: Usage;
+      /** The model the count is for, when the provider said. */
+      model?: string;
+      /**
+       * `usage` by model, when the call used more than one (a
+       * `FallbackProvider` that fell back): what a meter prices each at.
+       */
+      byModel?: Record<string, Usage>;
+    }
+  /**
    * `status` and `requestId` describe the HTTP response the error came from,
    * when there was one, and `providerType`, `providerCode` and
    * `providerParam` the provider's own error body (#1302), whether it came on
@@ -307,6 +327,13 @@ export type ProviderEvent =
       error: AgentError;
       /** Set when the call was cut at `maxToolArgumentChars` (#1259). */
       toolArgumentsTooLong?: ToolArgumentsTooLong;
+      /**
+       * What the call used before it failed (#1353), when the provider said:
+       * the whole call's, dropped attempts included, the same count as the
+       * `finish` that follows. A call cut at the output limit or broken
+       * halfway is billed for it.
+       */
+      usage?: Usage;
     } & ProviderErrorDetail);
 
 /**
@@ -331,6 +358,12 @@ export type ProviderEvent =
  *   once the retries are spent (#1259). `phase` is then `"stream"`.
  */
 export type ProviderRetryInfo = ProviderErrorDetail & {
+  /**
+   * What the failed attempt used, when the provider said (#1353). Billed
+   * though dropped; it is also added to the `finish` that closes the call,
+   * so a consumer summing `finish` usage counts it once.
+   */
+  usage?: Usage;
   attempt: number;
   maxRetries: number;
   error: AgentError;

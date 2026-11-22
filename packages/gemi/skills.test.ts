@@ -164,10 +164,10 @@ describe("the shipped agent skill", () => {
 
   test("names no package that only one application has", () => {
     // The skill was written against a single private app. These are the shapes
-    // that leaked: a scoped package from that repo, and paths into its views.
+    // that leaked from it.
     const leaks: string[] = [];
     for (const { path, text } of sources) {
-      for (const pattern of [/@folio\//i, /folio-ai-concept/i, /usehooks-ts/, /in-house/i]) {
+      for (const pattern of [/usehooks-ts/, /in-house/i]) {
         if (pattern.test(text)) leaks.push(`${path}: ${pattern}`);
       }
     }

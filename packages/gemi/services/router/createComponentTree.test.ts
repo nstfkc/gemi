@@ -58,7 +58,7 @@ class DeeplyNestedRouter extends ViewRouter {
   };
 }
 
-// #788: the kyte shape — a legacy path that redirects through the same view as
+// #788: a real app's shape — a legacy path that redirects through the same view as
 // its replacement, which takes params.
 class SharedViewRouter extends ViewRouter {
   routes = {

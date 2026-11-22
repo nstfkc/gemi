@@ -106,7 +106,7 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
  * this covers the one whose response started and then broke while its body was
  * being read: the socket closed, the stream ended with no terminal frame, or
  * the provider sent a `response.failed` / `error` frame that reads as
- * retryable. Measured in fager: one such drop on the first step lost a whole
+ * retryable. Measured in an app: one such drop on the first step lost a whole
  * build, and the same request a second later worked.
  *
  * Nothing the user could have seen is repeated. Until the first content event
@@ -190,7 +190,11 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
     dropped = undefined;
     return { ...event, usage };
   };
-  const aborted = (): ProviderEvent => closing({ type: "finish", reason: "aborted", usage: emptyUsage() });
+  // With what the attempt used so far (#1353): a stopped call is billed too.
+  const aborted = (usage?: Usage): ProviderEvent =>
+    closing({ type: "finish", reason: "aborted", usage: usage ?? emptyUsage() });
+  /** What the call has used, the dropped attempts' and this one's so far. */
+  const soFar = (usage: Usage): Usage => addUsage(addUsage(emptyUsage(), dropped ?? emptyUsage()), usage);
 
   const idleMs = endpoint.streamIdleTimeoutMs ?? 0;
   const maxMs = endpoint.streamMaxDurationMs ?? 0;
@@ -298,8 +302,11 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
     // much text each has streamed. Before `committed`, these are the only
     // things the consumer has seen, and a retry discards them.
     const partial = new Map<string, ArgumentScan>();
-    // The usage the stream reported so far, for a call ended as a runaway.
+    // The usage the stream reported so far: for a call ended as a runaway,
+    // cut, broken or stopped (#1353), and for the `usage` events.
     let usageSoFar: Usage | undefined;
+    // The whole call's, as `usage` and the closing `finish` count it.
+    const withUsage = (): { usage?: Usage } => (usageSoFar ? { usage: soFar(usageSoFar) } : {});
     // A runaway call whose arguments were whole JSON, finished as written.
     let finished: Extract<ProviderEvent, { type: "tool-call" }> | undefined;
     try {
@@ -323,6 +330,16 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
         structuredOutput: params.structuredOutput,
         onUsage: (usage) => (usageSoFar = usage),
       })) {
+        // The parser's count is this attempt's; the call's includes the
+        // attempts dropped before it. Sent at once, committed or not: it
+        // replaces rather than adds, and a dropped attempt is billed anyway,
+        // so a consumer that stops before the first content (the whole input
+        // is billed by then) still holds the count.
+        if (event.type === "usage") {
+          usageSoFar = event.usage;
+          yield { type: "usage", usage: soFar(event.usage) };
+          continue;
+        }
         if (event.type === "tool-call-delta") {
           let scan = partial.get(event.toolCallId);
           if (!scan) partial.set(event.toolCallId, (scan = newScan()));
@@ -387,7 +404,7 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
       streamTimedOut = error instanceof ProviderTimeoutError;
       const normalized = normalizeProviderError(error);
       if (normalized.code === "aborted" || params.signal?.aborted) {
-        yield aborted();
+        yield aborted(usageSoFar);
         return;
       }
       if (error instanceof ProviderToolArgumentsTooLongError) cut = error.detail;
@@ -395,14 +412,14 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
         // The cut call is named after earlier content too (#1326), so the agent
         // can answer it with the tool's error. A committed attempt is never
         // asked again, so `retryToolArgumentsTooLong` does not apply here.
-        yield { type: "error", error: normalized, ...(cut ? { toolArgumentsTooLong: cut } : {}) };
-        yield closing({ type: "finish", reason: "error", usage: emptyUsage() });
+        yield { type: "error", error: normalized, ...(cut ? { toolArgumentsTooLong: cut } : {}), ...withUsage() };
+        yield closing({ type: "finish", reason: "error", usage: usageSoFar ?? emptyUsage() });
         return;
       }
       failure = normalized;
       held.push(
-        { type: "error", error: normalized, ...(cut ? { toolArgumentsTooLong: cut } : {}) },
-        { type: "finish", reason: "error", usage: emptyUsage() },
+        { type: "error", error: normalized, ...(cut ? { toolArgumentsTooLong: cut } : {}), ...withUsage() },
+        { type: "finish", reason: "error", usage: usageSoFar ?? emptyUsage() },
       );
     }
     if (finished) {
@@ -445,9 +462,12 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
               )
             : undefined;
     if (delayMs !== undefined) {
+      let attemptUsage: Usage | undefined;
       for (const event of held) {
-        if (event.type === "finish") dropped = addUsage(dropped ?? emptyUsage(), event.usage);
+        if (event.type === "finish") attemptUsage = addUsage(attemptUsage ?? emptyUsage(), event.usage);
       }
+      if (attemptUsage) dropped = addUsage(dropped ?? emptyUsage(), attemptUsage);
+      const used = attemptUsage && attemptUsage.totalTokens > 0 ? { usage: attemptUsage } : {};
       if (partial.size > 0) yield { type: "tool-call-discard", toolCallIds: [...partial.keys()] };
       const elapsedMs = now() - startedAt;
       yield {
@@ -456,6 +476,7 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
         maxRetries: maxStreamRetries,
         error: failure,
         ...detail,
+        ...used,
         phase: "stream",
         timedOut: streamTimedOut,
         ...(cut ? { toolArgumentsTooLong: cut } : {}),
@@ -465,6 +486,9 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
           ? { remainingMs: Math.max(0, endpoint.retry.patienceMs - elapsedMs - delayMs) }
           : {}),
       };
+      // What the call has used, dropped attempts included, for a consumer
+      // that stops during the wait: the next attempt's count starts again.
+      if (dropped && dropped.totalTokens > 0) yield { type: "usage", usage: soFar(emptyUsage()) };
       try {
         await waitUnlessAborted(delayMs, params.signal, endpoint.sleep);
       } catch {

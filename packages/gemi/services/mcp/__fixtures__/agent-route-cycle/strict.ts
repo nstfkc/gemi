@@ -4,7 +4,7 @@
  * `toAgentTools.strict.test.ts`, which compiles this file and expects no
  * errors.
  *
- * The shape is kyte's: the agent's tools are `toAgentTools` of a typed
+ * The shape is a real app's: the agent's tools are `toAgentTools` of a typed
  * registry, whose router exposes routes of the same api that mounts the agent
  * (`this.agent(...)`) and serves the chat's history, typed by the agent's own
  * message type. Every edge of that loop is a real one at the type level, but

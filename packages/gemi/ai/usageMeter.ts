@@ -219,6 +219,22 @@ async function meter<T>(
   }
 }
 
+/**
+ * A stopped call's last `usage` event (#1353), recorded as its `finish`
+ * would have been: each model's share at that model, `fallback` when the
+ * event names none.
+ */
+export function recordStopped(
+  event: { usage: UsageType; model?: string; byModel?: Record<string, UsageType> },
+  fallback: string,
+): void {
+  if (event.byModel) {
+    for (const [model, usage] of Object.entries(event.byModel)) recordUsage(model, usage);
+    return;
+  }
+  recordUsage(event.model ?? fallback, event.usage);
+}
+
 /** Called by the model call sites with each `finish` frame's usage. */
 export function recordUsage(model: string, usage: UsageType | undefined): void {
   if (!usage) return;

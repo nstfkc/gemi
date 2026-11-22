@@ -425,7 +425,7 @@ describe("useMutation", () => {
   });
 
   /**
-   * Issue #719. kyte draws pictures on two nodes at once through one `usePost`;
+   * Issue #719. An app draws pictures on two nodes at once through one `usePost`;
    * latest-wins dropped the first job's saved page and, worse, its validation
    * error. `concurrency: "parallel"` gives every call its own outcome.
    */

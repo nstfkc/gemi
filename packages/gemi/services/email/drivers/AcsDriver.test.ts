@@ -26,7 +26,7 @@ function fakeClient(
 
 function params(overrides: Partial<SendEmailParams> = {}): SendEmailParams {
   return {
-    from: "Folio <updates@transactional.example.com>",
+    from: "Acme <updates@transactional.example.com>",
     to: ["ada@example.com", "Grace Hopper <grace@example.com>"],
     cc: [],
     bcc: [],
