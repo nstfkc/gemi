@@ -53,7 +53,7 @@ afterAll(() => {
 });
 
 const request = (path: string, headers: Record<string, string>) =>
-  new Request(`http://folio.azurewebsites.net${path}`, { headers });
+  new Request(`http://app.azurewebsites.net${path}`, { headers });
 
 async function ipOf(headers: Record<string, string>) {
   const res = (await app.fetch(request("/api/ip", headers))) as Response;

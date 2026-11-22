@@ -14,7 +14,7 @@ import { withoutStaleReasoning } from "./staleReasoning";
 /**
  * A reasoning item replayed by an id the API never stored.
  *
- * Seen in fager on Azure (gpt-6.1-sol): a main step was cut by
+ * Seen in an app on Azure (gpt-6.1-sol): a main step was cut by
  * `streamMaxDurationMs` after its reasoning had started streaming, the run
  * failed, and the message it wrote kept the reasoning part with its `rs_…` id.
  * The next turn replayed that id and was refused with

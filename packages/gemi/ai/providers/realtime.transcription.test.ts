@@ -53,7 +53,7 @@ describe("transcription sessions: the vendor's shape", () => {
         type: "transcription",
         languages: ["en", "tr"],
         prompt: "Voice commands for a website builder.",
-        keywords: ["fager", "hero section"],
+        keywords: ["navbar", "hero section"],
         delay: "low",
         noiseReduction: "near_field",
         logprobs: true,
@@ -66,7 +66,7 @@ describe("transcription sessions: the vendor's shape", () => {
           transcription: {
             model: "gpt-live-transcribe",
             prompt: "Voice commands for a website builder.",
-            keywords: ["fager", "hero section"],
+            keywords: ["navbar", "hero section"],
             languages: ["en", "tr"],
             delay: "low",
           },
@@ -177,7 +177,7 @@ describe("transcription sessions: the client", () => {
     const realtime = OpenAIProvider.model("gpt-realtime-mini", { apiKey: "sk-test" }).realtime;
     const result = await realtime.createCall({
       sdp: "v=0 offer",
-      session: { type: "transcription", keywords: ["fager"] },
+      session: { type: "transcription", keywords: ["navbar"] },
     });
     expect(result).toEqual({ sdpAnswer: "v=0 answer", callId: "rtc_tr1" });
     const form = calls[0]!.init.body as FormData;
@@ -185,7 +185,7 @@ describe("transcription sessions: the client", () => {
       type: "transcription",
       audio: {
         input: {
-          transcription: { model: "gpt-live-transcribe", keywords: ["fager"] },
+          transcription: { model: "gpt-live-transcribe", keywords: ["navbar"] },
           turn_detection: null,
         },
       },

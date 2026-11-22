@@ -263,14 +263,14 @@ describe("assertValidDomainsConfig", () => {
     ],
     [
       "a host header that is not a header name",
-      { root: "example.com", trustProxy: { hostHeader: "x kyte host" } },
+      { root: "example.com", trustProxy: { hostHeader: "x app host" } },
       /must be a single header name/,
     ],
     [
       "a list of host headers",
       {
         root: "example.com",
-        trustProxy: { hostHeader: ["x-kyte-host", "x-forwarded-host"] as unknown as string },
+        trustProxy: { hostHeader: ["x-app-host", "x-forwarded-host"] as unknown as string },
       },
       /must be a single header name/,
     ],
@@ -278,7 +278,7 @@ describe("assertValidDomainsConfig", () => {
       "a secret header that is not a header name",
       {
         root: "example.com",
-        trustProxy: { hostHeader: "x-kyte-host", secret: { header: "", value: PROXY_SECRET } },
+        trustProxy: { hostHeader: "x-app-host", secret: { header: "", value: PROXY_SECRET } },
       },
       /must be a header name/,
     ],
@@ -287,8 +287,8 @@ describe("assertValidDomainsConfig", () => {
       {
         root: "example.com",
         trustProxy: {
-          hostHeader: "x-kyte-host",
-          secret: { header: "x-kyte-secret", value: "short" },
+          hostHeader: "x-app-host",
+          secret: { header: "x-app-secret", value: "short" },
         },
       },
       /at least 16 characters/,
@@ -299,8 +299,8 @@ describe("assertValidDomainsConfig", () => {
       {
         root: "example.com",
         trustProxy: {
-          hostHeader: "x-kyte-host",
-          secret: { header: "x-kyte-secret", value: undefined as unknown as string },
+          hostHeader: "x-app-host",
+          secret: { header: "x-app-secret", value: undefined as unknown as string },
         },
       },
       /at least 16 characters/,
@@ -310,8 +310,8 @@ describe("assertValidDomainsConfig", () => {
       {
         root: "example.com",
         trustProxy: {
-          hostHeader: "X-Kyte-Host",
-          secret: { header: "x-kyte-host", value: PROXY_SECRET },
+          hostHeader: "X-App-Host",
+          secret: { header: "x-app-host", value: PROXY_SECRET },
         },
       },
       /needs a header of its own/,
@@ -581,20 +581,20 @@ describe("trustProxy with a host header of its own", () => {
   // What the app sees behind Cloudflare for SaaS and Railway: `Host` and
   // `X-Forwarded-Host` both name the app's own domain.
   const behindCdn = (headers: Record<string, string> = {}) =>
-    req("http://kyte.up.railway.app/", {
-      "x-forwarded-host": "kyte.up.railway.app",
+    req("http://app.up.railway.app/", {
+      "x-forwarded-host": "app.up.railway.app",
       "x-forwarded-proto": "https",
       ...headers,
     });
   const customResolve = (host: string) => (host === "app.acme.com" ? { tenant: "acme" } : null);
   const custom = { group: ":tenant", resolve: customResolve, cacheTtlMs: 0 };
   const withHeader = (extra: Partial<DomainsConfig> = {}) =>
-    resolver({ trustProxy: { hostHeader: "x-kyte-host" }, custom, ...extra });
+    resolver({ trustProxy: { hostHeader: "x-app-host" }, custom, ...extra });
   const withSecret = (extra: Partial<DomainsConfig> = {}) =>
     resolver({
       trustProxy: {
-        hostHeader: "x-kyte-host",
-        secret: { header: "x-kyte-proxy-secret", value: PROXY_SECRET },
+        hostHeader: "x-app-host",
+        secret: { header: "x-app-proxy-secret", value: PROXY_SECRET },
       },
       custom,
       ...extra,
@@ -602,28 +602,28 @@ describe("trustProxy with a host header of its own", () => {
 
   test("routes by the named header", async () => {
     const r = withHeader();
-    const domain = await r.resolve(behindCdn({ "x-kyte-host": "app.acme.com" }));
+    const domain = await r.resolve(behindCdn({ "x-app-host": "app.acme.com" }));
     expect(domain).toEqual({
       host: "app.acme.com",
       group: ":tenant",
       params: { tenant: "acme" },
       custom: true,
     });
-    expect(r.publicOrigin(behindCdn({ "x-kyte-host": "app.acme.com" }))).toBe(
+    expect(r.publicOrigin(behindCdn({ "x-app-host": "app.acme.com" }))).toBe(
       "https://app.acme.com",
     );
   });
 
   test("the header is matched whatever its case in the config", async () => {
-    const r = resolver({ trustProxy: { hostHeader: "X-Kyte-Host" }, custom });
-    expect(await r.resolve(behindCdn({ "x-kyte-host": "app.acme.com" }))).toMatchObject({
+    const r = resolver({ trustProxy: { hostHeader: "X-App-Host" }, custom });
+    expect(await r.resolve(behindCdn({ "x-app-host": "app.acme.com" }))).toMatchObject({
       params: { tenant: "acme" },
     });
   });
 
   test("is ignored without trustProxy", async () => {
     const r = resolver({ custom });
-    const spoofed = req("http://acme.example.com/", { "x-kyte-host": "app.acme.com" });
+    const spoofed = req("http://acme.example.com/", { "x-app-host": "app.acme.com" });
     expect(await r.resolve(spoofed)).toMatchObject({ host: "acme.example.com", custom: false });
     expect(r.publicOrigin(spoofed)).toBe("http://acme.example.com");
   });
@@ -636,7 +636,7 @@ describe("trustProxy with a host header of its own", () => {
     expect(
       await r.resolve(
         req("http://example.com/", {
-          "x-kyte-host": "app.acme.com",
+          "x-app-host": "app.acme.com",
           "x-forwarded-host": "admin.example.com",
         }),
       ),
@@ -652,7 +652,7 @@ describe("trustProxy with a host header of its own", () => {
       await r.resolve(
         req("http://example.com/", {
           "x-forwarded-host": "admin.example.com",
-          "x-kyte-host": "app.acme.com",
+          "x-app-host": "app.acme.com",
         }),
       ),
     ).toMatchObject({ host: "admin.example.com", group: "admin" });
@@ -668,10 +668,10 @@ describe("trustProxy with a host header of its own", () => {
   test("falls back to the request's host when the header is missing or unparseable", async () => {
     const r = withHeader();
     expect(await r.resolve(req("http://admin.example.com/"))).toMatchObject({ group: "admin" });
-    expect(await r.resolve(req("http://admin.example.com/", { "x-kyte-host": "]" }))).toMatchObject(
+    expect(await r.resolve(req("http://admin.example.com/", { "x-app-host": "]" }))).toMatchObject(
       { group: "admin" },
     );
-    expect(r.publicOrigin(req("http://admin.example.com:8080/", { "x-kyte-host": "" }))).toBe(
+    expect(r.publicOrigin(req("http://admin.example.com:8080/", { "x-app-host": "" }))).toBe(
       "http://admin.example.com:8080",
     );
   });
@@ -679,8 +679,8 @@ describe("trustProxy with a host header of its own", () => {
   test("with the secret, the header is trusted", async () => {
     const r = withSecret();
     const proxied = behindCdn({
-      "x-kyte-host": "app.acme.com",
-      "x-kyte-proxy-secret": PROXY_SECRET,
+      "x-app-host": "app.acme.com",
+      "x-app-proxy-secret": PROXY_SECRET,
     });
     expect(await r.resolve(proxied)).toMatchObject({ host: "app.acme.com", custom: true });
     expect(r.publicOrigin(proxied)).toBe("https://app.acme.com");
@@ -691,14 +691,14 @@ describe("trustProxy with a host header of its own", () => {
   // to — one they could have sent anyway — never the one they claim.
   test("a spoofed header without the secret is ignored", async () => {
     const r = withSecret();
-    const spoofed = req("http://acme.example.com/", { "x-kyte-host": "app.acme.com" });
+    const spoofed = req("http://acme.example.com/", { "x-app-host": "app.acme.com" });
     expect(await r.resolve(spoofed)).toMatchObject({
       host: "acme.example.com",
       params: { tenant: "acme" },
       custom: false,
     });
     expect(r.publicOrigin(spoofed)).toBe("http://acme.example.com");
-    expect(await r.resolve(behindCdn({ "x-kyte-host": "app.acme.com" }))).toBeNull();
+    expect(await r.resolve(behindCdn({ "x-app-host": "app.acme.com" }))).toBeNull();
   });
 
   test("a wrong secret is the same as none", async () => {
@@ -712,8 +712,8 @@ describe("trustProxy with a host header of its own", () => {
     ];
     for (const secret of wrong) {
       const spoofed = req("http://admin.example.com/", {
-        "x-kyte-host": "app.acme.com",
-        "x-kyte-proxy-secret": secret,
+        "x-app-host": "app.acme.com",
+        "x-app-proxy-secret": secret,
       });
       expect(await r.resolve(spoofed)).toMatchObject({ host: "admin.example.com" });
       expect(r.publicOrigin(spoofed)).toBe("http://admin.example.com");
@@ -722,9 +722,9 @@ describe("trustProxy with a host header of its own", () => {
 
   test("the secret in a different header is the same as none", async () => {
     const spoofed = req("http://admin.example.com/", {
-      "x-kyte-host": "app.acme.com",
+      "x-app-host": "app.acme.com",
       "x-forwarded-host": PROXY_SECRET,
-      "x-kyte-secret": PROXY_SECRET,
+      "x-app-secret": PROXY_SECRET,
     });
     expect(await withSecret().resolve(spoofed)).toMatchObject({ host: "admin.example.com" });
   });
@@ -752,8 +752,8 @@ describe("trustProxy with a host header of its own", () => {
       r.publicOrigin(
         req("http://admin.example.com/", {
           "x-forwarded-proto": "https",
-          "x-kyte-host": "app.acme.com",
-          "x-kyte-proxy-secret": "wrong-secret-long-enough",
+          "x-app-host": "app.acme.com",
+          "x-app-proxy-secret": "wrong-secret-long-enough",
         }),
       ),
     ).toBe("https://admin.example.com");
@@ -761,15 +761,15 @@ describe("trustProxy with a host header of its own", () => {
       r.publicOrigin(
         req("http://admin.example.com/", {
           "x-forwarded-proto": "javascript",
-          "x-kyte-host": "app.acme.com",
-          "x-kyte-proxy-secret": PROXY_SECRET,
+          "x-app-host": "app.acme.com",
+          "x-app-proxy-secret": PROXY_SECRET,
         }),
       ),
     ).toBe("http://app.acme.com");
   });
 
   test("exposes the secret header so it can be kept from upstreams", () => {
-    expect(withSecret().proxySecretHeaders).toEqual(["x-kyte-proxy-secret"]);
+    expect(withSecret().proxySecretHeaders).toEqual(["x-app-proxy-secret"]);
     expect(withHeader().proxySecretHeaders).toEqual([]);
     expect(resolver({ trustProxy: true }).proxySecretHeaders).toEqual([]);
   });

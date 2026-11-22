@@ -2,9 +2,9 @@ import { describe, expect, test } from "vitest";
 import { JSONSchemaError, s, supportsStrict } from "./Schema";
 
 /**
- * `s.fromJSONSchema` (#710), with kyte's collection item schema as the main
+ * `s.fromJSONSchema` (#710), with an app's collection item schema as the main
  * fixture: it is what this was written to replace Ajv for, so the formats,
- * `x-order`, `title`s and the per-field issues are tested the way kyte uses
+ * `x-order`, `title`s and the per-field issues are tested the way an app uses
  * them.
  */
 const LINK = /^(https?:\/\/|mailto:|tel:|\/|#)/i;
@@ -29,7 +29,7 @@ const collection = {
 };
 
 describe("s.fromJSONSchema", () => {
-  test("reads kyte's collection schema and stays strict-mode safe", () => {
+  test("reads an app's collection schema and stays strict-mode safe", () => {
     const schema = s.fromJSONSchema(collection, { formats });
     expect(supportsStrict(schema)).toBe(true);
     const json = schema.toJSONSchema();
@@ -284,7 +284,7 @@ describe("s.fromJSONSchema", () => {
 });
 
 /**
- * `unknownKeys` (#753): kyte refuses a form submission carrying a field the
+ * `unknownKeys` (#753): an app refuses a form submission carrying a field the
  * form doesn't have, rather than losing what the visitor typed.
  */
 describe("s.fromJSONSchema unknownKeys", () => {

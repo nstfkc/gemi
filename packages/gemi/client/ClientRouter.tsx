@@ -371,7 +371,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       //
       // The rejection is handled by the route's `lazy()`, which reaches the
       // same import, and by the chunk recovery inside `loadViewModule`; left
-      // unhandled here it was only noise in an error reporter (folio#2117).
+      // unhandled here it was only noise in an error reporter .
       for (const component of views) {
         loadViewModule(component).catch(() => {});
       }

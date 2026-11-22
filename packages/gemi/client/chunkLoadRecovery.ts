@@ -154,7 +154,7 @@ function loadPending(url: string): boolean {
  * - Chromium: `Failed to fetch dynamically imported module: <url>`
  * - Firefox: `error loading dynamically imported module: <url>`
  * - Safari: `Importing a module script failed.`, and on iOS 16
- *   `Importing module '<specifier>' is not found.` (folio#2117)
+ *   `Importing module '<specifier>' is not found.`
  * - Vite's preload helper: `Unable to preload CSS for <url>`
  *
  * A view that throws while evaluating is not one of these, and reloading

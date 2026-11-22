@@ -31,7 +31,7 @@ import { compileWhere } from "./where";
 
 /** Every read operation, and what each accepts. */
 //
-// `lock` is gemi's, not Prisma's: Prisma has no row locks, which is why folio
+// `lock` is gemi's, not Prisma's: Prisma has no row locks, which is why an app
 // grew raw `select … for update` statements with hand-written row types (#627).
 // It changes only the statement's tail, so every other argument keeps its
 // Prisma meaning. See `compile/lock.ts`.

@@ -335,7 +335,7 @@ describe("Json path filters", () => {
    * SQL NULL for an absent key and a JSON `null` alike and the distinction the
    * sentinels draw was gone before the comparison. `dialect.jsonValueAt` is the
    * extraction that keeps it — `#>` on Postgres, `->` on SQLite — so the
-   * question is answerable, and the type has to admit it: folio's
+   * question is answerable, and the type has to admit it: an app's
    * `{ payload: { path: […], equals: AnyNull } }` is a read that could not
    * leave Prisma while this was a compile error.
    */
