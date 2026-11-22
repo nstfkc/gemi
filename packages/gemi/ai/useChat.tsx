@@ -1826,13 +1826,22 @@ export function useChat<P extends keyof AgentRoutes>(
         );
         answering.current = [...answering.current, batch];
         try {
+          let sending = results;
           if (ahead.length > 0) {
             const stopped = stops.current;
             await Promise.allSettled(ahead.map((other) => other.flushed));
             // `stop()` put the card back to plain pending; it is not sent.
             if (stops.current !== stopped || !mountedRef.current) return;
+            // Only the cards still held and still marked: a new message sent
+            // meanwhile settled the others, and an answer to them now would
+            // cut that message's reply only to be refused as stale.
+            const held = stateRef.current!.pending as ChatPendingToolCall[];
+            sending = results.filter((result) =>
+              held.some((call) => call.toolCallId === result.toolCallId && call.answering),
+            );
+            if (sending.length === 0) return;
           }
-          await send({ toolResults: results });
+          await send({ toolResults: sending });
         } finally {
           answering.current = answering.current.filter((other) => other !== batch);
         }

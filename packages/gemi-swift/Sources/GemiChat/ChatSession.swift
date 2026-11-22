@@ -446,7 +446,13 @@ public final class ChatSession<Agent: AgentSchema> {
       }
       for result in results { self.holding[result.toolCallId] = nil }
       if self.stops != stopped { return }
-      await self.send(ClientTurn(toolResults: results))
+      // Only the cards still held: a new message sent meanwhile settled the
+      // others, and answering them now would cut its reply for nothing.
+      let sending = results.filter { result in
+        self.state.pending.contains { $0.toolCallId == result.toolCallId }
+      }
+      if sending.isEmpty { return }
+      await self.send(ClientTurn(toolResults: sending))
     }
     holding[result.toolCallId] = flush
     queued = ([result], flush)

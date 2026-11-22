@@ -244,6 +244,54 @@ class ChatSessionTest {
   }
 
   @Test
+  fun aNewMessageWhileASecondAnswerWaitsDropsThatAnswer() = runTest {
+    // gemi #1380: the new message settles the held card; its answer is not sent.
+    val first = OpenStream()
+    fun results(request: ChatRequest): JsonArray? =
+      (jsonOf(request.body.decodeToString()).body["turn"] as? JsonObject)?.get("toolResults") as? JsonArray
+    fun text(request: ChatRequest): String? =
+      (jsonOf(request.body.decodeToString()).body["turn"] as? JsonObject)?.string("text")
+    val transport = FakeTransport { request ->
+      when {
+        request.url.endsWith("/stop") -> jsonResponse(200, """{"stopped":true}""")
+        results(request)?.firstOrNull()?.body?.string("toolCallId") == "tc_1" -> first.response
+        text(request) == "never mind" -> sse(*answer("Sure.", "run_3", "m3"))
+        else ->
+          sse(
+            """{"type":"run-start","runId":"run_1"}""",
+            """{"type":"awaiting-input","runId":"run_1","pending":[
+              {"toolCallId":"tc_1","name":"publish","input":{},"kind":"approval","signature":"s1","turn":"t"},
+              {"toolCallId":"tc_2","name":"publish","input":{},"kind":"approval","signature":"s2","turn":"t"}]}"""
+              .replace("\n", ""),
+            """{"type":"run-end","runId":"run_1","finishReason":"awaiting-input"}""",
+          )
+      }
+    }
+    val chat = session(transport)
+    chat.send("Publish both")
+
+    val one = chat.approve("tc_1", true)
+    runCurrent()
+    first.emit("""{"type":"run-start","runId":"run_2"}""")
+    runCurrent()
+    val two = chat.approve("tc_2", true)
+    runCurrent()
+    chat.send("never mind")
+    first.finish()
+    one.join()
+    two.join()
+    runCurrent()
+
+    assertTrue(
+      transport.requests.none { recorded ->
+        results(recorded.request)?.any { it.body.string("toolCallId") == "tc_2" } == true
+      }
+    )
+    assertTrue(chat.state.value.pending.isEmpty())
+    assertNull(chat.state.value.error)
+  }
+
+  @Test
   fun approvalsGivenTogetherGoOutAsOneTurn() = runTest {
     val transport = FakeTransport { request ->
       if (jsonOf(request.body.decodeToString()).body["turn"].body["toolResults"] != null) sse(*answer("Done.", "run_2", "m2"))

@@ -382,7 +382,11 @@ public class ChatSession(
           results.forEach { holding.remove(it.toolCallId) }
         }
         if (stops != stopped) return@launch
-        send(ClientTurn(toolResults = results))
+        // Only the cards still held: a new message sent meanwhile settled the
+        // others, and answering them now would cut its reply for nothing.
+        val sending = results.filter { result -> chat.pending.any { it.toolCallId == result.toolCallId } }
+        if (sending.isEmpty()) return@launch
+        send(ClientTurn(toolResults = sending))
       }
     holding[result.toolCallId] = flush
     queued = results to flush

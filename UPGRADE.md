@@ -10,7 +10,7 @@
   - A run whose turn still waits on a question ends with an `awaiting-input` frame listing every open question of the turn. When the model ended with `stop`, the run's `finishReason` is `awaiting-input`; the message keeps `stop`. So `AgentTurnResult.pending`, `onAwaitingInput` and a client's cards all show a turn that needs input. Clients older than this release put the second card back from that frame.
 - **`useChat`.**
   - Answering a card marks and then removes only that card.
-  - A card answered while an earlier answer is going out or its reply streams waits in the chat until that reply ends, then goes out. Before, it was reported as `invalid_tool_result`. It keeps `answering: true` meanwhile, even when the running reply restates it, and `stop()` puts it back unsent.
+  - A card answered while an earlier answer is going out or its reply streams waits in the chat until that reply ends, then goes out. Before, it was reported as `invalid_tool_result`. It keeps `answering: true` meanwhile, even when the running reply restates it. `stop()` puts it back unsent, and a new message sent meanwhile settles it, so its answer is never sent.
   - A stateless chat posts the held questions on their messages, so the server can keep them open.
 - **Kotlin and Swift.** Only the answered card leaves `pending`. A card answered while an earlier answer's reply streams waits until that reply ends, then goes out, instead of cutting it.
 - **Unchanged.** Several cards answered in the same tick still go out as one turn. A new message from the person still refuses every open question. Sub-agent questions under one tool call still resolve together. A call answered with a bad signature is still refused.
@@ -19,7 +19,7 @@ What to check:
 - A UI that relied on the first answer closing the other cards will now keep showing them. To close them, answer them (`approve(id, false)`) or send a new message.
 - `useChat`'s `status` is `awaiting-input` whenever a card is held. That includes while the first answer's reply streams, and after a failure (the error is in `error`, but `status` isn't `"error"` while a card is held). A UI that shows a stop button or typing indicator on `status === "streaming"` should read `chat.runs` instead.
 - A run that answered one card and ended now has `finishReason: "awaiting-input"` while another card of its turn is open. Code that treats `awaiting-input` as "the model just asked something" should read the frame's `pending`.
-- `onAwaitingInput` hooks that notify someone may be called again for questions they were already told about. Dedupe by `toolCallId` if that matters.
+- `onAwaitingInput` now fires at the end of every run that leaves a question of its turn open, including a run that answered one card and ended with text, and it lists every open question of the turn. A hook that notifies someone may be called again for questions they were already told about. Dedupe by `toolCallId` if that matters.
 - A UI that disabled every card while one answer was in flight (`call.answering` on all of them) now sees `answering` only on the cards being answered. The others can be answered.
 # 0.239.0
 

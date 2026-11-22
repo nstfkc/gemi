@@ -291,6 +291,48 @@ func eventually(_ condition: () -> Bool) async {
     #expect(chat.pending.isEmpty)
   }
 
+  @Test func aNewMessageWhileASecondAnswerWaitsDropsThatAnswer() async {
+    // gemi #1380: the new message settles the held card; its answer is not sent.
+    let first = OpenStream()
+    let transport = FakeTransport { request in
+      if request.url!.path.hasSuffix("/stop") { return json(status: 200, ["stopped": true]) }
+      let body = JSONValue.parse(request.httpBody!)
+      let results = body?["turn"]?["toolResults"]?.arrayValue
+      if results?.first?["toolCallId"] == "tc_1" { return first.response }
+      if body?["turn"]?["text"] == "never mind" { return sse(answer("Sure.", run: "run_3", message: "m3")) }
+      return sse([
+        ["type": "run-start", "runId": "run_1"],
+        [
+          "type": "awaiting-input", "runId": "run_1",
+          "pending": [
+            ["toolCallId": "tc_1", "name": "publish", "input": [:], "kind": "approval", "signature": "s1", "turn": "t"],
+            ["toolCallId": "tc_2", "name": "publish", "input": [:], "kind": "approval", "signature": "s2", "turn": "t"],
+          ],
+        ],
+        ["type": "run-end", "runId": "run_1", "finishReason": "awaiting-input"],
+      ])
+    }
+    let chat = UntypedChatSession(endpoint: endpoint, transport: transport)
+    await chat.send("Publish both")
+
+    let one = chat.approve("tc_1", true)
+    first.emit(["type": "run-start", "runId": "run_2"])
+    await eventually { transport.requests.count == 2 }
+    let two = chat.approve("tc_2", true)
+    try? await Task.sleep(nanoseconds: 20_000_000)
+    await chat.send("never mind")
+    first.finish()
+    await one.value
+    await two.value
+
+    let answeredTwo = transport.requests.contains {
+      $0.body["turn"]?["toolResults"]?.arrayValue?.contains { $0["toolCallId"] == "tc_2" } == true
+    }
+    #expect(!answeredTwo)
+    #expect(chat.pending.isEmpty)
+    #expect(chat.error == nil)
+  }
+
   @Test func approvalsGivenTogetherGoOutAsOneTurn() async {
     let transport = FakeTransport { request in
       if request.url!.path.hasSuffix("support"),

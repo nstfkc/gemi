@@ -1385,6 +1385,55 @@ describe("answering a pending call (#1106)", () => {
     ]);
   });
 
+  test("a new message while a second answer is held settles the card, and the held answer is never sent (#1380)", async () => {
+    const onError = vi.fn();
+    const { box } = await asked({ onError });
+    const run = controlled();
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes("/stop"))
+        return new Response(JSON.stringify({ stopped: true }), { status: 200 });
+      const body = JSON.parse(String(init?.body));
+      if (body.turn?.toolResults?.[0]?.toolCallId === "tc_1") return run.response;
+      return streamed(BOTH_DONE);
+    });
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    await act(async () => {
+      first = box.api.approve("tc_1", true);
+    });
+    await act(async () => {
+      run.push(ANSWER[0]!, ANSWER[1]!);
+    });
+    await act(async () => {
+      second = box.api.approve("tc_2", true);
+    });
+    await act(async () => {
+      await box.api.sendMessage("never mind");
+      run.abort();
+      await Promise.allSettled([first, second]);
+    });
+
+    const answered = calls().filter(([, init]) => {
+      try {
+        return Boolean(
+          JSON.parse(String(init?.body)).turn?.toolResults?.some(
+            (r: { toolCallId: string }) => r.toolCallId === "tc_2",
+          ),
+        );
+      } catch {
+        return false;
+      }
+    });
+    expect(answered).toHaveLength(0);
+    expect(calls().filter(([, init]) => String(init?.body).includes('"never mind"'))).toHaveLength(
+      1,
+    );
+    expect(onError).not.toHaveBeenCalled();
+    expect(box.api.error).toBeNull();
+    expect(box.api.pending).toEqual([]);
+  });
+
   test("stop() while a second answer is held puts it back and never sends it (#1380)", async () => {
     const { box } = await asked();
     const run = controlled();
