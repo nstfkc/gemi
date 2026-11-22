@@ -3,6 +3,7 @@ import { Log } from "../facades/Log";
 import { RequestContext } from "../http/requestContext";
 import type {
   AgentProvider,
+  ProviderEvent,
   ProviderRetryInfo,
   ProviderToolChoice,
   ProviderToolNamespace,
@@ -27,7 +28,7 @@ import {
   resolveRope,
   RunAborted,
 } from "./runtime";
-import { openMeter, recordUsage, type UsageMeter, type UsageTotals } from "./usageMeter";
+import { openMeter, recordStopped, recordUsage, type UsageMeter, type UsageTotals } from "./usageMeter";
 import { supportsStrict } from "./Schema";
 import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
@@ -4742,13 +4743,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // What the call has used so far, from its `usage` events (#1353): billed
     // when the run is stopped, since the `finish` that would have said it is
     // never read then. A `finish` replaces it.
-    let callSoFar: Usage | undefined;
+    let callSoFar: Extract<ProviderEvent, { type: "usage" }> | undefined;
     for (;;) {
       const next = await raceAbort(Promise.resolve(iterator.next()), signal).catch((error: unknown) => {
         if (callSoFar && error instanceof RunAborted) {
-          this.usage = addUsage(this.usage, callSoFar);
-          recordUsage(provider.model, callSoFar);
-          message.usage = addUsage(message.usage ?? emptyUsage(), callSoFar);
+          this.usage = addUsage(this.usage, callSoFar.usage);
+          recordStopped(callSoFar, provider.model);
+          message.usage = addUsage(message.usage ?? emptyUsage(), callSoFar.usage);
           callSoFar = undefined;
         }
         throw error;
@@ -4758,7 +4759,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
       switch (event.type) {
         case "usage": {
-          callSoFar = event.usage;
+          callSoFar = event;
           break;
         }
         case "text-delta": {

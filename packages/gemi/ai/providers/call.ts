@@ -305,7 +305,8 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
     // The usage the stream reported so far: for a call ended as a runaway,
     // cut, broken or stopped (#1353), and for the `usage` events.
     let usageSoFar: Usage | undefined;
-    const withUsage = (): { usage?: Usage } => (usageSoFar ? { usage: usageSoFar } : {});
+    // The whole call's, as `usage` and the closing `finish` count it.
+    const withUsage = (): { usage?: Usage } => (usageSoFar ? { usage: soFar(usageSoFar) } : {});
     // A runaway call whose arguments were whole JSON, finished as written.
     let finished: Extract<ProviderEvent, { type: "tool-call" }> | undefined;
     try {
@@ -330,14 +331,13 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
         onUsage: (usage) => (usageSoFar = usage),
       })) {
         // The parser's count is this attempt's; the call's includes the
-        // attempts dropped before it. Held with the rest until the attempt
-        // commits: a dropped attempt's count reaches the call through
-        // `dropped` instead.
+        // attempts dropped before it. Sent at once, committed or not: it
+        // replaces rather than adds, and a dropped attempt is billed anyway,
+        // so a consumer that stops before the first content (the whole input
+        // is billed by then) still holds the count.
         if (event.type === "usage") {
           usageSoFar = event.usage;
-          const progress: ProviderEvent = { type: "usage", usage: soFar(event.usage) };
-          if (committed) yield progress;
-          else held.push(progress);
+          yield { type: "usage", usage: soFar(event.usage) };
           continue;
         }
         if (event.type === "tool-call-delta") {
@@ -486,6 +486,9 @@ export async function* streamResponses<Body extends object = ResponsesRequest>(
           ? { remainingMs: Math.max(0, endpoint.retry.patienceMs - elapsedMs - delayMs) }
           : {}),
       };
+      // What the call has used, dropped attempts included, for a consumer
+      // that stops during the wait: the next attempt's count starts again.
+      if (dropped && dropped.totalTokens > 0) yield { type: "usage", usage: soFar(emptyUsage()) };
       try {
         await waitUnlessAborted(delayMs, params.signal, endpoint.sleep);
       } catch {

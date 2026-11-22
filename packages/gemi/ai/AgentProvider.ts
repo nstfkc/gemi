@@ -249,7 +249,17 @@ export type ProviderEvent =
    * Informational: a consumer that ignores it loses nothing but that. A
    * provider need not send it.
    */
-  | { type: "usage"; usage: Usage }
+  | {
+      type: "usage";
+      usage: Usage;
+      /** The model the count is for, when the provider said. */
+      model?: string;
+      /**
+       * `usage` by model, when the call used more than one (a
+       * `FallbackProvider` that fell back): what a meter prices each at.
+       */
+      byModel?: Record<string, Usage>;
+    }
   /**
    * `status` and `requestId` describe the HTTP response the error came from,
    * when there was one, and `providerType`, `providerCode` and
@@ -284,8 +294,9 @@ export type ProviderEvent =
       toolArgumentsTooLong?: ToolArgumentsTooLong;
       /**
        * What the call used before it failed (#1353), when the provider said:
-       * the same count as the `finish` that follows. A call cut at the output
-       * limit or broken halfway is billed for it.
+       * the whole call's, dropped attempts included, the same count as the
+       * `finish` that follows. A call cut at the output limit or broken
+       * halfway is billed for it.
        */
       usage?: Usage;
     } & ProviderErrorDetail);

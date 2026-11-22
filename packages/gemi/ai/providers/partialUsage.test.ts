@@ -1,6 +1,9 @@
 import { describe, expect, test } from "vitest";
 
 import { Agent } from "../Agent";
+import { FallbackProvider } from "../FallbackProvider";
+import { generate } from "../generate";
+import { s } from "../Schema";
 import { AnthropicProvider, OpenAIProvider, type AgentProvider, type ProviderEvent } from "../AgentProvider";
 import { RecordingProvider, type Recording } from "../testing";
 import type { FetchLike } from "./http";
@@ -55,8 +58,23 @@ async function events(provider: AgentProvider, signal?: AbortSignal) {
   return seen;
 }
 
-const claude = (bodies: Array<() => ReadableStream<Uint8Array>>, maxRetries = 0) =>
-  withFetch(new AnthropicProvider("claude-sonnet-4-6", { apiKey: "k", maxRetries }), bodies);
+const claude = (bodies: Array<() => ReadableStream<Uint8Array>>, maxRetries = 0, model = "claude-sonnet-4-6") =>
+  withFetch(new AnthropicProvider(model, { apiKey: "k", maxRetries }), bodies);
+
+/** Runs an agent until `ready` says so, then stops it. */
+async function stopped(provider: AgentProvider, ready: () => boolean) {
+  const stream = Agent.create({ name: "writer", provider }).stream({ messages: [], turn: { text: "go" } });
+  const reading = (async () => {
+    for await (const _event of stream) {
+      // drained
+    }
+  })();
+  for (let i = 0; i < 200 && !ready(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await stream.stop();
+  await reading;
+  return stream.result();
+}
 
 describe("Anthropic", () => {
   test("a stream broken after some output reports that output's tokens, on the error and the finish", async () => {
@@ -85,7 +103,10 @@ describe("Anthropic", () => {
         1,
       ),
     );
-    expect(seen.find((event) => event.type === "retry")).toMatchObject({ usage: { inputTokens: 10, outputTokens: 1 } });
+    const retry = seen.findIndex((event) => event.type === "retry");
+    expect(seen[retry]).toMatchObject({ usage: { inputTokens: 10, outputTokens: 1 } });
+    // Right after it, the call's total so far, for a stop during the wait.
+    expect(seen[retry + 1]).toMatchObject({ type: "usage", usage: { inputTokens: 10, outputTokens: 1 } });
     // The dropped attempt's 10 + 1, and the second's 10 + 7.
     expect(seen.at(-1)).toMatchObject({ type: "finish", usage: { inputTokens: 20, outputTokens: 8 } });
   });
@@ -103,6 +124,52 @@ describe("Anthropic", () => {
     expect(result.finishReason).toBe("aborted");
     expect(result.usage).toMatchObject({ inputTokens: 10, outputTokens: 7 });
     expect(result.messages.at(-1)!.usage).toMatchObject({ inputTokens: 10, outputTokens: 7 });
+  });
+});
+
+describe("stopped before the first content", () => {
+  test("a stop right after message_start bills the input", async () => {
+    let started = false;
+    const provider = claude([
+      () => {
+        started = true;
+        return body([MESSAGE_START], "hang");
+      },
+    ]);
+    const result = await stopped(provider, () => started);
+    expect(result.finishReason).toBe("aborted");
+    expect(result.usage).toMatchObject({ inputTokens: 10, outputTokens: 1 });
+  });
+
+  test("a FallbackProvider's usage includes the legs it fell back from, each metered at its own model", async () => {
+    let second = false;
+    const first = claude([() => body([MESSAGE_START], "drop")], 0, "claude-sonnet-4-6");
+    const backup = claude(
+      [
+        () => {
+          second = true;
+          return body([MESSAGE_START], "hang");
+        },
+      ],
+      0,
+      "claude-opus-5-5",
+    );
+    const provider = new FallbackProvider([{ provider: first }, { provider: backup }]);
+    const result = await stopped(provider, () => second);
+    expect(result.usage).toMatchObject({ inputTokens: 20, outputTokens: 2 });
+    expect(result.metered?.byModel["claude-sonnet-4-6"]?.usage).toMatchObject({ inputTokens: 10 });
+    expect(result.metered?.byModel["claude-opus-5-5"]?.usage).toMatchObject({ inputTokens: 10 });
+  });
+
+  test("a stopped generate() bills what its call used", async () => {
+    const controller = new AbortController();
+    const provider = claude([() => body([MESSAGE_START], "hang")]);
+    const answer = generate({ provider, output: s.object({ a: s.string() }), prompt: "x", signal: controller.signal });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    controller.abort();
+    const result = await answer;
+    expect(result.ok).toBe(false);
+    expect(result.usage).toMatchObject({ inputTokens: 10, outputTokens: 1 });
   });
 });
 
