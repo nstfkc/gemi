@@ -88,6 +88,9 @@ export class DatabaseRateLimiter extends RateLimiterDriver {
     super();
     this.prefix = options.prefix ?? "ratelimit:";
     if (this.prefix === "") throw new Error("DatabaseRateLimiter needs a prefix: its rows share the locks table.");
+    if (options.hashKeys === "") {
+      throw new Error("DatabaseRateLimiter's `hashKeys` secret is empty. Pass a secret, `true` to use SECRET, or `false`.");
+    }
     this.pruneEvery = Math.max(0, Math.floor(options.pruneEvery ?? 1_000));
     this.pruneBatch = Math.max(1, Math.floor(options.pruneBatch ?? 1_000));
   }
@@ -157,17 +160,24 @@ export class DatabaseRateLimiter extends RateLimiterDriver {
     return this.resolved;
   }
 
+  /**
+   * What is wrong with the hashing secret, if anything: the message every
+   * call fails with. Checked at boot by `RateLimiterServiceProvider`, so a
+   * missing `SECRET` fails a production boot rather than every request.
+   */
+  secretProblem(): string | undefined {
+    const { hashKeys = true } = this.options;
+    if (hashKeys !== true || process.env.SECRET) return undefined;
+    return "DatabaseRateLimiter stores its keys hashed with the app's SECRET, and SECRET is not set. Set it, pass `hashKeys: <secret>`, or `hashKeys: false` to store keys as given.";
+  }
+
   private secret(): string | undefined {
     const { hashKeys = true } = this.options;
     if (hashKeys === false) return undefined;
-    if (typeof hashKeys === "string" && hashKeys !== "") return hashKeys;
-    const secret = process.env.SECRET;
-    if (!secret) {
-      throw new Error(
-        "DatabaseRateLimiter stores its keys hashed with the app's SECRET, and SECRET is not set. Set it, pass `hashKeys: <secret>`, or `hashKeys: false` to store keys as given.",
-      );
-    }
-    return secret;
+    if (typeof hashKeys === "string") return hashKeys;
+    const problem = this.secretProblem();
+    if (problem) throw new Error(problem);
+    return process.env.SECRET!;
   }
 
   private nameOf(key: string): string {

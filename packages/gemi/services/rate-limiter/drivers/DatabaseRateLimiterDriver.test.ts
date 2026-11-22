@@ -235,6 +235,10 @@ describe("DatabaseRateLimiter", () => {
     }
   });
 
+  test("an empty hashKeys secret is refused at construction", () => {
+    expect(() => new DatabaseRateLimiter({ store: new MemoryLockStore(), hashKeys: "" })).toThrow("empty");
+  });
+
   test("a store given as a function is built on the first call, once", async () => {
     let built = 0;
     const limiter = new DatabaseRateLimiter({
