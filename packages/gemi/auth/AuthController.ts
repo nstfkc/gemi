@@ -597,6 +597,28 @@ export class AuthController extends Controller {
     // signature.
     let verificationToken = "";
 
+    // Set when a write a concurrent sign-up for the same address explains
+    // failed (#1361): the insert (the unique email), or, for an invited
+    // sign-up, consuming the invitation (the other request deleted it first).
+    // A failure in `onUserCreated` is the app's, and fails as it is.
+    let insertFailed = false;
+    const flagged = <T>(write: Promise<T>) =>
+      write.catch((error: unknown) => {
+        insertFailed = true;
+        throw error;
+      });
+    const insert = (args: Parameters<typeof userProvider.createUser>[0]) =>
+      flagged(userProvider.createUser(args));
+    // A double submit: both requests found no user, and the second insert
+    // broke the unique email. Told what it would have been told a moment
+    // later, rather than answered 500. Only when the user now exists.
+    const raced = async (error: unknown): Promise<never> => {
+      if (insertFailed && (await userProvider.findUserByEmailAddress(email, false))) {
+        throw new ValidationError({ email: ["Email address already exists"] });
+      }
+      throw error;
+    };
+
     // Both branches write the user and everything that has to exist alongside
     // it in one transaction, `config.onUserCreated` last. A throw from the hook
     // takes the user with it, which is the whole point of the hook: an app
@@ -607,9 +629,9 @@ export class AuthController extends Controller {
         // Consuming the invitation belongs in here too. Deleted before the
         // transaction, a rollback would leave the invite burned and no user to
         // show for it, so the invitee could not retry.
-        await userProvider.deleteInvitationById(invitationId);
+        await flagged(userProvider.deleteInvitationById(invitationId));
 
-        const user = await userProvider.createUser({
+        const user = await insert({
           email,
           name,
           password: hashedPassword,
@@ -625,7 +647,7 @@ export class AuthController extends Controller {
         await config.onUserCreated(user, created);
 
         return user;
-      });
+      }).catch(raced);
     } else {
       // Outside the transaction: it is a hash, not a query, and the
       // transaction holds a connection for as long as it is open.
@@ -637,7 +659,7 @@ export class AuthController extends Controller {
       }
 
       newUser = await userProvider.transaction(async () => {
-        const user = await userProvider.createUser({
+        const user = await insert({
           email,
           name,
           password: hashedPassword,
@@ -648,7 +670,7 @@ export class AuthController extends Controller {
         await config.onUserCreated(user, created);
 
         return user;
-      });
+      }).catch(raced);
     }
 
     await config.onSignUp(newUser, verificationToken, req.search.toJSON(), { req });

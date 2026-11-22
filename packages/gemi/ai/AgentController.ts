@@ -2601,7 +2601,12 @@ export abstract class AgentController<
         // Beside other runs, a new message leaves their questions open
         // (#1355): a run started parallel, or a turn that asked to be one
         // and found the thread free (the other turns parked on questions).
-        ...(mode.parallel || requested === "parallel" ? { keepOtherTurnsOpen: true } : {}),
+        // A server turn (`startTurn`: a scheduled report, an event, a job's
+        // result) always does, queued or not (#1371): the person said
+        // nothing, so nobody moved on from a question.
+        ...(mode.parallel || requested === "parallel" || serverTurns.has(req)
+          ? { keepOtherTurnsOpen: true }
+          : {}),
         // The run reports each message as it finishes it, the user's turn
         // first and before the model is asked anything. Only the store hears
         // about most of them here: the app's `onMessage` runs after the run,

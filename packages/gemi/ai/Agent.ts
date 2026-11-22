@@ -1936,7 +1936,8 @@ interface AgentStreamParamsBase<Ctx = AgentContext> {
    * its own. Without it a new message refuses every open call, as a person
    * who moves on from a question refuses it. A request that only answers
    * calls never refuses another turn's, with or without this. The
-   * controller sets it for a parallel run.
+   * controller sets it for a parallel run and for every server turn
+   * (`startTurn`, #1371).
    */
   keepOtherTurnsOpen?: boolean;
   /**
