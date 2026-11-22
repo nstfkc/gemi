@@ -29,7 +29,7 @@ function router(extra: { domains?: DomainsConfig; clientIpTrust?: typeof frontDo
 }
 
 function applied(r: DomainRouter, headers: Record<string, string>) {
-  const req = new Request("http://folio.azurewebsites.net/", { headers });
+  const req = new Request("http://app.azurewebsites.net/", { headers });
   r.applyClientIp(req);
   return {
     forwardedFor: req.headers.get("x-forwarded-for"),

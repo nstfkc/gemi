@@ -37,7 +37,7 @@ const viewImportMap = { Layout, Home, SharedPreview, Dashboard } as any;
 class AppRouter extends ViewRouter {
   routes = {
     "/": this.view("Home"),
-    // Legacy path, redirects to the one below — same view (the kyte shape).
+    // Legacy path, redirects to the one below — same view (a real app's shape).
     "/pages/:pageId/preview": this.view("SharedPreview", async () => {
       throw new Error("redirects");
     }),

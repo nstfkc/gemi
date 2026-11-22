@@ -567,7 +567,7 @@ const IMAGE_EXTENSIONS = new Set(["jpeg", "jpg", "png", "gif", "webp"]);
  * `streamMaxDurationMs`, a stop, a process that died mid-step) was never
  * completed, so it was never stored: replaying its `rs_…` id is answered
  * `400 Item with id 'rs_…' not found.`, and since the id is in the thread, so
- * is every later turn. Measured in fager on Azure (gpt-6.1-sol): a main step
+ * is every later turn. Measured in an app on Azure (gpt-6.1-sol): a main step
  * cut by `streamMaxDurationMs` after its reasoning had started, then every
  * following turn of that thread failed with exactly that 400.
  *

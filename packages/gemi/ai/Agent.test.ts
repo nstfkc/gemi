@@ -2382,14 +2382,14 @@ describe("strict mode follows the schema", () => {
 
   test("a tool whose input holds an s.json() is sent with strict off", async () => {
     const spec = await specFor(
-      s.object({ definition: s.json().describe("A kyte ApplicationDefinition") }),
+      s.object({ definition: s.json().describe("An app's ApplicationDefinition") }),
     );
     expect(spec.strict).toBe(false);
     // The rest of the tool is untouched: the schema still goes out, and the
     // description is what the model reads the format off.
     expect(spec.parameters).toEqual({
       type: "object",
-      properties: { definition: { description: "A kyte ApplicationDefinition" } },
+      properties: { definition: { description: "An app's ApplicationDefinition" } },
       required: ["definition"],
       additionalProperties: false,
     });
@@ -2477,7 +2477,7 @@ describe("strict mode follows the schema", () => {
     const agent = Agent.create({
       name: "ui",
       provider,
-      output: s.object({ definition: s.json().describe("A kyte ApplicationDefinition") }),
+      output: s.object({ definition: s.json().describe("An app's ApplicationDefinition") }),
     });
 
     const events: any[] = [];

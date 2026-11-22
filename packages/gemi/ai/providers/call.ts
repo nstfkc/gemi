@@ -106,7 +106,7 @@ export function responsesEndpoint(target: ProviderTarget): ResponsesEndpoint {
  * this covers the one whose response started and then broke while its body was
  * being read: the socket closed, the stream ended with no terminal frame, or
  * the provider sent a `response.failed` / `error` frame that reads as
- * retryable. Measured in fager: one such drop on the first step lost a whole
+ * retryable. Measured in an app: one such drop on the first step lost a whole
  * build, and the same request a second later worked.
  *
  * Nothing the user could have seen is repeated. Until the first content event

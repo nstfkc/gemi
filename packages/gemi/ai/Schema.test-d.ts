@@ -153,7 +153,7 @@ describe("Infer over json()", () => {
     // The assertion the app makes and then validates itself, in `execute`. The
     // emitted schema constrains nothing, so nothing else can check this.
     type Element = [tag: string, props: Record<string, JsonValue>, children: Element[]];
-    const definition = s.json<Element>().describe("A kyte ApplicationDefinition");
+    const definition = s.json<Element>().describe("An app's ApplicationDefinition");
     expectTypeOf<Infer<typeof definition>>().toEqualTypeOf<Element>();
     expectTypeOf(definition.parse({})).toEqualTypeOf<Element>();
   });

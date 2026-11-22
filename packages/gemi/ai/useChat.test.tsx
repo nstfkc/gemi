@@ -3387,7 +3387,7 @@ describe("reattach()", () => {
   });
 
   test("a thread re-read halfway is rebuilt by the replay, not appended to", async () => {
-    // What kyte does: its change feed re-reads the thread, the chat shows it,
+    // What an app does: its change feed re-reads the thread, the chat shows it,
     // then attaches. The read holds the answer so far as a stored copy.
     const { box } = mount({ threadId: "th_9", attach: false });
     act(() => {

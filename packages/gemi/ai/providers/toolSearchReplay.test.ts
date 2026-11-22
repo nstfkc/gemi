@@ -20,7 +20,7 @@ import { parseResponsesStream } from "./stream";
  * Before the fix the call was replayed as a bare `function_call` (no
  * `namespace`) and the search pair was not replayed at all, so from step two
  * on the model read calls to top-level functions its tools did not list. In
- * kyte that made it loop on an unrelated tool until `max-steps`, three runs
+ * an app that made it loop on an unrelated tool until `max-steps`, three runs
  * out of three.
  *
  * Driven from the recorded stream (`__fixtures__/openai-tool-search.sse`,

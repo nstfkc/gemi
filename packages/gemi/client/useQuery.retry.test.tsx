@@ -569,7 +569,7 @@ describe("useUser", () => {
     expect(net.calls()).toBe(fetches + 1);
   });
 
-  test("queryConfig.user.staleTime: a session-length window stops per-navigation refetches (folio #1093)", async () => {
+  test("queryConfig.user.staleTime: a session-length window stops per-navigation refetches", async () => {
     net.script({ status: 200, body: { id: "u1" } });
     function Page() {
       // Stands in for a navigation: the layout's useUser remounts.

@@ -43,7 +43,7 @@ function Home(props: { greeting?: string }) {
 }
 function About(props: { greeting?: string }) {
   const { replace } = useNavigate();
-  // folio's pattern: once the route has committed, a layout effect sends a
+  // A real app's pattern: once the route has committed, a layout effect sends a
   // search write that was held back while the push was in flight.
   useLayoutEffect(() => {
     if (window.location.search === "" && window.location.pathname === "/about") {

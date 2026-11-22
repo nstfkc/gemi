@@ -9,7 +9,7 @@ import { UserModel } from "./generated";
  * leaves the result type exactly as `select` / `include` made it, and the
  * shapes the runtime refuses are compile errors first.
  *
- * The rows a folio lock query used to type by hand are the reason for the
+ * The rows an app's lock query used to type by hand are the reason for the
  * second half: a locking read is only a replacement for
  * `DB.query<HandWrittenRow>(sql\`… for update\`)` if its row is the schema's.
  */

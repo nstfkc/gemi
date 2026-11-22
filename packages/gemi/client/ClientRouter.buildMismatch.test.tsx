@@ -221,7 +221,7 @@ describe("a navigation answered by another build (#1056)", () => {
 });
 
 /**
- * folio#2750: the full load is cancelled ("Stay" on a dirty editor's
+ * The full load is cancelled ("Stay" on a dirty editor's
  * `beforeunload` prompt, here a `reload` that does nothing) and the page keeps
  * running. Later navigations answered by the other build must still recover,
  * not be discarded behind a load that is never coming.
