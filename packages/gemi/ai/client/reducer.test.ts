@@ -6,7 +6,7 @@ import type { ChatState } from "./reducer";
 
 // Every call below is recorded into `__fixtures__/reducer.json`, which the
 // Swift and Kotlin clients replay — see `conformance.ts`.
-const { applyFrame, initialChatState, markAborted } = recordReducer(
+const { applyFrame, initialChatState, markAborted, settledBy } = recordReducer(
   join(import.meta.dirname, "__fixtures__/reducer.json"),
 );
 
@@ -1864,5 +1864,46 @@ describe("turns side by side (#1344, #1355)", () => {
       NOW,
     );
     expect(state.pending.map((p) => p.toolCallId)).toEqual(["tc_a"]);
+  });
+});
+
+describe("settledBy (#1355)", () => {
+  const call = (toolCallId: string, extra: Partial<PendingToolCall> = {}): PendingToolCall => ({
+    toolCallId,
+    name: "publish",
+    input: {},
+    kind: "approval",
+    signature: `sig_${toolCallId}`,
+    ...extra,
+  });
+  const asked = (id: string, turn: string | undefined, ...toolCallIds: string[]): AgentMessage => ({
+    id,
+    role: "assistant",
+    createdAt: NOW,
+    ...(turn ? { turn } : {}),
+    content: toolCallIds.map((toolCallId) => ({ type: "tool-call", toolCallId, name: "publish", input: {} })),
+  });
+  const settled = (messages: AgentMessage[], pending: PendingToolCall[], ids: string[]) =>
+    [...settledBy(messages, pending, new Set(ids))].sort();
+
+  test("by the call's own turn: only that turn's calls", () => {
+    expect(settled([], [call("a1", { turn: "A" }), call("a2", { turn: "A" }), call("b1", { turn: "B" })], ["a1"])).toEqual([
+      "a1",
+      "a2",
+    ]);
+  });
+
+  test("by the turn of the message holding the call", () => {
+    const messages = [asked("ma", "A", "a1"), asked("mb", "B", "b1")];
+    expect(settled(messages, [call("a1"), call("b1")], ["b1"])).toEqual(["b1"]);
+  });
+
+  test("a nested call goes by the call it is nested under", () => {
+    const messages = [asked("ma", "A", "host_a"), asked("mb", "B", "b1")];
+    expect(settled(messages, [call("sub_a", { path: ["host_a"] }), call("b1")], ["sub_a"])).toEqual(["sub_a"]);
+  });
+
+  test("an answered call whose turn can't be told settles every held call", () => {
+    expect(settled([], [call("x"), call("b1", { turn: "B" })], ["x"])).toEqual(["b1", "x"]);
   });
 });

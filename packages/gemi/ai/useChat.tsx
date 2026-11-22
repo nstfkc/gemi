@@ -73,16 +73,21 @@ export type ChatStatus = "idle" | "submitted" | "streaming" | "awaiting-input" |
  * on its questions. With runs side by side (`ifBusy: "parallel"`) there is one
  * per running reply, so a UI can show each with its own status and questions.
  *
- * - `runId`: the run, once its stream says (`run-start`). None before that,
- *   and none for a turn waiting on its questions: its run has ended.
+ * - `id`: a client-side id, the same for as long as the entry is listed: a
+ *   key for the UI. A turn waiting on its questions is keyed by its turn.
+ * - `runId`: the run, once its stream says (`run-start`, or the run an attach
+ *   asked for). None before that, and none for a turn waiting on its
+ *   questions: its run has ended.
  * - `turn`: the turn the reply belongs to, `AgentMessage.turn` of its
  *   messages, once known: the pending calls of `pending` with the same `turn`
  *   are its questions. None until the run's first message starts, for a run
  *   answering calls that carry none, or a server older than this field.
  * - `status`: `"submitted"` before the stream says anything, `"streaming"`
- *   while it runs, `"awaiting-input"` for a turn whose run ended asking.
+ *   once a frame of it has landed, `"awaiting-input"` for a turn whose run
+ *   ended asking.
  */
 export type ChatRun = {
+  id: string;
   runId?: string;
   turn?: string;
   status: "submitted" | "streaming" | "awaiting-input";
@@ -442,9 +447,10 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    */
   pending: ChatPendingToolCall<ToolsOf<P>>[];
   /**
-   * The replies in progress (#1344): each request in flight (a send, an
-   * answer, an attach) and each turn waiting on its questions, oldest first.
-   * Empty when the chat is idle. One entry for a chat that never runs side
+   * The replies in progress (#1344): the requests in flight (a send, an
+   * answer, an attach that found a run), in the order they started, then the
+   * turns waiting on their questions. Empty when the chat is idle: an attach
+   * or a probe that has not found a run yet is not listed. One entry for a chat that never runs side
    * by side; several with `ifBusy: "parallel"`. See `ChatRun`.
    */
   runs: ChatRun[];
@@ -1027,24 +1033,41 @@ type Flight = {
    * own. Unknown for an attach, or an answer to calls without a `turn`.
    */
   turns?: ReadonlySet<string> | "new";
-  /** The turn its stream's messages belong to, from their `message-start` (#1344). */
+  /** The turn its stream's messages belong to, from their messages (#1344). */
   turn?: string;
+  /** `ChatRun.id` of this request. */
+  id: string;
+  /** A frame of its stream has been applied: it is streaming. */
+  seen?: boolean;
 };
 
 /** `ChatRun` of a request in flight. */
 function flightRun(flight: Flight): ChatRun {
   const answered = flight.turns instanceof Set && flight.turns.size === 1 ? [...flight.turns][0] : undefined;
   const turn = flight.turn ?? answered;
+  const runId = flight.runId ?? flight.asked;
   return {
-    ...(flight.runId ? { runId: flight.runId } : {}),
+    id: flight.id,
+    ...(runId ? { runId } : {}),
     ...(turn ? { turn } : {}),
-    status: flight.runId ? "streaming" : "submitted",
+    status: flight.seen ? "streaming" : "submitted",
   };
 }
 
+/**
+ * Whether `flight` is a reply in progress. An attach (a mount, focus or
+ * `watch` probe, `reattach`) is one only once a frame of a run has landed:
+ * until then it may find nothing, and showing it would show a reply that
+ * isn't there.
+ */
+const listed = (flight: Flight) => flight.clientRunId !== undefined || flight.seen === true;
+
 const sameRuns = (a: ChatRun[], b: ChatRun[]) =>
   a.length === b.length &&
-  a.every((run, i) => run.runId === b[i]!.runId && run.turn === b[i]!.turn && run.status === b[i]!.status);
+  a.every(
+    (run, i) =>
+      run.id === b[i]!.id && run.runId === b[i]!.runId && run.turn === b[i]!.turn && run.status === b[i]!.status,
+  );
 
 /** How often a run announced mid-stream checks whether the chat is free to attach it. */
 const WATCH_RECHECK_MS = 100;
@@ -1139,7 +1162,7 @@ export function useChat<P extends keyof AgentRoutes>(
   const [flightRuns, setFlightRuns] = useState<ChatRun[]>([]);
   const syncRuns = useCallback(() => {
     if (!mountedRef.current) return;
-    const next = [...flightsRef.current].map(flightRun);
+    const next = [...flightsRef.current].filter(listed).map(flightRun);
     setFlightRuns((current) => (sameRuns(current, next) ? current : next));
   }, []);
   // The phase as last set, for a send that must not turn a streaming chat
@@ -1270,16 +1293,20 @@ export function useChat<P extends keyof AgentRoutes>(
         // cursor when several stream at once (`applyRunFrame`). A stream can
         // carry a second run after the first: a joined message the run did
         // not take starts a turn of its own on the same stream.
-        if (frame.event.type === "run-start") {
-          flight.runId = frame.event.runId;
-          syncRuns();
-        } else if (frame.event.type === "message-start" && frame.event.turn && flight.turn !== frame.event.turn) {
-          flight.turn = frame.event.turn;
-          syncRuns();
-        }
+        if (frame.event.type === "run-start") flight.runId = frame.event.runId;
         setPhaseSafe("streaming");
         const previous = stateRef.current!;
         const next = applyRunFrame(previous, flight.runId ?? flight.asked, frame);
+        // `runs` (#1344): streaming from its first frame, and its turn from
+        // the message a frame names: a `message-start`, or for an attach
+        // whose tail began after it, the message already in the transcript.
+        const named = "messageId" in frame.event ? frame.event.messageId : undefined;
+        const turn = named ? next.messages.find((m: AgentMessage) => m.id === named)?.turn : undefined;
+        if (!flight.seen || frame.event.type === "run-start" || (turn && flight.turn !== turn)) {
+          flight.seen = true;
+          if (turn) flight.turn = turn;
+          syncRuns();
+        }
         // A frame at or below the cursor. Reattachment and retrying proxies both
         // produce these; applying the deltas again would double the text, and
         // firing `onFinish` again would double whatever the app does with it.
@@ -1432,6 +1459,7 @@ export function useChat<P extends keyof AgentRoutes>(
       const flight: Flight = {
         controller,
         clientRunId,
+        id: clientRunId,
         ...(answerTurns ? { turns: answerTurns } : turn.text || turn.files?.length ? { turns: "new" as const } : {}),
       };
       const wasBusy = flightsRef.current.size > 0;
@@ -2082,7 +2110,7 @@ export function useChat<P extends keyof AgentRoutes>(
       // the only handle it has on it — and `/attach` needs one anyway. The run
       // asked for is the one its frames are of until a `run-start` says
       // otherwise.
-      const flight: Flight = { controller, ...(cursorRunId ? { asked: cursorRunId } : {}) };
+      const flight: Flight = { controller, id: localId(), ...(cursorRunId ? { asked: cursorRunId } : {}) };
       flightsRef.current.add(flight);
       syncRuns();
       try {
@@ -2251,10 +2279,13 @@ export function useChat<P extends keyof AgentRoutes>(
     const flying = new Set(flightRuns.map((run) => run.turn).filter(Boolean));
     const waiting: ChatRun[] = [];
     for (const call of pendingNow) {
+      // A call being answered is carried by a request in flight, which is
+      // the reply shown, whichever turns it answers.
+      if ((call as { answering?: boolean }).answering) continue;
       const turn = call.turn;
       if (turn ? flying.has(turn) : flightRuns.length > 0) continue;
       if (waiting.some((run) => run.turn === turn)) continue;
-      waiting.push({ ...(turn ? { turn } : {}), status: "awaiting-input" });
+      waiting.push({ id: turn ? `turn:${turn}` : "turn", ...(turn ? { turn } : {}), status: "awaiting-input" });
     }
     return waiting.length === 0 ? flightRuns : [...flightRuns, ...waiting];
   }, [flightRuns, pendingNow]);

@@ -4,7 +4,7 @@
 
 **New API and a client behaviour change (minor version).**
 
-- `useChat` returns `runs: ChatRun[]`: one entry per reply in progress, a request in flight or a turn waiting on its questions, with `status` (`"submitted"`, `"streaming"` or `"awaiting-input"`), `runId` once known and `turn` once known. Match `pending` calls to a reply by `call.turn`. See [Parallel turns](docs/ai-server-turns.md).
+- `useChat` returns `runs: ChatRun[]`: one entry per reply in progress, a request in flight or a turn waiting on its questions, with a client-side `id` to key it by, `status` (`"submitted"`, `"streaming"` or `"awaiting-input"`), `runId` once known and `turn` once known. Match `pending` calls to a reply by `call.turn`. See [Parallel turns](docs/ai-server-turns.md).
 - The `message-start` event carries `turn` (the message's `AgentMessage.turn`) when the run knows it, and the reducer puts it on the streaming message. A streamed reply now has `message.turn` before it finishes.
 - **Kotlin and Swift clients** (`ChatSession`) are turn-aware, like the web hook since 0.232.0:
   - `PendingToolCall.turn` and `AgentMessage.turn` are new.

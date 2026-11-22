@@ -36,6 +36,7 @@ formatter leaves them alone.
 | `initialChatState` | `init` (absent: no argument) | `result`                  |
 | `applyFrame`       | `state`, `frame`, `now`      | `result`, and `unchanged` |
 | `markAborted`      | `state`                      | `result`                  |
+| `settledBy`        | `messages`, `pending`, `ids` | `result` (ids, sorted)    |
 
 `state` and `result` are a whole `ChatState` as JSON. `unchanged` is true when
 the TypeScript reducer returned its input object — the frame was a replay and
