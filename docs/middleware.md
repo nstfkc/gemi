@@ -630,9 +630,10 @@ App providers run after the framework's, so they can rebind anything the framewo
 | Driver | Use it when |
 | --- | --- |
 | `InMemoryRateLimiter` (default) | one instance, or local development |
+| `DatabaseRateLimiter` | budgets that must outlast a deploy (daily quotas, sign-up caps), or several instances without Redis |
 | `RedisRateLimiter` | more than one instance — counters are shared, so the limit is the limit |
 
-The in-memory driver keeps counters in the process that served the request. With N instances behind a load balancer the effective limit is N × the configured limit, and it resets on every deploy. Switch to Redis as soon as you scale past one:
+The in-memory driver keeps counters in the process that served the request. With N instances behind a load balancer the effective limit is N × the configured limit, and it resets on every deploy. In production, `gemi` logs a warning at boot when the queue uses the database driver and the rate limiter is still in memory. Switch to the database or Redis as soon as you scale past one instance, or as soon as a budget must last longer than a deploy:
 
 ```typescript
 // app/config/ratelimiter.ts
@@ -658,6 +659,66 @@ export default defineRateLimiterConfig({
 | `timeout` | `250` | ms one call may wait for Redis before it is answered as `onRedisError` says; `0` turns it off |
 | `onError` | one `console.error` line a minute | called with every Redis failure |
 | `failOpen` | | deprecated: `true` is `onRedisError: "open"`, `false` is `"closed"` |
+
+#### The database driver
+
+`DatabaseRateLimiter` counts in the application's database, in the locks table the database queue already uses (`gemi_locks`). Budgets survive restarts and deploys, and every instance on the database shares them.
+
+**Create the table first.** An app on the database queue has it already. Otherwise add the Prisma model from [Locks](./jobs-and-queues.md#locks--the-lock-facade), or call `new DatabaseLockStore(app(DatabaseManager)).createTable()` once. Without it every limited request fails, since a database error refuses the call.
+
+```typescript
+// app/config/ratelimiter.ts
+import { DatabaseRateLimiter, defineRateLimiterConfig } from "gemi/services";
+
+export default defineRateLimiterConfig({
+  driver: new DatabaseRateLimiter(),
+});
+```
+
+```typescript
+// Three starts a day per visitor, durable across deploys.
+await RateLimiter.enforce(`starts:visitor:${visitor.id}`, { limit: 3, window: 86_400 });
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `table` | `gemi_locks` | the locks table the default store uses |
+| `prefix` | `ratelimit:` | prepended to every key, so limiter rows never meet a lock's |
+| `store` | a `DatabaseLockStore` on the default connection | another `LockStore`, or `() => LockStore` built on the first call |
+| `pruneEvery` | `1000` | every this many calls, delete ended windows in the background; `0` turns it off |
+| `pruneBatch` | `1000` | the most rows one prune deletes |
+
+Unlike the other two drivers it counts a **fixed window**: the window starts at the first call after the last window ended and lasts `window`. A client that spends its whole budget at the end of one window gets a new budget when the next one starts. That suits quotas (so many a day). For a burst limit on a busy route, the sliding window of the memory and Redis drivers is smoother.
+
+Each call is one guarded write, so concurrent calls never admit more than the limit. On Postgres and SQLite that is a single upsert (one round trip), with one more read when it refuses. On MySQL it is three statements: insert the row if missing, update it, read it back. `allowed` is exact everywhere. `remaining` is exact for an allowed call on Postgres and SQLite; on MySQL, and `retryAfter` on a refusal everywhere, are read just after the decision and may already include other instances' calls, so treat them as hints.
+
+Costs are whole numbers (a fractional `cost` is rounded up). A `cost` above the limit is always refused, and a `cost` of `0` always passes: it reads the budget without checking it. A key longer than 150 characters is stored as its SHA-256. A database error rejects the call, so the request fails rather than going unlimited.
+
+**Old windows are deleted as it goes.** Each key is one row, and a per-IP limit sees a new key for every new address, so every `pruneEvery` calls the limiter deletes up to `pruneBatch` windows that have ended, in the background. It deletes only rows under its own `prefix` (compared as a string, not a `LIKE` pattern), never a lock's. To prune on a schedule instead, set `pruneEvery: 0` and call `prune()` from a cron job:
+
+```typescript
+// app/config/ratelimiter.ts
+import { DatabaseRateLimiter, defineRateLimiterConfig } from "gemi/services";
+
+export const limiter = new DatabaseRateLimiter({ pruneEvery: 0 });
+export default defineRateLimiterConfig({ driver: limiter });
+```
+
+```typescript
+// app/cron/PruneRateLimits.ts
+import { CronJob } from "gemi/services";
+import { limiter } from "@/app/config/ratelimiter";
+
+export class PruneRateLimits extends CronJob {
+  name = "PruneRateLimits";
+  cron = CronJob.exp("*/5 * * * *");
+
+  async callback() {
+    // A batch at a time, until no ended window is left.
+    while ((await limiter.prune()) > 0) {}
+  }
+}
+```
 
 #### When Redis fails
 

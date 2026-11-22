@@ -175,7 +175,7 @@ export class SocketHub {
     if (this.connections >= this.config.maxConnectionsPerProcess) {
       return refuse(503, "Too many connections.", { "Retry-After": "10" });
     }
-    const ip = clientIp(req, server);
+    const ip = connectionAddress(req, server);
     if (ip && (this.perIp.get(ip) ?? 0) >= this.config.maxConnectionsPerIp) {
       return refuse(429, "Too many connections from this address.", { "Retry-After": "30" });
     }
@@ -802,7 +802,7 @@ function userIdOf(user: unknown): string | null {
  * an IPv6 address grouped by its /64 as `clientAddress` does, so a host cannot
  * open another cap's worth of sockets by changing address inside its /64.
  */
-function clientIp(req: Request, server: Server<any>): string | null {
+function connectionAddress(req: Request, server: Server<any>): string | null {
   const forwarded = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
   if (forwarded) return addressBlock(normalizeIpEntry(forwarded) ?? forwarded);
   try {

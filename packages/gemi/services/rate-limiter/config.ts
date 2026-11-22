@@ -4,8 +4,10 @@ import type { RateLimiterDriver } from "./drivers/RateLimiterDriver";
 // Config key: `ratelimiter`. Derived from `RateLimiterServiceProvider`.
 export interface RateLimiterConfig {
   /**
-   * Where counters live. In-process by default; swap in `RedisRateLimiter` once
-   * the app runs on more than one instance.
+   * Where counters live. In-process by default, so a restart or a deploy
+   * resets every budget. `DatabaseRateLimiter` keeps them in the app's
+   * database, and `RedisRateLimiter` in Redis; use one once the app runs on
+   * more than one instance or a budget must outlast a deploy.
    */
   driver?: RateLimiterDriver;
 

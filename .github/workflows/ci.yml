@@ -562,6 +562,15 @@ jobs:
         env:
           VITEST_MIN_PASSED: "20"
 
+      # The database rate limiter (#1341): the driver contract, a restart,
+      # long keys and pruning, on the lock store's upsert (Postgres) and its
+      # three-statement path (MySQL).
+      - name: Database rate limiter on Postgres and MySQL
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" services/rate-limiter/drivers/DatabaseRateLimiterDriver.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "20"
+
       # OAuth connections' token table, encrypted, with the revision
       # compare-and-swap that serialises refreshes (#845).
       - name: OAuth connection store on Postgres and MySQL

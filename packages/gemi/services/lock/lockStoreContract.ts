@@ -71,15 +71,21 @@ export function lockStoreContract(
 
     test("extending keeps the lock past its first lease", () =>
       each(async (s) => {
+        // Renewed every quarter lease until well past the first one. The gap
+        // between renewals leaves three quarters of the lease as slack, so a
+        // slow runner (a GC pause, a busy SQLite file) does not let it lapse:
+        // 100 ms renewals of a 300 ms lease failed at random in CI.
+        const LEASE = 1_000;
         const a = s.store();
-        const token = (await a.acquire("long", "a", 300))!;
-        for (let i = 0; i < 4; i++) {
-          await sleep(100);
-          expect(await a.extend("long", "a", token, 300)).toBe(true);
+        const startedAt = Date.now();
+        const token = (await a.acquire("long", "a", LEASE))!;
+        while (Date.now() - startedAt < LEASE * 1.25) {
+          await sleep(LEASE / 4);
+          expect(await a.extend("long", "a", token, LEASE)).toBe(true);
           // Twice in a row, which can land in one millisecond.
-          expect(await a.extend("long", "a", token, 300)).toBe(true);
+          expect(await a.extend("long", "a", token, LEASE)).toBe(true);
         }
-        expect(await s.store().acquire("long", "b", 300)).toBeNull();
+        expect(await s.store().acquire("long", "b", LEASE)).toBeNull();
       }));
 
     test("concurrent acquires from many clients: exactly one wins", () =>
@@ -159,6 +165,29 @@ export function lockStoreContract(
 
         await sleep(WINDOW + 150);
         expect(await a.hit("budget", 2, WINDOW)).toMatchObject({ allowed: true });
+      }));
+
+    test("hit with a cost counts that many, and reports the window's count", () =>
+      each(async (s) => {
+        const a = s.store();
+        expect(await a.hit("costly", 5, 60_000, 3)).toMatchObject({ allowed: true, count: 3 });
+        expect(await s.store().hit("costly", 5, 60_000, 3)).toMatchObject({ allowed: false, count: 3 });
+        expect(await a.hit("costly", 5, 60_000, 2)).toMatchObject({ allowed: true, count: 5 });
+        expect(await a.hit("costly", 5, 60_000)).toMatchObject({ allowed: false, count: 5 });
+      }));
+
+    test("pruneWindows deletes ended windows under its prefix, and nothing else", () =>
+      each(async (s) => {
+        const a = s.store();
+        await a.hit("w:ended", 5, 50);
+        await a.hit("w:open", 5, 60_000);
+        await a.hit("wx:ended", 5, 50);
+        await sleep(200);
+        expect(await a.pruneWindows!("w:")).toBe(1);
+        // `w:open` keeps its count, `wx:ended` is not under the prefix.
+        expect(await a.hit("w:open", 2, 60_000)).toMatchObject({ allowed: true, count: 2 });
+        expect(await a.hit("wx:ended", 1, 60_000)).toMatchObject({ allowed: true });
+        await expect(a.pruneWindows!("")).rejects.toThrow();
       }));
 
     test("concurrent hits from many clients never exceed the limit", () =>

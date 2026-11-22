@@ -54,6 +54,17 @@ describe("under vitest", () => {
     expect(() => assertLiveWebSocket("wss://api.example.com/v1/realtime")).not.toThrow();
   });
 
+  test("a fetch mock installed before gemi loaded (MSW in a setup file) is let through", async () => {
+    vi.resetModules();
+    const mocked = async () => new Response("mocked");
+    vi.stubGlobal("fetch", mocked);
+    // Loaded after the mock, so the mock is the fetch it first sees.
+    const late = await import("./live");
+    expect(() => late.assertLiveFetch("https://api.example.com/v1/responses")).not.toThrow();
+    vi.unstubAllGlobals();
+    expect(() => late.assertLiveFetch("https://api.example.com/v1/responses")).toThrow();
+  });
+
   test("this machine is let through: a test server or a local model", () => {
     for (const url of [
       "http://127.0.0.1:4010/v1/responses",
