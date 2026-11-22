@@ -11484,7 +11484,17 @@ Your own fake provider can use it too: it takes the `messages` of `ProviderStrea
 
 A call with no step left fails with a `ScriptedProviderError` naming the agent, the call and its turn (`Agent "planner" made call 3, and its script has 2 step(s) (turn: "Plan my mornings").`). With one list for every call, it names the step and whose call it was (`The script ran out at step 3 (planner's call 2): ...`). `scriptedProvider(steps, { exhausted: "stop" })` answers an empty reply instead.
 
-A call from an agent the scripts don't name fails either way, `exhausted: "stop"` or not: a misspelt or renamed agent is never what the test meant.
+`exhausted` can also be a step, used for every call past the script. A function step suits a provider shared by a whole test file, where the number of calls isn't known up front:
+
+```ts
+const provider = scriptedProvider({ planner: [], writer: [] }, {
+  exhausted: (call) => (call.agent === "planner" ? "Here is the plan." : `Draft for: ${call.turn?.text}`),
+});
+```
+
+A fixed reply is written `{ text: "..." }`: a bare string is a mode, so a misspelt `"thorw"` doesn't compile. These calls are in `calls` like any other, and `assertDone()` checks only the scripted steps.
+
+A call from an agent the scripts don't name fails whatever `exhausted` is: a misspelt or renamed agent is never what the test meant.
 
 `provider.assertDone()` throws when a step was never taken: a test that expected the agent to call a tool and saw it answer straight away fails there, not later.
 

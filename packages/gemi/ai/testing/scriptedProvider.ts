@@ -81,11 +81,17 @@ export type ScriptedProviderOptions = {
   /**
    * What a call does once its script has no step left: `"throw"` (the
    * default) fails it with a `ScriptedProviderError` that names the agent,
-   * the call and its turn; `"stop"` answers an empty reply. A call from an
-   * agent the scripts don't name fails either way: a misspelt or renamed
-   * agent is never what the test meant.
+   * the call and its turn; `"stop"` answers an empty reply; any other step
+   * (most usefully a function of the call) answers every call past the
+   * script, for a provider shared by tests that don't know how many calls
+   * they make. A call from an agent the scripts don't name fails either way:
+   * a misspelt or renamed agent is never what the test meant. `assertDone()`
+   * checks only the scripted steps.
+   *
+   * Any string is a mode, so a misspelt one doesn't compile: a fixed text
+   * reply is `{ text: "..." }` (a function step may still return a string).
    */
-  exhausted?: "throw" | "stop";
+  exhausted?: "throw" | "stop" | Exclude<ScriptedStep, string>;
 };
 
 /** A call a `scriptedProvider` had no step for. The run ends with a `provider_error` carrying its message. */
@@ -238,13 +244,14 @@ export class ScriptedProvider extends AgentProvider {
       return `${who} made call ${call.index + 1}, and its script has ${steps.length} step(s)${turn}.`;
     };
     const exhausted = steps ? (this.options.exhausted ?? "throw") : "throw";
+    const answer = step ?? (exhausted === "throw" || exhausted === "stop" ? undefined : exhausted);
     return (async function* (): AsyncGenerator<ProviderEvent> {
-      if (step === undefined) {
+      if (answer === undefined) {
         if (exhausted === "throw") throw new ScriptedProviderError(missing());
         yield finish("stop");
         return;
       }
-      yield* eventsOf(await resolve(step, call), call);
+      yield* eventsOf(await resolve(answer, call), call);
     })();
   }
 

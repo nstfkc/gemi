@@ -1,3 +1,11 @@
+# 0.238.0
+
+## `scriptedProvider`: `exhausted` takes a step (#1378)
+
+**Feature (minor version).** `scriptedProvider(script, { exhausted })` now also takes a step, most usefully a function of the call, and answers every call past the script with it. A test simulator shared by a whole file no longer needs a script filled ahead of time (`Array(5000).fill(reply)`). A call from an agent the scripts don't name still fails, and `assertDone()` checks only the scripted steps.
+
+What to check: nothing for existing tests. A fixed text reply there is written `{ text: "..." }`, since a bare string is a mode.
+
 # 0.237.3
 
 ## Detached work after a transaction settles runs outside it (#1376)
