@@ -115,7 +115,7 @@ const provider = scriptedProvider({ planner: [], writer: [] }, {
 });
 ```
 
-`"throw"` and `"stop"` are the modes, so to answer the text "stop", write `{ text: "stop" }`. These calls are in `calls` like any other, and `assertDone()` checks only the scripted steps.
+A fixed reply is written `{ text: "..." }`: a bare string is a mode, so a misspelt `"thorw"` doesn't compile. These calls are in `calls` like any other, and `assertDone()` checks only the scripted steps.
 
 A call from an agent the scripts don't name fails whatever `exhausted` is: a misspelt or renamed agent is never what the test meant.
 

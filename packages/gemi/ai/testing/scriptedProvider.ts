@@ -88,10 +88,10 @@ export type ScriptedProviderOptions = {
    * a misspelt or renamed agent is never what the test meant. `assertDone()`
    * checks only the scripted steps.
    *
-   * The strings `"throw"` and `"stop"` are these modes, not replies: to
-   * answer the text "stop", pass `{ text: "stop" }`.
+   * Any string is a mode, so a misspelt one doesn't compile: a fixed text
+   * reply is `{ text: "..." }` (a function step may still return a string).
    */
-  exhausted?: "throw" | "stop" | ScriptedStep;
+  exhausted?: "throw" | "stop" | Exclude<ScriptedStep, string>;
 };
 
 /** A call a `scriptedProvider` had no step for. The run ends with a `provider_error` carrying its message. */

@@ -145,7 +145,7 @@ describe("scriptedProvider (#1343)", () => {
   });
 
   test("exhausted: a step leaves assertDone checking the scripted steps", async () => {
-    const provider = scriptedProvider({ main: ["One.", "Two."] }, { exhausted: "More." });
+    const provider = scriptedProvider({ main: ["One.", "Two."] }, { exhausted: { text: "More." } });
     await Agent.create({ name: "main", provider }).stream({ messages: [], turn: { text: "x" } }).result();
     expect(() => provider.assertDone()).toThrow('Steps never used: "main": 1 step(s).');
   });
