@@ -114,9 +114,9 @@ function registryModels(): AuthModels {
 }
 
 /**
- * The tail of the last `withLegacySessionLock` on each SQLite connection. See
- * that method for why SQLite queues in the process instead of locking in the
- * database.
+ * The tail of the last `transaction` or `withLegacySessionLock` on each
+ * SQLite connection. See those methods for why SQLite queues in the process
+ * instead of locking in the database.
  */
 const sqliteLegacySessionQueues = new WeakMap<DatabaseConnection, Promise<unknown>>();
 
@@ -277,9 +277,31 @@ export class UserProvider<TSession = SessionWithUser> {
    * hoisting it here would silently suspend policies for `config.onUserCreated`
    * too, and an application's provisioning writes should run under the same
    * policy resolution as the rest of its code.
+   *
+   * On SQLite, transactions opened here queue in the process, one after
+   * another per connection, with the legacy-session ones
+   * (`withLegacySessionLock`): Bun's client runs every statement on one
+   * connection, where a second `BEGIN` while a transaction is open fails
+   * outright. Two sign-ups at once answered 500 there (#1356). Inside a
+   * transaction already, this is a savepoint and does not queue.
    */
   transaction<T>(fn: () => Promise<T>): Promise<T> {
-    return this.models.User.transaction(fn);
+    return this.queuedOnSqlite(() => this.models.User.transaction(fn));
+  }
+
+  /**
+   * `begin` now, or, on SQLite outside a transaction, after the transactions
+   * this provider queued on the connection before it.
+   */
+  private queuedOnSqlite<T>(begin: () => Promise<T>): Promise<T> {
+    if (currentTransaction()) return begin();
+    const name = this.models.User.$connection ?? currentConnectionName();
+    const connection = app(DatabaseManager).connection(name);
+    if (connection.dialect !== "sqlite") return begin();
+    const previous = sqliteLegacySessionQueues.get(connection) ?? Promise.resolve();
+    const result = previous.then(begin, begin);
+    sqliteLegacySessionQueues.set(connection, result.catch(() => {}));
+    return result;
   }
 
   /**
@@ -307,7 +329,7 @@ export class UserProvider<TSession = SessionWithUser> {
     const name = this.models.User.$connection ?? currentConnectionName();
     const connection = app(DatabaseManager).connection(name);
     const locked = () =>
-      this.transaction(async () => {
+      this.models.User.transaction(async () => {
         if (connection.dialect === "postgres") {
           const key = `gemi:legacy-session:${token}`;
           await currentTransaction()!`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;

@@ -1497,6 +1497,9 @@ export class AuthController extends Controller {
       await userProvider.verifyUser(email);
     } else if (config.emailCode.createUser) {
       const locale = app(Translator).detectLocale(req);
+      // Set when the insert itself failed: the only failure a concurrent
+      // sign-up explains. One in `onUserCreated` is the app's, and fails.
+      let insertFailed = false;
       try {
         // Claimed inside the transaction: a rolled-back `onUserCreated` puts
         // the code back, and of two requests with the same code only the one
@@ -1505,12 +1508,17 @@ export class AuthController extends Controller {
           if (!(await claim())) {
             throw new CodeAlreadyClaimed();
           }
-          const created = await userProvider.createUser({
-            email,
-            name: typeof name === "string" ? name.trim() : "",
-            emailVerifiedAt: new Date(),
-            locale,
-          });
+          const created = await userProvider
+            .createUser({
+              email,
+              name: typeof name === "string" ? name.trim() : "",
+              emailVerifiedAt: new Date(),
+              locale,
+            })
+            .catch((error: unknown) => {
+              insertFailed = true;
+              throw error;
+            });
           await config.onUserCreated(created, {
             method: "email-code",
             input: withoutCredentials(input.toJSON()),
@@ -1529,6 +1537,7 @@ export class AuthController extends Controller {
         // request signs in as it, as it would have a moment later. Read
         // again rather than matching the error, which each provider and
         // driver words its own way. `onUserCreated` ran once, for the winner.
+        if (!insertFailed) throw error;
         const existing = await userProvider.findUserByEmailAddress(email, false);
         if (!existing) throw error;
         if (!(await claim())) {

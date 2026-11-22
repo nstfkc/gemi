@@ -579,6 +579,14 @@ jobs:
         env:
           VITEST_MIN_PASSED: "14"
 
+      # Two email-code sign-ups at once for a new address (#1356): one user,
+      # no 500, the losing insert waiting on the winner's commit.
+      - name: Email-code sign-up race on Postgres
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" auth/AuthController.emailCodeRace.test.ts -t "postgres"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "1"
+
       # The change feed's database driver on Postgres: the driver contract,
       # publishing inside transactions, and LISTEN/NOTIFY between instances
       # through the `postgres` package (this Bun's SQL cannot LISTEN before

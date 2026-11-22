@@ -228,6 +228,17 @@ describe("two verifies at once for a new address (#1356)", () => {
     expect(provider.users).toHaveLength(1);
   });
 
+  test("an onUserCreated that throws still fails, even when the user is left behind", async () => {
+    vi.stubEnv("AUTH_FIXED_CODE", "000000");
+    auth = manager();
+    (auth.config as any).onUserCreated = async () => {
+      throw new Error("the welcome email failed");
+    };
+    // A transaction that does not roll back: the user stays.
+    await expect(verify({ email: EMAIL, code: "000000" })).rejects.toThrow("the welcome email failed");
+    expect(provider.users).toHaveLength(1);
+  });
+
   test("an insert that fails for another reason still fails", async () => {
     vi.stubEnv("AUTH_FIXED_CODE", "000000");
     auth = manager();
