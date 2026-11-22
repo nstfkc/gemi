@@ -3,9 +3,11 @@ process.env.SECRET ??= "scripted-provider-test-secret";
 import { describe, expect, test } from "vitest";
 
 import { Agent, AgentTool } from "../Agent";
+import { FallbackProvider } from "../FallbackProvider";
+import { generate } from "../generate";
 import { s } from "../Schema";
 import type { AgentMessage } from "../types";
-import { scriptedProvider, ScriptedProviderError, turnOf } from "./index";
+import { NO_AGENT, scriptedProvider, ScriptedProviderError, turnOf } from "./index";
 
 const msg = (id: string, role: AgentMessage["role"], text: string, extra: Partial<AgentMessage> = {}): AgentMessage => ({
   id,
@@ -106,6 +108,117 @@ describe("scriptedProvider (#1343)", () => {
     const provider = scriptedProvider([], { exhausted: "stop" });
     const result = await Agent.create({ name: "quiet", provider }).stream({ messages: [], turn: { text: "x" } }).result();
     expect(result.finishReason).toBe("stop");
+  });
+
+  test('exhausted: "stop" still fails a call from an agent the scripts do not name', async () => {
+    const provider = scriptedProvider({ greeter: [] }, { exhausted: "stop" });
+    expect((await Agent.create({ name: "greeter", provider }).stream({ messages: [], turn: { text: "x" } }).result()).finishReason).toBe("stop");
+    const typo = await Agent.create({ name: "greter", provider }).stream({ messages: [], turn: { text: "x" } }).result();
+    expect(typo.finishReason).toBe("error");
+    expect(typo.error?.message).toMatch(/Agent "greter" has no script/);
+  });
+
+  test("one list running out says which step, and whose call it was", async () => {
+    const provider = scriptedProvider(["Hi."]);
+    await Agent.create({ name: "a", provider }).stream({ messages: [], turn: { text: "x" } }).result();
+    const result = await Agent.create({ name: "b", provider }).stream({ messages: [], turn: { text: "y" } }).result();
+    expect(result.error?.message).toBe('The script ran out at step 2 (b\'s call 1): it has 1 step(s) (turn: "y").');
+  });
+
+  test("one step with two tool calls runs both, with distinct ids", async () => {
+    const ran: string[] = [];
+    const provider = scriptedProvider([
+      { toolCalls: [{ name: "note", input: { text: "one" } }, { name: "note", input: { text: "two" } }] },
+      "Noted both.",
+    ]);
+    const note = AgentTool.create({
+      name: "note",
+      description: "Note",
+      inputSchema: s.object({ text: s.string() }),
+      execute: async ({ text }: { text: string }) => {
+        ran.push(text);
+        return "ok";
+      },
+    });
+    const result = await Agent.create({ name: "notes", provider, tools: [note] }).stream({ messages: [], turn: { text: "x" } }).result();
+    expect(ran.sort()).toEqual(["one", "two"]);
+    const ids = result.messages.flatMap((message) => message.content.flatMap((part) => (part.type === "tool-call" ? [part.toolCallId] : [])));
+    expect(ids).toEqual(["call_notes_0_0", "call_notes_0_1"]);
+    expect(lastText(result)).toBe("Noted both.");
+  });
+
+  test("a step's usage reaches the result, summed over the run", async () => {
+    const provider = scriptedProvider([
+      { toolCalls: [{ name: "noop" }], usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } },
+      { text: "Done.", usage: { inputTokens: 20, outputTokens: 3, totalTokens: 23 } },
+    ]);
+    const noop = AgentTool.create({ name: "noop", description: "Nothing", inputSchema: s.object({}), execute: async () => "ok" });
+    const result = await Agent.create({ name: "u", provider, tools: [noop] }).stream({ messages: [], turn: { text: "x" } }).result();
+    expect(result.usage).toMatchObject({ inputTokens: 30, outputTokens: 5, totalTokens: 35 });
+  });
+
+  test("a sub-agent's sub-agent is at depth 2", async () => {
+    const provider = scriptedProvider({
+      top: [{ toolCalls: [{ name: "ask", input: { prompt: "a" } }] }, "top done"],
+      middle: [{ toolCalls: [{ name: "ask", input: { prompt: "b" } }] }, "middle done"],
+      bottom: ["bottom done"],
+    });
+    const asking = (next: Agent<any>) =>
+      AgentTool.create({
+        name: "ask",
+        description: "Ask",
+        inputSchema: s.object({ prompt: s.string() }),
+        execute: async ({ prompt }: { prompt: string }, ctx) => lastText(await ctx.runAgent(next, { prompt })),
+      });
+    const bottom = Agent.create({ name: "bottom", provider });
+    const middle = Agent.create({ name: "middle", provider, tools: [asking(bottom)] });
+    const top = Agent.create({ name: "top", provider, tools: [asking(middle)] });
+    await top.stream({ messages: [], turn: { text: "go" } }).result();
+    expect(provider.calls.map((call) => [call.agent, call.depth])).toEqual([
+      ["top", 0],
+      ["middle", 1],
+      ["bottom", 2],
+      ["middle", 1],
+      ["top", 0],
+    ]);
+    provider.assertDone();
+  });
+
+  test("a text list streams one delta per entry", async () => {
+    const provider = scriptedProvider([{ text: ["Hel", "lo"] }]);
+    const deltas: string[] = [];
+    const stream = Agent.create({ name: "t", provider }).stream({ messages: [], turn: { text: "x" } });
+    for await (const event of stream) if (event.type === "text-delta") deltas.push(event.delta);
+    expect(deltas).toEqual(["Hel", "lo"]);
+  });
+
+  test("calls no agent makes take the NO_AGENT script", async () => {
+    const provider = scriptedProvider({ writer: [], [NO_AGENT]: [{ output: { title: "Tea" } }] });
+    const result = await generate({ provider, output: s.object({ title: s.string() }), prompt: "name it" });
+    expect(result.ok && result.output).toEqual({ title: "Tea" });
+    expect(provider.calls[0]!.agent).toBeUndefined();
+    provider.assertDone();
+
+    const unscripted = await generate({ provider: scriptedProvider({ writer: [] }), output: s.object({}), prompt: "x" });
+    expect(unscripted.ok).toBe(false);
+    expect(unscripted.error?.message).toMatch(/A call no agent made has no script.*Script it under \[NO_AGENT\]\./);
+  });
+
+  test("an error step can be retryable, so a FallbackProvider moves on", async () => {
+    const down = scriptedProvider([{ error: { code: "overloaded", message: "busy", retryable: true } }]);
+    const up = scriptedProvider(["From the backup."]);
+    const provider = new FallbackProvider([{ provider: down }, { provider: up }]);
+    const result = await Agent.create({ name: "f", provider }).stream({ messages: [], turn: { text: "x" } }).result();
+    expect(lastText(result)).toBe("From the backup.");
+    expect(down.normalizeError(new ScriptedProviderError("busy", { code: "overloaded", message: "busy", retryable: true }))).toEqual({
+      code: "overloaded",
+      message: "busy",
+      retryable: true,
+    });
+
+    const final = scriptedProvider([{ error: { code: "overloaded", message: "busy", retryable: true } }]);
+    const failed = await Agent.create({ name: "g", provider: final }).stream({ messages: [], turn: { text: "x" } }).result();
+    expect(failed.error).toMatchObject({ code: "overloaded", retryable: true });
   });
 
   test("an error step fails the call", async () => {

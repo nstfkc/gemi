@@ -11380,17 +11380,47 @@ test("the planner asks the researcher, then answers", async () => {
 
 `scriptedProvider(steps)` with a plain list answers every call from that one list, whichever agent makes it.
 
+Calls no agent makes, such as `generate()` or a compaction summary through the run's provider, arrive without a name. In the per-agent form they take the script under `NO_AGENT`:
+
+```ts
+import { NO_AGENT, scriptedProvider } from "gemi/ai/testing";
+
+const provider = scriptedProvider({
+  writer: ["Here is the draft."],
+  [NO_AGENT]: ["The person asked for a draft; it was written."],
+});
+```
+
 ## Steps
 
 | Step | The call answers |
 |---|---|
 | `"text"` | A text reply. |
-| `{ text?, reasoning?, output?, toolCalls?, finishReason?, usage? }` | A reply with any of these. `output` is structured output (an agent with `output`), sent as its JSON. Each tool call is `{ name, input?, id? }`; `id` defaults to `call_<agent>_<call>_<n>`. `finishReason` defaults to `"stop"`, `usage` to one token in and one out. |
-| `{ events }` | These `ProviderEvent`s, for anything the shorthand doesn't cover. |
-| `{ error }` | A failed call (an `Error`, or a message). The run ends with a `provider_error`. |
+| `{ text?, reasoning?, output?, toolCalls?, finishReason?, usage? }` | A reply with any of these. `text` as a list streams each entry as its own delta, for a streaming UI. `output` is structured output (an agent with `output`), sent as its JSON. Each tool call is `{ name, input?, id? }`; `id` defaults to `call_<agent>_<call>_<n>`. Several tool calls in one step run as the model's parallel calls. `finishReason` defaults to `"stop"`, `usage` to one token in and one out; each step's `usage` adds up on the run's result. |
+| `{ events }` | These `ProviderEvent`s, for anything the shorthand doesn't cover, such as a `retry` event. |
+| `{ error }` | A failed call. An `Error` or a message ends the run with a `provider_error` that is not retryable. `{ code, message, retryable }` fails with exactly that error: a [`FallbackProvider`](./ai-providers.md) moves to its next provider on `retryable: true`, and a client sees the code and `retryable` it would get from a live model. |
 | `(call) => step` | The step this function answers, sync or async, from the call (below). |
 
 A tool call's result goes back to the model on the next call, and the agent's next step answers it. Tools run as they would with a live model: their schemas, approvals and errors all apply.
+
+### Sub-agents of the same name, in parallel
+
+A step with two calls to a sub-agent tool starts two runs of the same agent at once. Each takes the next step of that agent's script when it reaches the model, and which one gets there first depends on scheduling. So `researcher: ["about tea", "about coffee"]` can hand the coffee answer to the tea run. Answer from the call instead, with a function step:
+
+```ts
+import { scriptedProvider } from "gemi/ai/testing";
+
+const answer = ({ turn }: { turn?: { text: string } }) =>
+  turn?.text.includes("tea") ? "Green tea has less caffeine." : "Coffee has more.";
+
+const provider = scriptedProvider({
+  planner: [
+    { toolCalls: [{ name: "research", input: { topic: "tea" } }, { name: "research", input: { topic: "coffee" } }] },
+    "Tea in the morning, coffee after lunch.",
+  ],
+  researcher: [answer, answer],
+});
+```
 
 ## Calls
 
@@ -11398,7 +11428,7 @@ A tool call's result goes back to the model on the next call, and the agent's ne
 
 | | |
 |---|---|
-| `agent` | The agent's name. `undefined` for a call no agent made (`generateText`, a compaction summary). |
+| `agent` | The agent's name. `undefined` for a call no agent made (`generate()`, a compaction summary); those take the `NO_AGENT` script. |
 | `depth` | 0 for the run, 1 for a sub-agent it called, and so on. |
 | `index` | Which of this agent's calls it is, from 0. |
 | `messages` | What the call sent. |
@@ -11419,7 +11449,9 @@ Your own fake provider can use it too: it takes the `messages` of `ProviderStrea
 
 ## When the script runs out
 
-A call with no step left fails with a `ScriptedProviderError` naming the agent, the call and its turn (`Agent "planner" made call 3, and its script has 2 step(s) (turn: "Plan my mornings").`). So does a call from an agent the scripts don't name. `scriptedProvider(steps, { exhausted: "stop" })` answers an empty reply instead.
+A call with no step left fails with a `ScriptedProviderError` naming the agent, the call and its turn (`Agent "planner" made call 3, and its script has 2 step(s) (turn: "Plan my mornings").`). With one list for every call, it names the step and whose call it was (`The script ran out at step 3 (planner's call 2): ...`). `scriptedProvider(steps, { exhausted: "stop" })` answers an empty reply instead.
+
+A call from an agent the scripts don't name fails either way, `exhausted: "stop"` or not: a misspelt or renamed agent is never what the test meant.
 
 `provider.assertDone()` throws when a step was never taken: a test that expected the agent to call a tool and saw it answer straight away fails there, not later.
 

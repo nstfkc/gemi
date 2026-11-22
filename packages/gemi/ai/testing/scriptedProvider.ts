@@ -13,10 +13,13 @@ import type { AgentError, AgentMessage, FinishReason, Usage } from "../types";
  * - a string: a text reply;
  * - `{ text?, reasoning?, output?, toolCalls?, finishReason?, usage? }`: a
  *   reply with tool calls, reasoning or structured output (`output` is
- *   sent as its JSON);
+ *   sent as its JSON; `text` as a list streams one delta per entry);
  * - `{ events }`: the provider events themselves, for what the shorthand
  *   does not cover;
- * - `{ error }`: the call fails with it;
+ * - `{ error }`: the call fails with it. A string or an `Error` fails as a
+ *   `provider_error` that is not retryable; a `{ code, message, retryable }`
+ *   fails as exactly that error, so a `FallbackProvider` (which moves on
+ *   when `retryable`) or a client's retry message can be tested;
  * - a function of the call (`ScriptedCall`) answering one of these, for an
  *   answer that depends on what was sent.
  */
@@ -24,14 +27,18 @@ export type ScriptedStep =
   | string
   | ScriptedReply
   | { events: ProviderEvent[] }
-  | { error: Error | string }
+  | { error: Error | string | ScriptedError }
   | ((call: ScriptedCall) => ScriptedStep | Promise<ScriptedStep>);
 
 /** A step that is not a function: what a function step comes to. */
 type ResolvedStep = Exclude<ScriptedStep, (call: ScriptedCall) => unknown>;
 
+/** The error a `{ error }` step fails with, as `normalizeError` reports it. */
+export type ScriptedError = Pick<AgentError, "code" | "message" | "retryable"> & Partial<AgentError>;
+
 export type ScriptedReply = {
-  text?: string;
+  /** The reply's text: a list streams each entry as its own delta. */
+  text?: string | string[];
   reasoning?: string;
   /** Structured output (an agent with `output`), sent as JSON. */
   output?: unknown;
@@ -72,7 +79,9 @@ export type ScriptedProviderOptions = {
   /**
    * What a call does once its script has no step left: `"throw"` (the
    * default) fails it with a `ScriptedProviderError` that names the agent,
-   * the call and its turn; `"stop"` answers an empty reply.
+   * the call and its turn; `"stop"` answers an empty reply. A call from an
+   * agent the scripts don't name fails either way: a misspelt or renamed
+   * agent is never what the test meant.
    */
   exhausted?: "throw" | "stop";
 };
@@ -80,7 +89,25 @@ export type ScriptedProviderOptions = {
 /** A call a `scriptedProvider` had no step for. The run ends with a `provider_error` carrying its message. */
 export class ScriptedProviderError extends Error {
   override name = "ScriptedProviderError";
+  constructor(
+    message: string,
+    /** What `normalizeError` reports: a `{ error }` step's own, or a `provider_error`. */
+    readonly error?: ScriptedError,
+  ) {
+    super(message);
+  }
 }
+
+/**
+ * The key of the script for calls no agent makes (`generate()`, a
+ * compaction summary through the run's provider), in the per-agent form:
+ *
+ *     scriptedProvider({ writer: ["Done."], [NO_AGENT]: ["A short summary."] });
+ */
+export const NO_AGENT: unique symbol = Symbol("scriptedProvider.NO_AGENT");
+
+/** Scripts by agent name, plus `[NO_AGENT]` for calls no agent makes. */
+export type ScriptedScripts = Record<string, ScriptedStep[]> & { [NO_AGENT]?: ScriptedStep[] };
 
 /**
  * The user turn the last of `messages` belongs to (#1343): the user message
@@ -103,6 +130,8 @@ export function turnOf(messages: readonly AgentMessage[]): ScriptedTurn | undefi
 
 /** The key of a script for every call. */
 const ANY = undefined;
+type Key = string | typeof NO_AGENT | typeof ANY;
+const keyName = (key: Key) => (key === ANY ? "the script" : key === NO_AGENT ? "NO_AGENT" : `"${key}"`);
 
 const CAPABILITIES: ProviderCapabilities = {
   reasoning: true,
@@ -128,8 +157,9 @@ const CAPABILITIES: ProviderCapabilities = {
  *     scriptedProvider(["Hello!", "Goodbye."]);
  *
  * A call with no step left fails with a `ScriptedProviderError` (see
- * `exhausted`), as does one from an agent the scripts do not name. `calls`
- * keeps every call; `assertDone()` throws when a step was never used.
+ * `exhausted`), as does one from an agent the scripts do not name. Calls no
+ * agent makes take the `[NO_AGENT]` script. `calls` keeps every call;
+ * `assertDone()` throws when a step was never used.
  */
 export class ScriptedProvider extends AgentProvider {
   readonly model = "scripted";
@@ -139,17 +169,22 @@ export class ScriptedProvider extends AgentProvider {
   /** Every upload, in order: each gets the id `file_<n>`. */
   readonly uploads: File[] = [];
 
-  private readonly steps: Map<string | undefined, ScriptedStep[]>;
-  private readonly used = new Map<string | undefined, number>();
+  private readonly steps: Map<Key, ScriptedStep[]>;
+  private readonly used = new Map<Key, number>();
 
   constructor(
-    script: ScriptedStep[] | Record<string, ScriptedStep[]>,
+    script: ScriptedStep[] | ScriptedScripts,
     private readonly options: ScriptedProviderOptions = {},
   ) {
     super();
-    this.steps = Array.isArray(script)
-      ? new Map([[ANY, [...script]]])
-      : new Map(Object.entries(script).map(([name, steps]) => [name, [...steps]]));
+    this.steps = new Map<Key, ScriptedStep[]>(
+      Array.isArray(script)
+        ? [[ANY, [...script]]]
+        : [
+            ...Object.entries(script).map(([name, steps]): [Key, ScriptedStep[]] => [name, [...steps]]),
+            ...(script[NO_AGENT] ? [[NO_AGENT, [...script[NO_AGENT]]] as [Key, ScriptedStep[]]] : []),
+          ],
+    );
   }
 
   /** The calls `agent` made. */
@@ -161,14 +196,14 @@ export class ScriptedProvider extends AgentProvider {
   assertDone(): void {
     const left = [...this.steps].flatMap(([key, steps]) => {
       const unused = steps.length - (this.used.get(key) ?? 0);
-      return unused > 0 ? [`${key === ANY ? "the script" : `"${key}"`}: ${unused} step(s)`] : [];
+      return unused > 0 ? [`${keyName(key)}: ${unused} step(s)`] : [];
     });
     if (left.length > 0) throw new ScriptedProviderError(`Steps never used: ${left.join(", ")}.`);
   }
 
   stream(params: ProviderStreamParams) {
     const agent = params.agent?.name;
-    const key = this.steps.has(ANY) ? ANY : agent;
+    const key: Key = this.steps.has(ANY) ? ANY : (agent ?? NO_AGENT);
     const index = this.used.get(key) ?? 0;
     const call: ScriptedCall = {
       agent,
@@ -186,12 +221,17 @@ export class ScriptedProvider extends AgentProvider {
       const who = agent === undefined ? "A call no agent made" : `Agent "${agent}"`;
       const turn = call.turn ? ` (turn: ${JSON.stringify(call.turn.text.slice(0, 80))})` : "";
       if (!steps) {
-        const named = [...this.steps.keys()].map((name) => `"${name}"`).join(", ");
-        return `${who} has no script${turn}. The scripts are for ${named}.`;
+        const named = [...this.steps.keys()].map(keyName).join(", ");
+        const hint = agent === undefined ? " Script it under [NO_AGENT]." : "";
+        return `${who} has no script${turn}. The scripts are for ${named}.${hint}`;
+      }
+      if (key === ANY) {
+        const own = agent === undefined ? "" : ` (${agent}'s call ${call.index + 1})`;
+        return `The script ran out at step ${index + 1}${own}: it has ${steps.length} step(s)${turn}.`;
       }
       return `${who} made call ${call.index + 1}, and its script has ${steps.length} step(s)${turn}.`;
     };
-    const exhausted = this.options.exhausted ?? "throw";
+    const exhausted = steps ? (this.options.exhausted ?? "throw") : "throw";
     return (async function* (): AsyncGenerator<ProviderEvent> {
       if (step === undefined) {
         if (exhausted === "throw") throw new ScriptedProviderError(missing());
@@ -208,6 +248,7 @@ export class ScriptedProvider extends AgentProvider {
   }
 
   override normalizeError(error: unknown): AgentError {
+    if (error instanceof ScriptedProviderError && error.error) return { ...error.error };
     return {
       code: "provider_error",
       message: error instanceof Error ? error.message : String(error),
@@ -218,7 +259,7 @@ export class ScriptedProvider extends AgentProvider {
 
 /** A `ScriptedProvider` (see there): one script for every call, or one per agent, by name. */
 export function scriptedProvider(
-  script: ScriptedStep[] | Record<string, ScriptedStep[]>,
+  script: ScriptedStep[] | ScriptedScripts,
   options?: ScriptedProviderOptions,
 ): ScriptedProvider {
   return new ScriptedProvider(script, options);
@@ -239,10 +280,17 @@ const finish = (reason: FinishReason, usage?: Usage): ProviderEvent => ({
 function eventsOf(step: ResolvedStep, call: ScriptedCall): ProviderEvent[] {
   if (typeof step === "string") return [{ type: "text-delta", delta: step }, finish("stop")];
   if ("events" in step) return step.events;
-  if ("error" in step) throw typeof step.error === "string" ? new ScriptedProviderError(step.error) : step.error;
+  if ("error" in step) {
+    const { error } = step;
+    if (typeof error === "string") throw new ScriptedProviderError(error);
+    if (error instanceof Error) throw error;
+    throw new ScriptedProviderError(error.message, error);
+  }
   const events: ProviderEvent[] = [];
   if (step.reasoning) events.push({ type: "reasoning-delta", delta: step.reasoning });
-  if (step.text) events.push({ type: "text-delta", delta: step.text });
+  for (const delta of typeof step.text === "string" ? [step.text] : (step.text ?? [])) {
+    if (delta) events.push({ type: "text-delta", delta });
+  }
   if (step.output !== undefined) events.push({ type: "output-delta", delta: JSON.stringify(step.output) });
   (step.toolCalls ?? []).forEach((toolCall, n) => {
     events.push({

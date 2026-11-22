@@ -18,11 +18,14 @@ export {
 export { type FingerprintOptions, Fingerprints, type RecordingFingerprints } from "./Fingerprints";
 export { pinClock } from "./pinClock";
 export {
+  NO_AGENT,
   type ScriptedCall,
+  type ScriptedError,
   ScriptedProvider,
   ScriptedProviderError,
   type ScriptedProviderOptions,
   type ScriptedReply,
+  type ScriptedScripts,
   type ScriptedStep,
   type ScriptedTurn,
   scriptedProvider,
