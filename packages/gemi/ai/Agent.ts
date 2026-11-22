@@ -3947,7 +3947,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // the run starts — a parent run's, for a sub-run — so its calls count
     // there too. Closed when the loop settles: a background summary that
     // lands later is billed to the next run, not metered here.
-    const meter = openMeter();
+    // Its log hears about unpriced models for every call inside (#1146).
+    const meter = openMeter({ warn: this.costWarn });
     this.meter = meter.meter;
     this.settled = meter.run(() => this.execute());
     this.settled.then(meter.close, meter.close);
@@ -4871,7 +4872,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     for (;;) {
       const next = await raceAbort(Promise.resolve(iterator.next()), signal).catch((error: unknown) => {
         if (callSoFar && error instanceof RunAborted) {
-          this.addSpent(eventWithCost(callSoFar, provider.model, provider, this.costWarn).usage);
+          this.addSpent(eventWithCost(callSoFar, provider.model, provider).usage);
           recordStopped(callSoFar, provider.model, provider);
           message.usage = addUsage(message.usage ?? emptyUsage(), callSoFar.usage);
           callSoFar = undefined;
@@ -4990,7 +4991,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           callSoFar = undefined;
           // Priced per model: a fallback chain's finish splits by leg (#1146).
           if (event.usage) {
-            this.addSpent(eventWithCost(event, provider.model, provider, this.costWarn).usage);
+            this.addSpent(eventWithCost(event, provider.model, provider).usage);
             recordStopped(event, provider.model, provider);
           }
           // This step's own cost, on the message the step wrote (#467). The run

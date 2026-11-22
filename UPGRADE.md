@@ -1,3 +1,13 @@
+# 0.237.2
+
+## `costUsd` follow-ups: image tokens need an image price; warnings go to the run's log (#1146)
+
+**Fix (patch version).**
+- A call with image tokens (`imageInputTokens` / `imageOutputTokens`) and no `imageInput` / `imageOutput` price for its model now has `usage.costUsd: null` and warns once, rather than pricing image tokens as text. Meters still price them as text.
+- The "no price" warning for a call inside an agent run goes to that run's log, including a tool's `generate` or image call, not to the console. Outside a run it still goes to the console.
+
+What to check: add `imageInput` / `imageOutput` for your image models if you read `costUsd` for them.
+
 # 0.237.0
 
 ## `usage.costUsd`: each model call priced when it finishes (#1146)
