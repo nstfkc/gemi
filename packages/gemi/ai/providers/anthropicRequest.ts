@@ -149,7 +149,23 @@ export function buildMessagesRequest(
     if (params.toolChoice !== undefined || choice.disable_parallel_tool_use) body.tool_choice = choice;
   }
 
-  return withCacheBreakpoints(body);
+  return withTrailingContext(withCacheBreakpoints(body), params.trailingContext);
+}
+
+/**
+ * `trailingContext` after the conversation (#1345), added once the cache
+ * breakpoints are placed: the last one stays on the block before it, so the
+ * prefix the cache holds is the same whatever the text says. A text block at
+ * the end of the last user message (after its tool results, which the API
+ * wants first), or a user message of its own after an assistant one.
+ */
+function withTrailingContext(body: MessagesRequest, text: string | undefined): MessagesRequest {
+  if (!text) return body;
+  const block: MessagesBlock = { type: "text", text };
+  const last = body.messages.at(-1);
+  if (last?.role === "user") last.content = [...last.content, block];
+  else body.messages.push({ role: "user", content: [block] });
+  return body;
 }
 
 function repliesWithThinking(messages: MessagesMessage[]): boolean {

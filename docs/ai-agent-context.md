@@ -133,6 +133,24 @@ Things to know:
 - A different tool list is a different request prefix, which the provider's prompt cache keys on. Keep the list stable across a conversation where you can.
 - A sub-agent started with `ctx.runAgent` gets its own agent's tools, not the parent run's.
 
+## Text after the conversation
+
+Some things the model should know change on every turn but aren't part of the conversation: the screen the person is on, the time, a small note on the app's state. In `instructions()` they change the prompt the provider caches, so every turn misses the cache. As a message they fill the thread up. `trailingContext()` sends them after the last message on every model call of the turn instead:
+
+```typescript
+protected trailingContext(req: HttpRequest, { body }: { body: Body }) {
+  return `The person is looking at the page "${body.pageTitle}". It is ${new Date().toUTCString()}.`;
+}
+```
+
+- It is never stored and `contextWindow` doesn't count it.
+- It is outside the cached prefix. The OpenAI and Azure OpenAI providers send it as a last developer message. The Anthropic providers add it after the last message's blocks and keep the cache breakpoint on the block before it. A provider that doesn't declare `capabilities.trailingContext` (a custom one) is sent it as a last user message.
+- It is called once per turn, after `context()`, on turns from `useChat`, `startTurn` and voice. Answer nothing to send none. `prepareStep` sees it as `trailingContext` and can answer another one for one call (`""` sends none).
+- It isn't handed down to a sub-agent.
+- `body` is client-controlled, as in `instructions()`: it says what the client claims, not what is true.
+
+The same hook is on [`hooks`](./ai-controller-hooks.md) as `trailingContext`. Running the agent yourself, pass `trailingContext` to `agent.stream()`.
+
 ## Order of a step's tool calls
 
 When the model makes several tool calls in one step, their `execute` functions start at once. Tools that change shared state often depend on the calls before them in the same step (`add_container { id: "a" }`, then `add_child { parent: "a" }`), so an agent can ask for them to run one at a time, in the model's order (#1161):

@@ -148,13 +148,17 @@ A call cut after its output started leaves a message with `finishReason` `"error
 
 Every request carries a `prompt_cache_key` (#1223). The API routes requests with the same key and the same prompt prefix to the same cache, so the first step of a run can hit the prefix that another run of the same agent just warmed, parallel runs included. Without the key, first steps mostly miss.
 
-By default the key is the agent's name and a 16-digit hash of the call's instructions and tool list (`defaultPromptCacheKey`, exported from `gemi/ai`). Runs that send the same instructions and tools share a key, and agents with different prefixes don't crowd one cache. To set it yourself:
+By default the key is the agent's name and a 16-digit hash of the agent's own `instructions` and the run's tool list (`defaultPromptCacheKey`, exported from `gemi/ai`). What a turn adds (`instructions()` on a controller, `agent.stream({ instructions })`, a memory block) and what a step changes (`prepareStep`) don't change it, so every call of the agent's runs shares a key, and agents with different prefixes don't crowd one cache. To set it yourself:
 
 ```typescript
 Agent.create({ name: "specialist", provider, promptCacheKey: "site-specialists" }); // 1–64 characters
 Agent.create({ name: "private", provider, promptCacheKey: false });                 // send none
 agent.stream({ messages, promptCacheKey: `tenant-${tenantId}` });                   // per run
 ```
+
+A step that narrows its tools (`prepareStep` answering `activeTools`) is sent the run's full tool list on gpt-5 models (and on ids gemi doesn't know), with `tool_choice: {type: "allowed_tools", tools: [...]}` naming what the call may use, so the tool list at the start of the prefix stays the same (`capabilities.allowedTools`). A list with namespaces or tool search, and older models, get the narrowed list instead. A call to a tool left out is refused either way.
+
+A `trailingContext` (see [Text after the conversation](./ai-agent-context.md#text-after-the-conversation)) is sent as a last `developer` message, after the cached prefix.
 
 A shared key only helps when the requests really share a prefix. Keep a key's traffic below what one cache serves (OpenAI suggests about 15 requests a minute per key and prefix), and give busier groups their own keys.
 
@@ -185,6 +189,7 @@ How the agent's settings map onto the request:
 - **`toolChoice`**: `"auto"` and `"none"` are sent as they are. `"required"` is `any` and `{ name }` is `tool`, but Claude Opus 5.5, Sonnet 5.5 and Fable 5.1 reject forced tool choice, so on those (and on ids gemi doesn't know) the choice is sent as `auto` and `capabilities.supportsForcedToolChoice` is `false`. The agent then emulates the forced choice with a system line and one more ask (see [`toolChoice` in AI Context Window](./ai-context-window.md)).
 - **Tools** are sent flat with `eager_input_streaming`, so their arguments stream as they're written. Tool search is not supported yet (`capabilities.toolSearch` is `false`), so namespaces are flattened and deferred tools are sent whole. `strict` is not sent; the agent validates every call against the tool's schema.
 - **`promptCacheKey`** is not sent. Anthropic's cache keys on the prompt prefix itself.
+- **`trailingContext`** is a text block after the last message's blocks, added once the cache breakpoints are placed, so the last breakpoint stays on the block before it and the cached prefix is the same whatever the text says. The Messages API has no `allowed_tools`, so a step that narrows its tools is sent the narrowed list (and misses the cache from the tool list on).
 - **History**: a step's tool results are sent in the user turn right after its calls, as the API requires. The assistant's text goes back exactly as written, whitespace-only blocks included, and an `output` part goes back as the text the model wrote (`OutputPart.text`), not a re-serialized value. A history that starts or ends on the assistant gets a fixed user turn there ("(The conversation continues from an earlier point.)", "Continue."), because the API wants a user turn first and refuses a prefill. Another provider's reasoning parts are left out.
 - **Cut-off tool calls**: a tool call whose arguments `max_tokens` cut off is discarded (`tool-call-discard`), never run, and the call ends with reason `"length"`.
 - **`reasoning`** turns on adaptive thinking (`thinking: {type: "adaptive", display: "summarized"}`) with `output_config.effort` set to the effort (`minimal` is sent as `low`, and `xhigh` as `high` on the 4.6 models). `"none"` turns thinking off where the model has a switch for it (Claude Sonnet 5.5's `between_tools`, at effort `low`); Claude Opus 5.5 and the other 5.x models can't turn thinking off, so there it is effort `low` and the model still thinks. Models that only take a token budget (Claude 4.5 and older) get neither. A forced `toolChoice` works with adaptive thinking, on the models that take one.

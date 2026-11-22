@@ -1,3 +1,22 @@
+# 0.230.0
+
+## Text after the conversation, and a prompt cache that holds across turns (#1345)
+
+**New API and behaviour changes (minor version).** See [Text after the conversation](docs/ai-agent-context.md#text-after-the-conversation) and [Prompt cache key](docs/ai-providers.md#prompt-cache-key).
+
+- New `AgentController.trailingContext(req, { body, context })` (and the `trailingContext` hook, `agent.stream({ trailingContext })`, `PrepareStepResult.trailingContext`): text sent after the last message on every model call of the turn, never stored, outside the cached prefix.
+- The default `promptCacheKey` hashes the agent's own `instructions` and the run's tools, no longer each call's. A turn's `instructions()`, a memory block or a step's `activeTools` no longer change it.
+- On the OpenAI and Azure OpenAI providers with gpt-5 models (and ids gemi doesn't know), a step that narrows its tools (`prepareStep` answering `activeTools`) is sent the full tool list with `tool_choice: allowed_tools`, so the cached prefix holds. Lists with namespaces or tool search, older models and the Anthropic providers still get the narrowed list.
+- New optional `ProviderCapabilities.trailingContext` and `.allowedTools`, and `ProviderStreamParams.trailingContext` and `.allowedTools`.
+
+What to check:
+
+- **The first calls after the upgrade** get a new cache key, so the prompt cache starts cold once.
+- **A note you add as a fake message after the conversation** (a system or user message spliced in by `prepareStep`): move it to `trailingContext()`. On Anthropic it took the cache breakpoint, so every call wrote the cache again.
+- **A custom provider** is sent the trailing context as a last user message unless it declares `capabilities.trailingContext: true` and places `params.trailingContext` itself. It never gets `allowedTools` unless it declares `capabilities.allowedTools: true`.
+- **Tests that compare `capabilities` with `toEqual`**: the built-in providers now include `trailingContext` (and `allowedTools` on OpenAI/Azure), and `FallbackProvider` both fields.
+- **Tests that pin the default `promptCacheKey`** of a call with extra instructions now see the agent-level key.
+
 # 0.229.0
 
 ## A database rate limiter (#1341)
