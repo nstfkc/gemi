@@ -6,7 +6,12 @@ import type {
   ProviderToolSpec,
 } from "../AgentProvider";
 import type { AgentMessage } from "../types";
-import { buildResponsesRequest, toResponsesInput, toResponsesTools } from "./request";
+import {
+  buildResponsesRequest,
+  toResponsesInput,
+  toResponsesTools,
+  WAITING_ON_USER,
+} from "./request";
 
 const FULL: ProviderCapabilities = {
   reasoning: true,
@@ -578,6 +583,33 @@ describe("toResponsesInput()", () => {
       ["function_call_output", "call_1"],
     ]);
     expect(items[1]!.output).toContain("No result was recorded");
+  });
+
+  test("a call still waiting on the user's answer is told so, not as lost (#1380)", () => {
+    const items = toResponsesInput(
+      [
+        message({
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: "call_1", name: "publish", input: {} },
+            { type: "tool-call", toolCallId: "call_2", name: "publish", input: {} },
+            {
+              type: "tool-result",
+              toolCallId: "call_1",
+              name: "publish",
+              status: "ok",
+              output: "done",
+            },
+          ],
+          pending: [
+            { toolCallId: "call_2", name: "publish", input: {}, kind: "approval", signature: "s" },
+          ],
+        }),
+      ],
+      FULL,
+    );
+    const output = items.find((i) => i.type === "function_call_output" && i.call_id === "call_2");
+    expect(output!.output).toBe(WAITING_ON_USER);
   });
 
   test("a structured output part goes back as assistant text", () => {

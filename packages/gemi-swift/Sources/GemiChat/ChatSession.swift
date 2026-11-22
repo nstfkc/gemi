@@ -110,10 +110,18 @@ public final class ChatSession<Agent: AgentSchema> {
     let id: UUID
     let task: Task<Void, Never>
     let clientRunId: String?
+    /// A turn of answers alone, which another answer waits behind (gemi #1380).
+    var answers = false
   }
 
   /// Answers queued in one main-actor turn, sent as one turn.
   @ObservationIgnored private var queued: (results: [ClientToolResult], flush: Task<Void, Never>)?
+
+  /// Answers waiting to go out, by call: a second tap on one is that answer.
+  @ObservationIgnored private var holding: [String: Task<Void, Never>] = [:]
+
+  /// Bumped by `stop()`, so an answer waiting behind another is not sent after it.
+  @ObservationIgnored private var stops = 0
 
   /// - Parameters:
   ///   - threadId: continues a server-side thread. Omitted, the session keeps
@@ -241,14 +249,15 @@ public final class ChatSession<Agent: AgentSchema> {
     state.messages = history + authored
     // The error belonged to the attempt being retried, and the pending calls
     // this turn settles go: the server denies whatever it left out. Answers
-    // alone settle only the answered calls' turns; another turn's questions
-    // stay open, and if the server refuses them after all, their results
-    // take them off. A new message settles them all, as before.
+    // alone settle only the answered calls (gemi #1380); the reply's other
+    // questions and other turns' stay open, and if the server refuses them
+    // after all, their results take them off. A new message settles them
+    // all, as before.
     state.error = nil
     let answered = Set(turn.toolResults.map(\.toolCallId))
     let settled =
       authored.isEmpty && !answered.isEmpty
-      ? settledBy(messages: history, pending: state.pending, ids: answered)
+      ? settledBy(pending: state.pending, ids: answered)
       : Set(state.pending.map(\.toolCallId))
     state.pending = state.pending.filter { !settled.contains($0.toolCallId) }
     phase = .submitted
@@ -289,7 +298,8 @@ public final class ChatSession<Agent: AgentSchema> {
         }
       }
     }
-    inFlight = InFlight(id: id, task: task, clientRunId: clientRunId)
+    let answersOnly = !turn.toolResults.isEmpty && (turn.text ?? "").isEmpty && turn.files.isEmpty
+    inFlight = InFlight(id: id, task: task, clientRunId: clientRunId, answers: answersOnly)
     return task
   }
 
@@ -415,9 +425,11 @@ public final class ChatSession<Agent: AgentSchema> {
   }
 
   private func queue(_ result: ClientToolResult) -> Task<Void, Never> {
+    if let held = holding[result.toolCallId] { return held }
     if var queued {
       queued.results.append(result)
       self.queued = queued
+      holding[result.toolCallId] = queued.flush
       return queued.flush
     }
     let flush = Task { [weak self] in
@@ -425,8 +437,24 @@ public final class ChatSession<Agent: AgentSchema> {
       // same place the web hook's microtask lands.
       guard let self, let results = self.queued?.results else { return }
       self.queued = nil
-      await self.send(ClientTurn(toolResults: results))
+      // Another card of a reply whose earlier answer is still going out or
+      // streaming (gemi #1380) waits for it, then goes out: cutting that
+      // answer would stop its approved tool and close it as `stopped`.
+      let stopped = self.stops
+      while let ahead = self.inFlight, ahead.answers {
+        await ahead.task.value
+      }
+      for result in results { self.holding[result.toolCallId] = nil }
+      if self.stops != stopped { return }
+      // Only the cards still held: a new message sent meanwhile settled the
+      // others, and answering them now would cut its reply for nothing.
+      let sending = results.filter { result in
+        self.state.pending.contains { $0.toolCallId == result.toolCallId }
+      }
+      if sending.isEmpty { return }
+      await self.send(ClientTurn(toolResults: sending))
     }
+    holding[result.toolCallId] = flush
     queued = ([result], flush)
     return flush
   }
@@ -442,6 +470,7 @@ public final class ChatSession<Agent: AgentSchema> {
     let current = inFlight
     current?.task.cancel()
     inFlight = nil
+    stops += 1
     state.markAborted()
     phase = .idle
     // Gated on the request, not on `runId`: the seconds before `run-start` are

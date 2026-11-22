@@ -282,11 +282,31 @@ export function toResponsesInput(
     flush();
   }
 
-  return reconcileToolPairs(items);
+  return reconcileToolPairs(items, waitingOnUser(messages));
 }
 
 /** What is sent for a call whose result never made it into the history. */
 const NO_RESULT_RECORDED = "No result was recorded for this tool call. Assume it did not complete.";
+
+/**
+ * What is sent for a call still waiting on the user's answer (#1380): a
+ * question the turn asked beside one the user has answered, or another turn's.
+ */
+export const WAITING_ON_USER =
+  "No result yet: this is waiting for the user's answer, which they can still give. Do not ask it again or act as if it was answered.";
+
+/**
+ * The top-level calls a transcript is still waiting on the user for: the ones
+ * a message's `pending` stands for (the call itself, or the host of a
+ * sub-agent's question).
+ */
+export function waitingOnUser(messages: readonly AgentMessage[]): Set<string> {
+  const waiting = new Set<string>();
+  for (const message of messages) {
+    for (const call of message.pending ?? []) waiting.add(call.path?.[0] ?? call.toolCallId);
+  }
+  return waiting;
+}
 
 /**
  * Every `function_call` has exactly one `function_call_output`, and no output
@@ -304,7 +324,8 @@ const NO_RESULT_RECORDED = "No result was recorded for this tool call. Assume it
  * So the invariant is enforced here rather than assumed part-by-part: an
  * unpartnered output is dropped, a repeated one is dropped, and a call left
  * dangling by a crash between the call and its result gets a synthetic output
- * saying so. Fabricating that line is the lesser evil — it is true, the model
+ * saying so. A call still waiting on the user's answer (`waiting`, #1380) is
+ * told as that instead. Fabricating that line is the lesser evil — it is true, the model
  * can read it, and the alternative is a conversation that can never be
  * continued.
  *
@@ -315,7 +336,10 @@ const NO_RESULT_RECORDED = "No result was recorded for this tool call. Assume it
  * amended copy of a message instead of replacing it; the store contract now
  * says upsert, and this is the guard for a store that did not read it.
  */
-function reconcileToolPairs(items: ResponsesInputItem[]): ResponsesInputItem[] {
+function reconcileToolPairs(
+  items: ResponsesInputItem[],
+  waiting: ReadonlySet<string>,
+): ResponsesInputItem[] {
   const called = new Set<string>();
   const answered = new Set<string>();
   const kept: ResponsesInputItem[] = [];
@@ -344,7 +368,11 @@ function reconcileToolPairs(items: ResponsesInputItem[]): ResponsesInputItem[] {
     const callId = String(item.call_id);
     if (answered.has(callId)) continue;
     answered.add(callId);
-    out.push({ type: "function_call_output", call_id: callId, output: NO_RESULT_RECORDED });
+    out.push({
+      type: "function_call_output",
+      call_id: callId,
+      output: waiting.has(callId) ? WAITING_ON_USER : NO_RESULT_RECORDED,
+    });
   }
   return out;
 }

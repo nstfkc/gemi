@@ -178,30 +178,21 @@ function callTurns(messages: readonly AgentMessage<any, any>[]): Map<string, str
 const hostOf = (call: { toolCallId: string; path?: string[] }) => call.path?.[0] ?? call.toolCallId;
 
 /**
- * The held calls an answer to the calls in `ids` settles (#1355): the calls
- * of the turns those belong to. Another turn's question is that turn's to
- * answer, and the server leaves it open. Where a turn can't be told (a
- * transcript stored before `AgentMessage.turn`, a call the transcript doesn't
- * hold), every held call, as before.
+ * The held calls an answer to the calls in `ids` settles: those calls, and
+ * the other questions of a sub-agent run one of them was asked in, since
+ * answering re-enters that run's tool once. Every other held call stays open
+ * on the server and here: another turn's question is that turn's to answer
+ * (#1355), and so is another question of the same reply (#1380).
  */
 export function settledBy(
-  messages: readonly AgentMessage<any, any>[],
   pending: readonly PendingToolCall<any>[],
   ids: ReadonlySet<string>,
 ): Set<string> {
-  const turns = callTurns(messages);
-  const turnOf = (call: PendingToolCall<any>) => call.turn ?? turns.get(hostOf(call));
   const answered = pending.filter((call) => ids.has(call.toolCallId));
-  const named = new Set(answered.map(turnOf));
-  if (answered.length === 0 || named.has(undefined)) {
-    return new Set(pending.map((call) => call.toolCallId));
-  }
+  const runs = new Set(answered.filter((call) => call.path?.length).map(hostOf));
   return new Set(
     pending
-      .filter((call) => {
-        const turn = turnOf(call);
-        return turn === undefined || named.has(turn);
-      })
+      .filter((call) => ids.has(call.toolCallId) || (call.path?.length && runs.has(hostOf(call))))
       .map((call) => call.toolCallId),
   );
 }

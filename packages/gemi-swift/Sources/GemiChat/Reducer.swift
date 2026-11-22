@@ -621,16 +621,14 @@ func othersTurns(messages: [AgentMessage], pending: [PendingToolCall], next: [Pe
   }
 }
 
-/// The held calls an answer to the calls in `ids` settles: the calls of the
-/// turns those belong to. Where a turn can't be told, every held call.
-func settledBy(messages: [AgentMessage], pending: [PendingToolCall], ids: Set<String>) -> Set<String> {
-  let turns = callTurns(messages)
-  let answered = pending.filter { ids.contains($0.toolCallId) }
-  let named = answered.map { turnOf($0, turns) }
-  if answered.isEmpty || named.contains(where: { $0 == nil }) {
-    return Set(pending.map(\.toolCallId))
-  }
-  let names = Set(named.compactMap { $0 })
+/// The held calls an answer to the calls in `ids` settles: those calls, and
+/// the other questions of a sub-agent run one of them was asked in (its tool
+/// is re-entered once). Every other held call stays open: another turn's
+/// question (gemi #1355), and another question of the same reply (gemi #1380).
+func settledBy(pending: [PendingToolCall], ids: Set<String>) -> Set<String> {
+  let runs = Set(pending.filter { ids.contains($0.toolCallId) && !($0.path ?? []).isEmpty }.map(hostOf))
   return Set(
-    pending.filter { call in turnOf(call, turns).map { names.contains($0) } ?? true }.map(\.toolCallId))
+    pending.filter { call in
+      ids.contains(call.toolCallId) || (!(call.path ?? []).isEmpty && runs.contains(hostOf(call)))
+    }.map(\.toolCallId))
 }

@@ -129,7 +129,7 @@ type ReducerCase =
     }
   | { test: string; op: "markAborted"; state: unknown; result: unknown }
   /** `result` is the settled ids, sorted. */
-  | { test: string; op: "settledBy"; messages: unknown; pending: unknown; ids: string[]; result: string[] };
+  | { test: string; op: "settledBy"; pending: unknown; ids: string[]; result: string[] };
 
 /**
  * `applyFrame`, `markAborted`, `initialChatState` and `settledBy`, recording
@@ -204,12 +204,11 @@ export function recordReducer(target: string) {
       return result;
     }) as typeof initialChatState,
 
-    settledBy: ((messages, pending, ids) => {
-      const result = settledBy(messages, pending, ids);
+    settledBy: ((pending, ids) => {
+      const result = settledBy(pending, ids);
       const entry: ReducerCase = {
         test: currentTest(),
         op: "settledBy",
-        messages: JSON.parse(JSON.stringify(messages)),
         pending: JSON.parse(JSON.stringify(pending)),
         ids: [...ids].sort(),
         result: [...result].sort(),
