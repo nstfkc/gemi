@@ -197,9 +197,16 @@ public class ChatSession(
           )
         )
       } else emptyList()
-    // The error belonged to the attempt being retried, and every pending call
-    // is settled by this turn — the server denies whatever it left out.
-    chat = chat.copy(messages = history + authored, error = null, pending = emptyList())
+    // The error belonged to the attempt being retried, and the pending calls
+    // this turn settles go: the server denies whatever it left out. Answers
+    // alone settle only the answered calls' turns; another turn's questions
+    // stay open, and if the server refuses them after all, their results
+    // take them off. A new message settles them all, as before.
+    val answered = turn.toolResults.map { it.toolCallId }.toSet()
+    val settled =
+      if (authored.isEmpty() && answered.isNotEmpty()) settledBy(history, chat.pending, answered)
+      else chat.pending.map { it.toolCallId }.toSet()
+    chat = chat.copy(messages = history + authored, error = null, pending = chat.pending.filter { it.toolCallId !in settled })
     phase = Phase.Submitted
     publish()
 

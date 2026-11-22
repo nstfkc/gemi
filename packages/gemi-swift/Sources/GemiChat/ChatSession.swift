@@ -239,10 +239,18 @@ public final class ChatSession<Agent: AgentSchema> {
         ]))
     }
     state.messages = history + authored
-    // The error belonged to the attempt being retried, and every pending call
-    // is settled by this turn — the server denies whatever it left out.
+    // The error belonged to the attempt being retried, and the pending calls
+    // this turn settles go: the server denies whatever it left out. Answers
+    // alone settle only the answered calls' turns; another turn's questions
+    // stay open, and if the server refuses them after all, their results
+    // take them off. A new message settles them all, as before.
     state.error = nil
-    state.pending = []
+    let answered = Set(turn.toolResults.map(\.toolCallId))
+    let settled =
+      authored.isEmpty && !answered.isEmpty
+      ? settledBy(messages: history, pending: state.pending, ids: answered)
+      : Set(state.pending.map(\.toolCallId))
+    state.pending = state.pending.filter { !settled.contains($0.toolCallId) }
     phase = .submitted
 
     // With the id of the copy just shown, so the server can say what it stored

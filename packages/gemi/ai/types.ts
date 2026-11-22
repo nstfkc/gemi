@@ -929,7 +929,16 @@ export type ClientTurn = {
  */
 export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
   | { type: "run-start"; runId: string; threadId?: string }
-  | { type: "message-start"; messageId: string; role: "assistant" }
+  | {
+      type: "message-start";
+      messageId: string;
+      role: "assistant";
+      /**
+       * The message's `AgentMessage.turn` (#1344), when the run knows it: the
+       * turn a client shows the reply under while it streams.
+       */
+      turn?: string;
+    }
   | { type: "text-delta"; messageId: string; delta: string }
   /**
    * `id` is the provider's own reasoning-item id, and it is carried for one

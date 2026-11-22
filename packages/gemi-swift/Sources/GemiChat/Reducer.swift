@@ -122,6 +122,9 @@ extension ChatState {
     case "message-start":
       withMessage(event.string("messageId") ?? "", now: now) { message in
         message["role"] = event["role"]
+        if let turn = event.string("turn"), message["turn"]?.stringValue == nil {
+          message["turn"] = .string(turn)
+        }
       }
 
     case "text-delta":
@@ -290,9 +293,12 @@ extension ChatState {
 
     case "awaiting-input":
       runId = event.string("runId")
-      pending = (event["pending"]?.arrayValue ?? []).map {
+      // The questions of this run's turn: another turn's, still waiting
+      // beside it, are kept.
+      let next = (event["pending"]?.arrayValue ?? []).map {
         PendingToolCall(json: $0.objectValue ?? [:])
       }
+      pending = othersTurns(messages: messages, pending: pending, next: next) + next
 
     case "message-end":
       withMessage(event.string("messageId") ?? "", now: now) { message in
@@ -343,7 +349,9 @@ extension ChatState {
 
     case "error":
       error = AgentError(json: event["error"]?.objectValue ?? [:])
-      pending = []
+      // Calls that name their turn are kept: other turns' questions, still
+      // open on the server. A run's own turn holds none by the time it fails.
+      pending = pending.filter { $0.turn != nil }
 
     case "run-end":
       let reason = event.string("finishReason").map { FinishReason(rawValue: $0) }
@@ -571,4 +579,58 @@ extension Dictionary where Key == String, Value == JSONValue {
 
 extension JSONValue {
   fileprivate func string(_ key: String) -> String? { self[key]?.stringValue }
+}
+
+/// The turn each tool call in `messages` was asked in, by `toolCallId`.
+private func callTurns(_ messages: [AgentMessage]) -> [String: String?] {
+  var turns: [String: String?] = [:]
+  for message in messages {
+    for part in message.json["content"]?.arrayValue ?? [] {
+      guard let object = part.objectValue, object["type"]?.stringValue == "tool-call",
+        let id = object["toolCallId"]?.stringValue
+      else { continue }
+      turns[id] = .some(message.turn)
+    }
+  }
+  return turns
+}
+
+/// The top-level call a pending one stands for: itself, or the call its
+/// sub-run is nested under.
+private func hostOf(_ call: PendingToolCall) -> String { call.path?.first ?? call.toolCallId }
+
+private func turnOf(_ call: PendingToolCall, _ turns: [String: String?]) -> String? {
+  call.turn ?? turns[hostOf(call)] ?? nil
+}
+
+/// The held calls in `pending` that belong to a turn none of `next` belongs
+/// to: what an `awaiting-input` for one turn leaves standing. None when a
+/// turn can't be told.
+func othersTurns(messages: [AgentMessage], pending: [PendingToolCall], next: [PendingToolCall])
+  -> [PendingToolCall]
+{
+  if pending.isEmpty { return [] }
+  let turns = callTurns(messages)
+  let asking = next.map { turnOf($0, turns) }
+  if asking.isEmpty || asking.contains(where: { $0 == nil }) { return [] }
+  let named = Set(asking.compactMap { $0 })
+  let replaced = Set(next.map(\.toolCallId))
+  return pending.filter { call in
+    guard let turn = turnOf(call, turns) else { return false }
+    return !named.contains(turn) && !replaced.contains(call.toolCallId)
+  }
+}
+
+/// The held calls an answer to the calls in `ids` settles: the calls of the
+/// turns those belong to. Where a turn can't be told, every held call.
+func settledBy(messages: [AgentMessage], pending: [PendingToolCall], ids: Set<String>) -> Set<String> {
+  let turns = callTurns(messages)
+  let answered = pending.filter { ids.contains($0.toolCallId) }
+  let named = answered.map { turnOf($0, turns) }
+  if answered.isEmpty || named.contains(where: { $0 == nil }) {
+    return Set(pending.map(\.toolCallId))
+  }
+  let names = Set(named.compactMap { $0 })
+  return Set(
+    pending.filter { call in turnOf(call, turns).map { names.contains($0) } ?? true }.map(\.toolCallId))
 }

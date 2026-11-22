@@ -108,6 +108,8 @@ public struct AgentMessage: JSONObjectView, Identifiable {
     (json["content"]?.arrayValue ?? []).map { ContentPart(json: $0.objectValue ?? [:]) }
   }
   public var createdAt: String { string("createdAt") ?? "" }
+  /// The id of the user message that started the turn this message belongs to.
+  public var turn: String? { string("turn") }
   /// Absent while the message is still streaming.
   public var finishReason: FinishReason? {
     string("finishReason").map { FinishReason(rawValue: $0) }
@@ -268,4 +270,8 @@ public struct PendingToolCall: JSONObjectView, Identifiable {
   /// The chain of tool calls a sub-agent's question is nested under,
   /// outermost first. Handed back untouched; read it only to say who is asking.
   public var path: [String]? { json["path"]?.arrayValue?.compactMap(\.stringValue) }
+  /// The turn that asked it: `AgentMessage.turn` of the message holding the
+  /// call. Answering it settles that turn's calls only. Nil from a server
+  /// older than turns.
+  public var turn: String? { string("turn") }
 }
