@@ -117,7 +117,8 @@ new Date(call.preview.expiresAt); // parse it back where a Date is needed
 {chat.error && <p>{chat.error.message}. Try again.</p>}
 ```
 
-- **While the request is in flight**, every held call has `answering: true` (the turn settles all of them: the server refuses the ones it leaves out). `status` stays `awaiting-input` until the server answers.
+- **While the request is in flight**, every held call of the answered call's turn has `answering: true` (the turn settles all of them: the server refuses the ones it leaves out). `status` stays `awaiting-input` until the server answers.
+- **Questions of other turns** (parallel turns, `ifBusy: "parallel"`) are not touched: each call carries the `turn` that asked it, and answering one turn's question leaves another turn's card as it is, to answer in any order. An answer given while another turn's answer streams goes out beside it (`ifBusy: "parallel"`), without cutting it. A failed run (`error`) keeps other turns' cards too. Calls without a `turn` (from an older server) settle together.
 - **When the server takes it** (a 2xx), the calls leave `pending` and the stream shows what happened to them, as before.
 - **When it fails** (a network error or a non-2xx), the calls are back to plain pending (`answering` absent), the failure is in `error` and `onError`, and calling `approve`/`answer` again sends the answer again, including from inside `onError`. No thread re-read or remount is needed. Since the calls are back, `status` is `awaiting-input`, not `"error"`: show the retry message from `chat.error`, not from `status === "error"`.
 - **When the server took it and the stream then fails** (the connection drops after the 2xx), the calls stay gone: the server has the answer and the run goes on there (`reattach` picks it up). `error` is set and `status` is `"error"`.
