@@ -2,8 +2,9 @@ import { expect, test } from "vitest";
 import { Agent, AgentTool, type PrepareStep } from "./Agent";
 import type { ProviderEvent } from "./AgentProvider";
 import { FallbackProvider } from "./FallbackProvider";
-import { capabilitiesForClaude, capabilitiesForModel } from "./providers/capabilities";
+import { capabilitiesForClaude, capabilitiesForModel, claudeRequestFeatures } from "./providers/capabilities";
 import { fakeProvider } from "./providers/fakeProvider";
+import { buildMessagesRequest } from "./providers/anthropicRequest";
 import { s } from "./Schema";
 import type { AgentMessage } from "./types";
 
@@ -152,4 +153,25 @@ test("a fallback chain forces only when every leg does", () => {
   (notForcing.capabilities as any).supportsForcedToolChoice = false;
   expect(new FallbackProvider([{ provider: forcing }, { provider: forcing }]).capabilities.supportsForcedToolChoice).toBe(true);
   expect(new FallbackProvider([{ provider: forcing }, { provider: notForcing }]).capabilities.supportsForcedToolChoice).toBe(false);
+});
+
+test("on a provider that places the trailing text itself, the line joins it there, and the system prompt stays", async () => {
+  const { provider, agent } = setup([text("I will look it up."), callsLookup("c1"), text("found")], { forces: false });
+  (provider.capabilities as any).trailingContext = true;
+  await agent.stream({ messages: [], turn: { text: "go" }, trailingContext: "Note." }).result();
+  expect(provider.calls[0]!.trailingContext).toMatch(/^Note\.\n\n.*"lookup"/s);
+  expect(provider.calls.map((call) => call.systemPrompt)).toEqual(["You research.", "You research.", "You research."]);
+  // The second ask: the history ends on the assistant's text, and the last message sent is the user's line.
+  const second = provider.calls[1]!;
+  expect(second.messages.at(-1)!.role).toBe("assistant");
+  const body = buildMessagesRequest(second as any, {
+    model: "claude-opus-5-5",
+    modelId: "claude-opus-5-5",
+    capabilities: { ...capabilitiesForClaude("claude-opus-5-5"), ...claudeRequestFeatures() },
+    forcedToolChoice: false,
+    blockBinding: true,
+  });
+  const last = body.messages.at(-1)!;
+  expect(last.role).toBe("user");
+  expect(JSON.stringify(last.content)).toContain('\\"lookup\\"');
 });

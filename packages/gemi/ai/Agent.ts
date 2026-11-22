@@ -1857,8 +1857,9 @@ export type PrepareStepResult = {
    *
    * On a provider that cannot force a tool (`capabilities.
    * supportsForcedToolChoice` is `false`), a forced choice is emulated
-   * (#1261): the call's system prompt ends with a line naming the tool (or
-   * "one of your tools"), and a step that answers without any tool call is
+   * (#1261): the call is sent a line naming the tool (or "one of your
+   * tools") after the conversation, with the trailing context, so the
+   * system prompt stays the same; and a step that answers without any tool call is
    * asked once more with the same choice and line, as the next step (a hook
    * that answers a `toolChoice` of its own for that step wins). If that
    * answer has no tool call either, the run ends as it would have.
@@ -3226,7 +3227,7 @@ function trailingMessage(text: string, turn: string | undefined): AgentMessage {
 }
 
 /**
- * The system line that stands in for a forced `toolChoice` on a provider that
+ * The line, sent after the conversation, that stands in for a forced `toolChoice` on a provider that
  * cannot force one (#1261).
  */
 function forcedToolLine(choice: ProviderToolChoice): string {

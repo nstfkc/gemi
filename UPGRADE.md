@@ -18,6 +18,7 @@ What to check:
 - **A custom provider** is sent the trailing context as a last user message (carrying the turn's id as `turn`, so it isn't a turn start) unless it declares `capabilities.trailingContext: true` and places `params.trailingContext` itself. It never gets `allowedTools` unless it declares `capabilities.allowedTools: true`.
 - **Tests that compare `capabilities` with `toEqual`**: the built-in providers now include `trailingContext` (and `allowedTools` on OpenAI/Azure), and `FallbackProvider` both fields.
 - **Tests that assert the forced-tool line in `systemPrompt`**: read it from `trailingContext`, or the last message on a provider without the capability.
+- **Recordings of forced steps on Claude Opus 5.5, Sonnet 5.5 or Fable 5.1** made before the upgrade had the line in `systemPrompt`, and now replay as changed. Record them again.
 - **Tests that pin the default `promptCacheKey`** of a call with extra instructions now see the agent-level key.
 
 # 0.231.0

@@ -80,8 +80,8 @@ export type ProviderCapabilities = {
   /**
    * Whether the model takes a forced `toolChoice` (`"required"` or
    * `{ name }`) (#1261). A provider that answers `false` sends one as `auto`,
-   * and `Agent` emulates it: a system line naming the call the step must
-   * make, and one more ask when the step ends without it. Absent means
+   * and `Agent` emulates it: a line after the conversation (with the
+   * trailing context) naming the call the step must make, and one more ask when the step ends without it. Absent means
    * `true`, so a custom provider written before this flag is unchanged.
    */
   supportsForcedToolChoice?: boolean;
