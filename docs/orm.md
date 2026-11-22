@@ -2649,17 +2649,18 @@ same applies to identifiers and sort directions, which cannot be parameters in S
 is the same for those, and it is about where the value came from, not what it is.
 
 `DB.sql` is unchanged and still Bun's own tagged template, for a single self-contained statement
-that needs none of this. **Whether it joins the ambient transaction depends on the dialect**, so use
-`DB.query` when that matters:
+that needs none of this. **It never joins the ambient transaction**, so use `DB.query` when that
+matters:
 
-- On **Postgres** it does not. The pool hands it a different connection, so a `Model.transaction`
-  that rolls back leaves a `DB.sql` write behind.
-- On **SQLite** it does, because `DatabaseManager` gives SQLite a single connection and the
-  statement is therefore inside the open transaction.
+- On **Postgres** the pool hands it a different connection, so a `Model.transaction` that rolls
+  back leaves a `DB.sql` write behind.
+- On a **SQLite** file it runs on the connection for statements outside transactions (#1375). A
+  read sees only committed rows. A write waits for the open transaction's lock, and when the
+  transaction is waiting for that write, it fails with `TransactionQueueDeadlockError` after 5
+  seconds. (A `:memory:` database has one connection, so there the statement is inside the open
+  transaction.)
 
-The direction is the awkward one: a `DB.sql` write inside a transaction rolls back correctly in
-development on SQLite and survives the rollback in production on Postgres. `DB.query` and
-`DB.execute` join the transaction on both.
+`DB.query` and `DB.execute` join the transaction on both.
 
 ### Reading the live schema
 
