@@ -111,6 +111,51 @@ describe("joined messages (ifBusy: \"join\")", () => {
   });
 });
 
+describe("AgentMessage.turn (#1339)", () => {
+  // Two runs answering side by side, their messages stored as they came.
+  const parallel = () => [
+    msg("uA", "user", "write the hero", { turn: "uA" }),
+    msg("aA", "assistant", "on it", { turn: "uA" }),
+    msg("uB", "user", "what time is it", { turn: "uB" }),
+    msg("aB", "assistant", "noon", { turn: "uB" }),
+    msg("jA", "user", "make it blue", { turn: "uA", joined: "uA" }),
+    msg("aA2", "assistant", "blue it is", { turn: "uA" }),
+  ];
+
+  test("every message goes with the turn it names: a reply stored after another turn's is still its own turn's", () => {
+    expect(turnStarts(parallel())).toEqual([0, 2]);
+    expect(splitTurns(parallel()).map(ids)).toEqual([["uA", "aA", "jA", "aA2"], ["uB", "aB"]]);
+  });
+
+  test("a cut never keeps a reply without the message it answers", () => {
+    const messages = [...thread(2), ...parallel()];
+    const windowed = windowMessages(messages, { maxTurns: 1, note: false });
+    // B is the last turn, but A's reply comes after it: the window moves back to A.
+    expect(ids(windowed.messages)).toEqual(ids(parallel()));
+    expect(windowed.omittedTurns).toBe(2);
+  });
+
+  test("a message naming its own id starts a turn, whatever its role; one naming another never does", () => {
+    const messages = [
+      msg("u0", "user", "hi", { turn: "u0" }),
+      msg("e1", "user", "an event the run read", { turn: "u0" }),
+      msg("a1", "assistant", "started by itself", { turn: "a1" }),
+    ];
+    expect(turnStarts(messages)).toEqual([0, 2]);
+  });
+
+  test("a thread stored before turn existed is read as before, beside messages that have it", () => {
+    const messages = [
+      msg("u0", "user", "old question"),
+      msg("a0", "assistant", "old answer"),
+      msg("u1", "user", "new question", { turn: "u1" }),
+      msg("a1", "assistant", "new answer", { turn: "u1" }),
+    ];
+    expect(turnStarts(messages)).toEqual([0, 2]);
+    expect(splitTurns(messages).map(ids)).toEqual([["u0", "a0"], ["u1", "a1"]]);
+  });
+});
+
 describe("turnStarts / splitTurns", () => {
   test("a turn starts at each user message, and index 0 always starts one", () => {
     const messages = [
