@@ -2,7 +2,12 @@ import type { SQL, TransactionSQL } from "bun";
 
 import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
-import { commitDependsOn, currentConnectionName, currentTransaction } from "../../orm/context";
+import {
+  commitDependsOn,
+  currentConnectionName,
+  currentTransaction,
+  queuedOnSqlite,
+} from "../../orm/context";
 import type { ChangeFeedDriver, ChangeFeedRead } from "./ChangeFeedDriver";
 import { defaultPostgresListener, type PostgresListenerFactory } from "./postgresListen";
 
@@ -62,7 +67,6 @@ export class DatabaseChangeFeedDriver implements ChangeFeedDriver {
   private readonly url: string | undefined;
   private readonly retain: number;
   private readonly listener: PostgresListenerFactory;
-  private sqliteTurn: Promise<unknown> = Promise.resolve();
 
   constructor(connection: Connection, options: DatabaseChangeFeedDriverOptions = {}) {
     if (connection.dialect !== "postgres" && connection.dialect !== "sqlite") {
@@ -117,12 +121,11 @@ export class DatabaseChangeFeedDriver implements ChangeFeedDriver {
     if (!tx) {
       const publish = () => this.sql.begin((own) => this.append(own, channel, data));
       if (this.dialect !== "sqlite") return publish();
-      // Bun gives SQLite one connection, and a second `begin` while one is
-      // open fails ("cannot start a transaction within a transaction"), so
-      // this process's publishes take turns.
-      const turn = this.sqliteTurn.then(publish);
-      this.sqliteTurn = turn.catch(() => {});
-      return turn;
+      // Bun gives a SQLite client one connection, and a second `begin` while
+      // one is open fails ("cannot start a transaction within a transaction"),
+      // so publishes take turns in the connection's transaction queue, with
+      // every other transaction on it (#1362).
+      return queuedOnSqlite(this.sql, publish);
     }
     const written = this.append(tx, channel, data);
     // A failed statement aborts a Postgres transaction, and a COMMIT after
