@@ -1,3 +1,21 @@
+# 0.233.0
+
+## Answering one turn's question keeps the others open (#1355)
+
+**Behaviour change (minor version).** See [Runs side by side](docs/ai-server-turns.md#runs-side-by-side).
+
+- A request that only answers tool calls (approvals, client tools) now refuses only the unanswered calls of its own turn. Before, it refused every open call in the thread, so answering turn B's question refused the one turn A was waiting on.
+- A stop refuses the stopped run's own open calls, not another turn's.
+- A new message refuses every open call as before, unless its run is parallel (`ifBusy: "parallel"`, asked by the turn, or started beside a running one): then the other turns' questions stay open. New `AgentStreamParams.keepOtherTurnsOpen` for running the agent yourself.
+
+What to check:
+
+- **A thread can now hold open calls from more than one turn.** The built-in request builders pair a call without a result for the model, as for one still running. A custom provider that rejects a history with an unanswered call has to do the same.
+- **`PendingToolCall.turn`** (new, not signed): the turn that asked the call, on `awaiting-input` frames and `AgentMessage.pending`. Tests comparing pending calls with `toEqual` see the new field.
+- **`useChat`** follows the server: answering a call marks (`answering`) and then drops only the held calls of its turn, an `awaiting-input` frame from one turn keeps another turn's cards, and a new message sent with `ifBusy: "parallel"` keeps the held calls. Calls with no `turn` (an older server, a thread stored before) settle together, as before. A UI that disabled every card while any `answering` is set still works; it can now disable per card (`call.answering`).
+- **Kotlin and Swift clients** still drop every held call when one is answered: in an open chat, answering one turn's question hides the other turns' until the thread is read again (a reload, or `watch`). They follow in a later release.
+- Threads without parallel turns behave as before: their open calls all belong to one turn.
+
 # 0.230.0
 
 ## Every message names its turn (#1339)

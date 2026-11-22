@@ -471,6 +471,85 @@ describe("awaiting input", () => {
   });
 });
 
+describe("questions of parallel turns (#1355)", () => {
+  /** A run of turn `turn` that ends asking one approval, `toolCallId`. */
+  const parks = (runId: string, messageId: string, turn: string, toolCallId: string): AgentStreamFrame[] => [
+    { seq: 0, event: { type: "run-start", runId, threadId: "th_9" } },
+    { seq: 1, event: { type: "message-start", messageId, role: "assistant" } },
+    {
+      seq: 2,
+      event: {
+        type: "awaiting-input",
+        runId,
+        pending: [{ toolCallId, name: "publish", input: {}, kind: "approval", signature: `sig_${toolCallId}`, turn }],
+      },
+    },
+    { seq: 3, event: { type: "message-end", messageId, finishReason: "awaiting-input" } },
+    { seq: 4, event: { type: "run-end", runId, finishReason: "awaiting-input" } },
+  ];
+
+  async function twoParked() {
+    const mounted = mount({ threadId: "th_9", attach: false, ifBusy: "parallel" });
+    fetchMock.mockResolvedValueOnce(streamed(parks("run_a", "ma", "turn_a", "tc_a")));
+    await act(async () => {
+      await mounted.box.api.sendMessage("publish home");
+    });
+    fetchMock.mockResolvedValueOnce(streamed(parks("run_b", "mb", "turn_b", "tc_b")));
+    await act(async () => {
+      await mounted.box.api.sendMessage("publish about");
+    });
+    return mounted;
+  }
+
+  test("a second turn asking leaves the first turn's card, and a new parallel message keeps both", async () => {
+    const { box } = await twoParked();
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a", "tc_b"]);
+    await act(async () => {
+      await box.api.sendMessage("and the footer");
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a", "tc_b"]);
+  });
+
+  test("answering B marks and settles only B's card; A's stays to be answered", async () => {
+    const { box } = await twoParked();
+    let respond!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (respond = resolve)));
+    let done!: Promise<void>;
+    await act(async () => {
+      done = box.api.approve("tc_b", true);
+    });
+    expect(box.api.pending.map((call) => [call.toolCallId, call.answering])).toEqual([
+      ["tc_a", undefined],
+      ["tc_b", true],
+    ]);
+    await act(async () => {
+      respond(streamed(ANSWER));
+      await done;
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a"]);
+    expect(box.api.status).toBe("awaiting-input");
+
+    // A's card answers as usual.
+    await act(async () => {
+      await box.api.approve("tc_a", true);
+    });
+    expect(bodyOf(3).turn).toEqual({ toolResults: [{ toolCallId: "tc_a", signature: "sig_tc_a", approve: true }] });
+    expect(box.api.pending).toEqual([]);
+  });
+
+  test("calls without a turn (an older server) settle together, as before", async () => {
+    const { box } = mount({ attach: false });
+    fetchMock.mockResolvedValueOnce(streamed(ASKING));
+    await act(async () => {
+      await box.api.sendMessage("refund me");
+    });
+    await act(async () => {
+      await box.api.approve("tc_1", true);
+    });
+    expect(box.api.pending).toEqual([]);
+  });
+});
+
 describe("answering a pending call (#1106)", () => {
   async function asked(params: Record<string, unknown> = {}) {
     fetchMock.mockResolvedValueOnce(streamed(ASKING));

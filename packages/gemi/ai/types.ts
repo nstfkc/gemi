@@ -815,6 +815,13 @@ export type PendingToolCall<T extends ToolShapes = ToolShapes> = {
      */
     path?: string[];
     /**
+     * The turn that asked it (#1355): `AgentMessage.turn` of the message
+     * holding the call. A request answering it settles that turn's calls
+     * only, so a client keeps the questions of other turns open. Not signed,
+     * and absent on calls stored before it.
+     */
+    turn?: string;
+    /**
      * What the tool's `approvalPreview` computed for this call (#1060): the
      * dry run to show next to Approve and Reject, such as the SQL and how many
      * rows it changes. Only on `approval` calls of a tool that has one, and

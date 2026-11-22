@@ -7,6 +7,7 @@ import {
   liveRunIds,
   markAllAborted,
   openPending,
+  settledBy,
   runCursor,
   type ChatState,
 } from "./client/reducer";
@@ -1399,11 +1400,17 @@ export function useChat<P extends keyof AgentRoutes>(
       // back to plain pending if the request fails: dropping them on the way
       // out left a failed approval with no card to answer again.
       //
-      // Every held call is marked, not only the answered ones: the turn
-      // resolves all of them (the server denies what it leaves out), so a
-      // second card answered while this one flies would only race it.
+      // Every held call of the answered calls' turns is marked, not only the
+      // answered ones: the turn resolves all of them (the server denies what
+      // it leaves out), so a second card of it answered while this one flies
+      // would only race it. Another turn's questions stay open on the server
+      // (#1355), and here.
       const answered = turn.toolResults?.length
-        ? new Set(previous.pending.map((call: PendingToolCall) => call.toolCallId))
+        ? settledBy(
+            previous.messages,
+            previous.pending,
+            new Set(turn.toolResults.map((result) => result.toolCallId)),
+          )
         : null;
       // Run once the server has said whether it took the turn, and only while
       // this send is still the hook's request: a send that superseded it has
@@ -1415,7 +1422,9 @@ export function useChat<P extends keyof AgentRoutes>(
         const current = stateRef.current!;
         commit({
           ...current,
-          pending: taken ? [] : withAnswering(current.pending, answered, false),
+          pending: taken
+            ? current.pending.filter((call: PendingToolCall) => !answered.has(call.toolCallId))
+            : withAnswering(current.pending, answered, false),
         });
       };
 
@@ -1432,7 +1441,13 @@ export function useChat<P extends keyof AgentRoutes>(
         // and guessing at the output of a call it has not run yet would be a lie
         // the stream then contradicts. A turn that answers keeps them until the
         // server takes it (`settle`), so a failed answer can be sent again.
-        pending: answered ? withAnswering(previous.pending, answered, true) : [],
+        // A new message beside other turns (`ifBusy: "parallel"`) leaves
+        // their questions open on the server (#1355), so they stay here too.
+        pending: answered
+          ? withAnswering(previous.pending, answered, true)
+          : ifBusy === "parallel" && authored.length > 0
+            ? previous.pending
+            : [],
       });
       // A reply still streaming beside this send keeps the chat `streaming`.
       if (!wasBusy || phaseRef.current !== "streaming") setPhaseSafe("submitted");
@@ -1539,6 +1554,17 @@ export function useChat<P extends keyof AgentRoutes>(
         // The same call answered twice in one tick is one answer: the first.
         if (!batch.results.some((queuedResult) => queuedResult.toolCallId === result.toolCallId)) {
           batch.results.push(result);
+          // Another turn's card answered in the same tick joins the batch:
+          // its turn's calls are marked too.
+          const current = stateRef.current!;
+          commit({
+            ...current,
+            pending: withAnswering(
+              current.pending,
+              settledBy(current.messages, current.pending, new Set([result.toolCallId])),
+              true,
+            ),
+          });
         }
         return batch.flushed;
       }
@@ -1561,7 +1587,7 @@ export function useChat<P extends keyof AgentRoutes>(
         ...current,
         pending: withAnswering(
           current.pending,
-          new Set(current.pending.map((call: PendingToolCall) => call.toolCallId)),
+          settledBy(current.messages, current.pending, new Set([result.toolCallId])),
           true,
         ),
       });

@@ -1911,6 +1911,16 @@ interface AgentStreamParamsBase<Ctx = AgentContext> {
   /** Aborted by an explicit `stop`, not by a disconnect. */
   signal?: AbortSignal;
   /**
+   * Leave the open tool calls of other turns open (#1355): a run started
+   * beside others on one thread (`ifBusy: "parallel"`) does not refuse the
+   * questions another turn is still waiting on when it brings a message of
+   * its own. Without it a new message refuses every open call, as a person
+   * who moves on from a question refuses it. A request that only answers
+   * calls never refuses another turn's, with or without this. The
+   * controller sets it for a parallel run.
+   */
+  keepOtherTurnsOpen?: boolean;
+  /**
    * Messages for the run while it works (#1222): before each model call the
    * run takes what is in it and adds each as a user message to the history
    * (reported to `onMessage`, and put on the stream as a `message` frame),
@@ -4056,7 +4066,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         this.finishReason = "error";
       } else if (escalated.length > 0) {
         this.finishReason = "awaiting-input";
-        this.emit({ type: "awaiting-input", runId: this.runId, pending: escalated });
+        this.emit({ type: "awaiting-input", runId: this.runId, pending: this.withTurn(escalated) });
       } else if (this.answersOnlyStale()) {
         // Answers and nothing else, for calls that were all answered already:
         // a second tab answering the question the first one did (#1052), or a
@@ -4431,9 +4441,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // Kept on the message as well as sent on the frame (#1052): the frame
         // reaches only a client watching now, and a page opened later reads
         // the thread. See `AgentMessage.pending`.
-        if (this.depth === 0) message.pending = pending;
+        const asked = this.withTurn(pending);
+        if (this.depth === 0) message.pending = asked;
         await this.finalizeMessage("awaiting-input");
-        this.emit({ type: "awaiting-input", runId: this.runId, pending });
+        this.emit({ type: "awaiting-input", runId: this.runId, pending: asked });
         return;
       }
 
@@ -4593,6 +4604,27 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       if (message.role === "user" && !message.joined && !injected.has(message.id)) return message.id;
     }
     return this.history[0]?.id ?? "";
+  }
+
+  /**
+   * `pending` with the run's turn on each call (#1355), at the top level,
+   * where a client reads them: a sub-run's questions reach the user as its
+   * parent's, in the parent's turn.
+   */
+  private withTurn(pending: PendingToolCall[], asked?: string): PendingToolCall[] {
+    const turn = this.depth === 0 ? (asked ?? this.turn?.id) : undefined;
+    return turn ? pending.map((call) => (call.turn === turn ? call : { ...call, turn })) : pending;
+  }
+
+  /**
+   * Whether `message` (one holding an open call) belongs to a turn other
+   * than this run's (#1355). A run with no turn, or a message whose turn
+   * cannot be told, is not another's: the run settles it, as before.
+   */
+  private othersTurn(message: AgentMessage): boolean {
+    if (!this.turn || this.depth > 0) return false;
+    const turn = this.continuedTurn(message);
+    return turn !== "" && turn !== this.turn.id;
   }
 
   /**
@@ -6905,7 +6937,18 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
       }
 
-      for (const entry of open) {
+      // Another turn's question is that turn's to answer (#1355): one
+      // request answering a call of turn B does not refuse the call turn A
+      // is waiting on, and a parallel run's message does not either. Left
+      // open, the call keeps its `pending`, and the provider's request
+      // builder pairs it for the model as for any call still running.
+      const settled = open.filter(
+        (entry) =>
+          answered.has(entry.call.toolCallId) ||
+          !this.othersTurn(entry.message) ||
+          (opening !== undefined && this.params.keepOtherTurnsOpen !== true),
+      );
+      for (const entry of settled) {
         if (answered.has(entry.call.toolCallId)) continue;
         // The turn said something else. That is a refusal — the honest reading,
         // and the only one that cannot strand the thread. A tool whose
@@ -6921,7 +6964,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         });
       }
 
-      if (this.depth === 0) this.restatePending(open, escalated);
+      if (this.depth === 0) this.restatePending(settled, escalated);
 
       await this.reportDeferred();
     }
@@ -7150,7 +7193,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       const still = escalated.filter((call) => ids.has(call.path?.[0] ?? call.toolCallId));
       if (still.length === 0 && original.pending === undefined) continue;
       const message = this.amend(original);
-      if (still.length > 0) message.pending = still;
+      if (still.length > 0) message.pending = this.withTurn(still, original.turn);
       else delete message.pending;
       this.unreported.add(message);
     }
@@ -7595,6 +7638,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // in the very transcript this method exists to keep valid.
     for (const entry of this.openCalls()) {
       if (entry.message === this.current) continue;
+      // A stop ends this run's turn, not another's still waiting on its
+      // question (#1355).
+      if (this.othersTurn(entry.message)) continue;
       this.attachToHistory(entry, {
         type: "tool-result",
         toolCallId: entry.call.toolCallId,
