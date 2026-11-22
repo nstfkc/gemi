@@ -334,6 +334,10 @@ The cron drain and the [queue drain](./jobs-and-queues.md#stopping-the-queue) sh
 
 An abandoned tick is not retried: the next one is whenever its expression next matches, on whichever replica is up. If a job regularly runs longer than the provider deadline, raise `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit the platform's grace period, or have the cron `callback` dispatch the work to the [database queue](./jobs-and-queues.md#the-database-driver), which another replica picks up.
 
+### In tests
+
+A vitest process (`VITEST` is set) does not start the schedule, so a test that boots the app does not run its cron jobs against the test database. Jobs are still discovered, and `app(Scheduler).jobs` answers as it does elsewhere, so a test can run a tick by hand. Set `GEMI_SCHEDULE=1` for a test that needs the real schedule. `GEMI_NO_SCHEDULE=1` still turns it off everywhere, and wins over `GEMI_SCHEDULE`. When there are jobs to skip, one line on stderr says so, once per test file that boots the app. A server a test spawns inherits `VITEST` and so skips the schedule too; see [What a test process does not do](./testing.md#what-a-test-process-does-not-do).
+
 ## Cron jobs vs. queued jobs
 
 Use a **cron job** for time-based, recurring work that runs on its own schedule. Use a **queued job** for work triggered by a request that you want to run in the background. The two compose well — a cron `callback` often dispatches queued jobs to fan work out. See [Jobs & Queues](./jobs-and-queues.md).

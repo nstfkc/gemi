@@ -166,8 +166,8 @@ export default defineAuthConfig({
   never picked up the new cookie — deletes that session too. Once it no longer resolves to
   it, it no longer revokes it either: only the new token can then.
 - **A sign-out and a conversion never interleave.** Both run in one transaction under a lock
-  on the old token (`UserProvider.withLegacySessionLock`: an advisory lock on Postgres, a
-  queue in the process on SQLite), and a conversion writes the new session only if it is the
+  on the old token (`UserProvider.withLegacySessionLock`: an advisory lock on Postgres, the
+  transaction queue on SQLite), and a conversion writes the new session only if it is the
   one that deleted the old row. A sign-out that lands while a request is converting the same
   token either ends the session that request wrote or leaves it nothing to write.
 - **Concurrent requests share one session.** Requests converting the same token at once all
@@ -738,6 +738,12 @@ export default defineAuthConfig({
   `{ session, isNewUser }`, sets the `access_token` cookie, and fires `onSignIn` and
   `onAuthenticated`. A wrong, expired or missing code is a validation error on `code`
   (`"invalid_code"`); the guess past `maxAttempts` burns the code (`"too_many_attempts"`).
+  Two verifies at once for a new address (a double submit, a retry) create the user once:
+  with an issued code the second is `"invalid_code"` (the code is spent); with the fixed
+  development code it signs in to the same user, with `isNewUser: false`. `onUserCreated`
+  runs once. On SQLite, transactions queue one after another in the process, each releasing
+  the next at its commit ([Transactions](./orm.md#transactions)). The queue doesn't cover
+  several processes on one database file.
 
 Both answer 404 unless `enabled`. On the client:
 
@@ -771,8 +777,9 @@ request's own error (a 429, say), or `null` once it succeeds, not the old `inval
 | `allowFixedCodeInProduction` | `AUTH_FIXED_CODE_ALLOW_PRODUCTION=1`, else `false` | `true` accepts `fixedCode` under `NODE_ENV=production`, for a local production-build test server (`gemi start`). Logs a warning at boot: anyone who knows the code can sign in as any user. Never on a real deployment. |
 
 Codes come from `generateCode` when it returns one, else random digits. The per-IP limits
-key on `clientIp(req)`, which is only as good as the `GEMI_TRUST_PROXY` setting behind your
-proxy; the per-address limits and the attempt cap hold regardless. All of these counters
+key on `clientAddress(req)` (an IPv6 client counts by its /64, see
+[The client's address](./middleware.md#the-clients-address)), which is only as good as the
+`GEMI_TRUST_PROXY` setting behind your proxy; the per-address limits and the attempt cap hold regardless. All of these counters
 live in the rate limiter (`ratelimiter.driver`): with the default in-memory driver they are
 per process, so N instances allow N times the limits and a restart resets them. Bind
 `RedisRateLimiter` when you run more than one instance.
@@ -1291,6 +1298,13 @@ racing to sign up or link the same account both try to write the same identity; 
 the other fails on the constraint, and the loser then signs in **only if** the identity now
 resolves — the database error alone is never taken as proof of who the user is. Without the
 constraint the lookups still work, but a race can write two rows for one account.
+
+The same holds for two password sign-ups at once for one address (a double submit): one
+creates the account, and the other is answered the validation error on `email` ("Email
+address already exists") it would have got a moment later, not a 500, with or without an
+invitation (the loser of an invited sign-up fails on consuming the invitation the winner
+used). Only a failed insert or invitation delete is read that way, and only when the user now exists; an `onUserCreated` that throws fails
+the request as before.
 
 `username` is the provider's handle where it has one (X). Google has none, so it is left
 empty; it used to hold the display name.

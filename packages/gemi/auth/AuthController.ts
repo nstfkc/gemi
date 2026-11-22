@@ -597,6 +597,28 @@ export class AuthController extends Controller {
     // signature.
     let verificationToken = "";
 
+    // Set when a write a concurrent sign-up for the same address explains
+    // failed (#1361): the insert (the unique email), or, for an invited
+    // sign-up, consuming the invitation (the other request deleted it first).
+    // A failure in `onUserCreated` is the app's, and fails as it is.
+    let insertFailed = false;
+    const flagged = <T>(write: Promise<T>) =>
+      write.catch((error: unknown) => {
+        insertFailed = true;
+        throw error;
+      });
+    const insert = (args: Parameters<typeof userProvider.createUser>[0]) =>
+      flagged(userProvider.createUser(args));
+    // A double submit: both requests found no user, and the second insert
+    // broke the unique email. Told what it would have been told a moment
+    // later, rather than answered 500. Only when the user now exists.
+    const raced = async (error: unknown): Promise<never> => {
+      if (insertFailed && (await userProvider.findUserByEmailAddress(email, false))) {
+        throw new ValidationError({ email: ["Email address already exists"] });
+      }
+      throw error;
+    };
+
     // Both branches write the user and everything that has to exist alongside
     // it in one transaction, `config.onUserCreated` last. A throw from the hook
     // takes the user with it, which is the whole point of the hook: an app
@@ -607,9 +629,9 @@ export class AuthController extends Controller {
         // Consuming the invitation belongs in here too. Deleted before the
         // transaction, a rollback would leave the invite burned and no user to
         // show for it, so the invitee could not retry.
-        await userProvider.deleteInvitationById(invitationId);
+        await flagged(userProvider.deleteInvitationById(invitationId));
 
-        const user = await userProvider.createUser({
+        const user = await insert({
           email,
           name,
           password: hashedPassword,
@@ -625,7 +647,7 @@ export class AuthController extends Controller {
         await config.onUserCreated(user, created);
 
         return user;
-      });
+      }).catch(raced);
     } else {
       // Outside the transaction: it is a hash, not a query, and the
       // transaction holds a connection for as long as it is open.
@@ -637,7 +659,7 @@ export class AuthController extends Controller {
       }
 
       newUser = await userProvider.transaction(async () => {
-        const user = await userProvider.createUser({
+        const user = await insert({
           email,
           name,
           password: hashedPassword,
@@ -648,7 +670,7 @@ export class AuthController extends Controller {
         await config.onUserCreated(user, created);
 
         return user;
-      });
+      }).catch(raced);
     }
 
     await config.onSignUp(newUser, verificationToken, req.search.toJSON(), { req });
@@ -1497,6 +1519,9 @@ export class AuthController extends Controller {
       await userProvider.verifyUser(email);
     } else if (config.emailCode.createUser) {
       const locale = app(Translator).detectLocale(req);
+      // Set when the insert itself failed: the only failure a concurrent
+      // sign-up explains. One in `onUserCreated` is the app's, and fails.
+      let insertFailed = false;
       try {
         // Claimed inside the transaction: a rolled-back `onUserCreated` puts
         // the code back, and of two requests with the same code only the one
@@ -1505,12 +1530,17 @@ export class AuthController extends Controller {
           if (!(await claim())) {
             throw new CodeAlreadyClaimed();
           }
-          const created = await userProvider.createUser({
-            email,
-            name: typeof name === "string" ? name.trim() : "",
-            emailVerifiedAt: new Date(),
-            locale,
-          });
+          const created = await userProvider
+            .createUser({
+              email,
+              name: typeof name === "string" ? name.trim() : "",
+              emailVerifiedAt: new Date(),
+              locale,
+            })
+            .catch((error: unknown) => {
+              insertFailed = true;
+              throw error;
+            });
           await config.onUserCreated(created, {
             method: "email-code",
             input: withoutCredentials(input.toJSON()),
@@ -1523,7 +1553,19 @@ export class AuthController extends Controller {
         if (error instanceof CodeAlreadyClaimed) {
           throw new ValidationError({ code: ["invalid_code"] });
         }
-        throw error;
+        // Two requests for a new address at once (a double submit, a retry)
+        // both found no user, and the other one created it first (#1356):
+        // the insert broke the unique email. The user is there now, so this
+        // request signs in as it, as it would have a moment later. Read
+        // again rather than matching the error, which each provider and
+        // driver words its own way. `onUserCreated` ran once, for the winner.
+        if (!insertFailed) throw error;
+        const existing = await userProvider.findUserByEmailAddress(email, false);
+        if (!existing) throw error;
+        if (!(await claim())) {
+          throw new ValidationError({ code: ["invalid_code"] });
+        }
+        user = existing;
       }
     } else {
       // A row for an address with no user, left from when `createUser` was on.

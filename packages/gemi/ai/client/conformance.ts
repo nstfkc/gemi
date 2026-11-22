@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { afterAll, expect } from "vitest";
-import { applyFrame, initialChatState, markAborted } from "./reducer";
+import { applyFrame, initialChatState, markAborted, settledBy } from "./reducer";
 import { SSEFrameDecoder } from "./sse";
 
 /**
@@ -127,10 +127,13 @@ type ReducerCase =
        *  to lean on. */
       unchanged: boolean;
     }
-  | { test: string; op: "markAborted"; state: unknown; result: unknown };
+  | { test: string; op: "markAborted"; state: unknown; result: unknown }
+  /** `result` is the settled ids, sorted. */
+  | { test: string; op: "settledBy"; pending: unknown; ids: string[]; result: string[] };
 
 /**
- * `applyFrame`, `markAborted` and `initialChatState`, recording as they run.
+ * `applyFrame`, `markAborted`, `initialChatState` and `settledBy`, recording
+ * as they run.
  *
  * Identical calls are kept once. The tests fold the same run from scratch many
  * times over, and a corpus of the same case repeated is only slower to replay.
@@ -200,6 +203,19 @@ export function recordReducer(target: string) {
       keep(entry, entry);
       return result;
     }) as typeof initialChatState,
+
+    settledBy: ((pending, ids) => {
+      const result = settledBy(pending, ids);
+      const entry: ReducerCase = {
+        test: currentTest(),
+        op: "settledBy",
+        pending: JSON.parse(JSON.stringify(pending)),
+        ids: [...ids].sort(),
+        result: [...result].sort(),
+      };
+      keep(entry, entry);
+      return result;
+    }) as typeof settledBy,
   };
 }
 

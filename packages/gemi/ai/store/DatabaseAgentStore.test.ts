@@ -777,9 +777,13 @@ for (const backend of backends) {
         db.dialect === "mysql" || db.dialect === "mariadb"
           ? `\`${store.messagesTable}\``
           : `"${store.messagesTable}"`;
-      const rows = (await db.connect().unsafe(
-        `SELECT scope, message FROM ${quoted} WHERE thread_id = '${threadId}'`,
-      )) as { scope: string | null; message: string }[];
+      // Parameterized, as the store reads: bun 1.3's MySQL text protocol
+      // (an `unsafe` query with no parameters) reads a value of exactly 251
+      // bytes as NULL, and a message can be that long.
+      const sql = db.connect();
+      const rows = (await sql`
+        SELECT scope, message FROM ${sql.unsafe(quoted)} WHERE thread_id = ${threadId}
+      `) as { scope: string | null; message: string }[];
       expect(rows.length).toBe(6);
       expect(rows.some((row) => JSON.parse(String(row.message)).event?.name === "job-settled")).toBe(true);
       expect(new Set(rows.map((row) => row.scope))).toEqual(new Set(["org-a"]));

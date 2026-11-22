@@ -136,14 +136,23 @@ const app = appWith(server);
 
 const CLAUDE = "https://claude.example/api/mcp/auth_callback";
 let ip = 0;
+/** When set, the address every request comes from, in place of `10.0.0.<ip>`. */
+let from: (() => string) | undefined;
 
 function call(path: string, init: RequestInit & { headers?: Record<string, string> } = {}, target = app) {
   return target.fetch(
     new Request(`https://shop.test${path}`, {
       ...init,
-      headers: { "x-forwarded-for": `10.0.0.${ip}`, ...init.headers },
+      headers: { "x-forwarded-for": from?.() ?? `10.0.0.${ip}`, ...init.headers },
     }),
   );
+}
+
+/** Each call another address in one /64 that no other test uses. */
+function rotatingInOne64() {
+  let n = 0;
+  const block = `2001:db8:${ip.toString(16)}:64`;
+  return () => `${block}::${(++n).toString(16)}`;
 }
 
 async function register(metadata: Record<string, unknown> = {}, target = app) {
@@ -285,6 +294,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  from = undefined;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -399,6 +409,12 @@ describe("registration", () => {
     const limited = await register();
     expect(limited.res.status).toBe(429);
     expect(limited.res.headers.get("retry-after")).toBeTruthy();
+  });
+
+  test("an IPv6 client's registrations are counted by its /64 (#1340)", async () => {
+    from = rotatingInOne64();
+    for (let i = 0; i < 20; i++) expect((await register()).res.status).toBe(201);
+    expect((await register()).res.status).toBe(429);
   });
 
   test("registration can be turned off", async () => {
@@ -849,6 +865,12 @@ describe("the resource server", () => {
     // A client with no credential yet is only told where to get one.
     ip += 1;
     for (let i = 0; i < 40; i++) expect((await mcp(null)).status).toBe(401);
+  });
+
+  test("an IPv6 client's refused credentials are counted by its /64 (#1340)", async () => {
+    from = rotatingInOne64();
+    for (let i = 0; i < 30; i++) expect((await mcp("gmcp_at_guess")).status).toBe(401);
+    expect((await mcp("gmcp_at_guess")).status).toBe(429);
   });
 });
 

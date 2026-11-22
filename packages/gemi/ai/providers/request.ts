@@ -30,7 +30,10 @@ export type ResponsesRequest = {
   instructions?: string;
   tools?: ResponsesTool[];
   parallel_tool_calls?: boolean;
-  tool_choice?: string | { type: "function"; name: string };
+  tool_choice?:
+    | string
+    | { type: "function"; name: string }
+    | { type: "allowed_tools"; mode: "auto" | "required"; tools: { type: "function"; name: string }[] };
   text?: { format: Record<string, unknown> };
   reasoning?: { effort: string; summary?: "auto" };
   temperature?: number;
@@ -50,17 +53,42 @@ export function buildResponsesRequest(
     stream: true,
   };
 
+  // After the conversation, so the prefix the cache holds ends before it
+  // (#1345). A developer message: it is the app speaking, not the user.
+  if (params.trailingContext) {
+    body.input.push({
+      role: "developer",
+      content: [{ type: "input_text", text: params.trailingContext }],
+    });
+  }
+
   if (params.systemPrompt) body.instructions = params.systemPrompt;
 
-  const tools = toResponsesTools(params.tools, capabilities);
+  // A step held to some of the tools (#1345): the full list goes out and
+  // `allowed_tools` names what this call may use, so the tool list (the
+  // start of the cached prefix) stays the same. It names functions only: a
+  // list with namespaces or tool search is narrowed instead, as before.
+  let tools = toResponsesTools(params.tools, capabilities);
+  let allowed: string[] | undefined;
+  if (params.allowedTools) {
+    if (tools.every((tool) => tool.type === "function")) {
+      allowed = params.allowedTools;
+    } else {
+      tools = toResponsesTools(narrowTools(params.tools ?? [], params.allowedTools), capabilities);
+    }
+  }
   if (tools.length > 0) {
     body.tools = tools;
     if (!capabilities.parallelToolCalls) body.parallel_tool_calls = false;
-    if (params.toolChoice !== undefined) {
-      body.tool_choice =
-        typeof params.toolChoice === "string"
-          ? params.toolChoice
-          : { type: "function", name: params.toolChoice.name };
+    const choice = params.toolChoice;
+    if (allowed && choice !== "none" && typeof choice !== "object") {
+      body.tool_choice = {
+        type: "allowed_tools",
+        mode: choice === "required" ? "required" : "auto",
+        tools: allowed.map((name) => ({ type: "function", name })),
+      };
+    } else if (choice !== undefined) {
+      body.tool_choice = typeof choice === "string" ? choice : { type: "function", name: choice.name };
     }
   }
 
@@ -254,11 +282,31 @@ export function toResponsesInput(
     flush();
   }
 
-  return reconcileToolPairs(items);
+  return reconcileToolPairs(items, waitingOnUser(messages));
 }
 
 /** What is sent for a call whose result never made it into the history. */
 const NO_RESULT_RECORDED = "No result was recorded for this tool call. Assume it did not complete.";
+
+/**
+ * What is sent for a call still waiting on the user's answer (#1380): a
+ * question the turn asked beside one the user has answered, or another turn's.
+ */
+export const WAITING_ON_USER =
+  "No result yet: this is waiting for the user's answer, which they can still give. Do not ask it again or act as if it was answered.";
+
+/**
+ * The top-level calls a transcript is still waiting on the user for: the ones
+ * a message's `pending` stands for (the call itself, or the host of a
+ * sub-agent's question).
+ */
+export function waitingOnUser(messages: readonly AgentMessage[]): Set<string> {
+  const waiting = new Set<string>();
+  for (const message of messages) {
+    for (const call of message.pending ?? []) waiting.add(call.path?.[0] ?? call.toolCallId);
+  }
+  return waiting;
+}
 
 /**
  * Every `function_call` has exactly one `function_call_output`, and no output
@@ -276,7 +324,8 @@ const NO_RESULT_RECORDED = "No result was recorded for this tool call. Assume it
  * So the invariant is enforced here rather than assumed part-by-part: an
  * unpartnered output is dropped, a repeated one is dropped, and a call left
  * dangling by a crash between the call and its result gets a synthetic output
- * saying so. Fabricating that line is the lesser evil — it is true, the model
+ * saying so. A call still waiting on the user's answer (`waiting`, #1380) is
+ * told as that instead. Fabricating that line is the lesser evil — it is true, the model
  * can read it, and the alternative is a conversation that can never be
  * continued.
  *
@@ -287,7 +336,10 @@ const NO_RESULT_RECORDED = "No result was recorded for this tool call. Assume it
  * amended copy of a message instead of replacing it; the store contract now
  * says upsert, and this is the guard for a store that did not read it.
  */
-function reconcileToolPairs(items: ResponsesInputItem[]): ResponsesInputItem[] {
+function reconcileToolPairs(
+  items: ResponsesInputItem[],
+  waiting: ReadonlySet<string>,
+): ResponsesInputItem[] {
   const called = new Set<string>();
   const answered = new Set<string>();
   const kept: ResponsesInputItem[] = [];
@@ -316,7 +368,11 @@ function reconcileToolPairs(items: ResponsesInputItem[]): ResponsesInputItem[] {
     const callId = String(item.call_id);
     if (answered.has(callId)) continue;
     answered.add(callId);
-    out.push({ type: "function_call_output", call_id: callId, output: NO_RESULT_RECORDED });
+    out.push({
+      type: "function_call_output",
+      call_id: callId,
+      output: waiting.has(callId) ? WAITING_ON_USER : NO_RESULT_RECORDED,
+    });
   }
   return out;
 }
@@ -539,7 +595,7 @@ const IMAGE_EXTENSIONS = new Set(["jpeg", "jpg", "png", "gif", "webp"]);
  * `streamMaxDurationMs`, a stop, a process that died mid-step) was never
  * completed, so it was never stored: replaying its `rs_…` id is answered
  * `400 Item with id 'rs_…' not found.`, and since the id is in the thread, so
- * is every later turn. Measured in fager on Azure (gpt-6.1-sol): a main step
+ * is every later turn. Measured in an app on Azure (gpt-6.1-sol): a main step
  * cut by `streamMaxDurationMs` after its reasoning had started, then every
  * following turn of that thread failed with exactly that 400.
  *
@@ -783,6 +839,19 @@ export function toResponsesTools(
   if (anyDeferred) out.push({ type: "tool_search" });
 
   return out;
+}
+
+/** `tools` cut to the names in `allowed`: a namespace keeps the members named. */
+function narrowTools(
+  tools: (ProviderToolSpec | ProviderToolNamespace)[],
+  allowed: readonly string[],
+): (ProviderToolSpec | ProviderToolNamespace)[] {
+  const wanted = new Set(allowed);
+  return tools.flatMap((tool): (ProviderToolSpec | ProviderToolNamespace)[] => {
+    if (!isNamespace(tool)) return wanted.has(tool.name) ? [tool] : [];
+    const members = tool.tools.filter((member) => wanted.has(member.name));
+    return members.length > 0 ? [{ ...tool, tools: members }] : [];
+  });
 }
 
 function functionTool(tool: ProviderToolSpec, allowDeferred: boolean): ResponsesTool {

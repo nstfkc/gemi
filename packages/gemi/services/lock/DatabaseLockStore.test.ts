@@ -390,7 +390,6 @@ describe.each(backends)("locks across instances on $name", (backend) => {
   test("throttle: a shared budget holds across instances, and waiting costs no attempt (#661)", async () => {
     const database = await open();
     const runs: number[] = [];
-    const start = Date.now();
     class Send extends Job {
       static name = "Send";
       maxAttempts = 1;
@@ -398,7 +397,7 @@ describe.each(backends)("locks across instances on $name", (backend) => {
         return { key: "provider", limit: 3, window: 1_500 };
       }
       run() {
-        runs.push(Date.now() - start);
+        runs.push(Date.now());
       }
     }
     const a = instance(database, [Send]);
@@ -407,8 +406,15 @@ describe.each(backends)("locks across instances on $name", (backend) => {
     a.start();
     b.start();
     await until(() => runs.length === 5, 15_000);
-    // Three in the first window, the rest only after it ended.
-    expect(runs.filter((at) => at < 1_200)).toHaveLength(3);
-    expect(await countJobs(database)).toBe(0);
+    // Three in the first window, the rest only after it ended. Measured from
+    // the runs themselves, not from before the setup (#1346): the window opens
+    // at the first job's hit, and opening the database and pushing the jobs
+    // can take longer than the window under load. The 300 ms of slack is for
+    // a hit whose `run()` starts late.
+    const sorted = [...runs].sort((x, y) => x - y);
+    expect(sorted[3]! - sorted[0]!).toBeGreaterThanOrEqual(1_200);
+    expect(sorted[4]! - sorted[1]!).toBeGreaterThanOrEqual(1_200);
+    // A job's row goes once its run has returned, a moment after `run()`.
+    await until(async () => (await countJobs(database)) === 0);
   });
 });

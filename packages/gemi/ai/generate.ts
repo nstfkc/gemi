@@ -1,6 +1,6 @@
 import { Log } from "../facades/Log";
 import { AgentRunError, type AgentRunFailure, type ReasoningEffort } from "./Agent";
-import type { AgentProvider, ProviderRetryInfo } from "./AgentProvider";
+import type { AgentProvider, ProviderEvent, ProviderRetryInfo } from "./AgentProvider";
 import { type DeepPartial, PartialJsonParser } from "./partialJson";
 import { httpErrorDetail } from "./providers/errors";
 import {
@@ -16,7 +16,7 @@ import {
 } from "./runtime";
 import type { Infer, Schema } from "./Schema";
 import type { AgentError, AgentMessage, FinishReason, ProviderErrorDetail, Usage } from "./types";
-import { recordUsage } from "./usageMeter";
+import { eventWithCost, recordStopped } from "./usageMeter";
 
 /**
  * One model call with an output schema: no tools, no loop, no stream to a client.
@@ -506,14 +506,27 @@ async function callModel<O extends Schema<any>>(
       signal: params.signal,
     });
     const iterator = stream[Symbol.asyncIterator]();
+    // The call's usage so far (#1353), billed if it is stopped: its `finish`
+    // is never read then. A `finish` replaces it.
+    let callSoFar: Extract<ProviderEvent, { type: "usage" }> | undefined;
     try {
       for (;;) {
         // Raced, as the agent's step is: a provider that ignores its signal
         // must not be able to hold a stopped call open.
-        const next = await raceAbort(Promise.resolve(iterator.next()), signal);
+        const next = await raceAbort(Promise.resolve(iterator.next()), signal).catch((thrown: unknown) => {
+          if (callSoFar && thrown instanceof RunAborted) {
+            usage = addUsage(usage, eventWithCost(callSoFar, params.provider.model, params.provider).usage);
+            recordStopped(callSoFar, params.provider.model, params.provider);
+            callSoFar = undefined;
+          }
+          throw thrown;
+        });
         if (next.done) break;
         const event = next.value;
         switch (event.type) {
+          case "usage":
+            callSoFar = event;
+            break;
           case "output-delta":
             outputText += event.delta;
             if (partial) {
@@ -534,12 +547,16 @@ async function callModel<O extends Schema<any>>(
             appendReasoning(reply, event.id, event.delta, event.providerMetadata);
             break;
           case "finish":
+            callSoFar = undefined;
             // Usage is taken whatever happened before it; the reason only if
             // nothing already failed. A content filter reports an error and
             // then closes the call with a finish that still bills — the same
             // rule `AgentRunImpl.runStep` follows.
-            usage = addUsage(usage, event.usage);
-            recordUsage(event.model ?? params.provider.model, event.usage);
+            // Priced per model: a fallback chain's finish splits by leg (#1146).
+            if (event.usage) {
+              usage = addUsage(usage, eventWithCost(event, params.provider.model, params.provider).usage);
+              recordStopped(event, params.provider.model, params.provider);
+            }
             if (!error) reason = event.reason;
             break;
           case "error":

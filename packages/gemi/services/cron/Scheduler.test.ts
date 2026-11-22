@@ -103,6 +103,7 @@ afterEach(() => {
   // handle.
   globalThis.__gemiCronJobs?.clear();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe("the default", () => {
@@ -590,6 +591,8 @@ describe("the provider's shutdown", () => {
    * nowhere a `packages/gemi` test looked.
    */
   async function makeApp(jobs: Array<new () => CronJob>) {
+    // A vitest process does not start the schedule unless asked (#1342).
+    vi.stubEnv("GEMI_SCHEDULE", "1");
     const cron = stubCron();
     const application = new Application(new Repository({ schedule: { jobs } }));
     application.registerMany([ScheduleServiceProvider]);

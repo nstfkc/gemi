@@ -49,6 +49,12 @@ class ConformanceTest {
           if ((next == null) != unchanged) failures += "$label: applied should be ${!unchanged}"
         }
         "markAborted" -> expectSame(fixture(entry["state"].obj()!!).markAborted().fixtureJson(), expected, label, failures)
+        "settledBy" -> {
+          val pending = entry["pending"].array().orEmpty().map { PendingToolCall(it.obj()!!) }
+          val ids = entry["ids"].array().orEmpty().mapNotNull { it.string() }.toSet()
+          val got = JsonArray(settledBy(pending, ids).sorted().map { JsonPrimitive(it) })
+          expectSame(got, expected, label, failures)
+        }
         else -> failures += "$label: unknown op"
       }
     }

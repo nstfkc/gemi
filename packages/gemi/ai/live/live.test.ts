@@ -378,7 +378,7 @@ function battery(target: LiveTarget) {
      * starting from the first one's transcript as a store would hand it back.
      *
      * Before the fix the first call was replayed without its `namespace` and
-     * without the tool search that loaded it, and in kyte the model then
+     * without the tool search that loaded it, and in an app the model then
      * looped on an unrelated tool until `max-steps`. What is checked is that
      * the second turn's first request carries both, and that the model, given
      * that history, makes its second namespaced call and answers.

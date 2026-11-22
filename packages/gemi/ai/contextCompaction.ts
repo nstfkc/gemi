@@ -50,7 +50,7 @@ import type { AgentProvider } from "./AgentProvider";
 import { turnStarts, windowMessages } from "./contextWindow";
 import type { ContextWindowOptions } from "./contextWindow";
 import { generate } from "./generate";
-import { addUsage, emptyUsage } from "./runtime";
+import { addUsage, emptyUsage, withoutCost } from "./runtime";
 import { s } from "./Schema";
 import type { AgentMessage, AgentContentPart, Usage } from "./types";
 
@@ -720,7 +720,8 @@ async function build(
     messages: start,
     fingerprint: fingerprints[start]!,
     createdAt: new Date().toISOString(),
-    usage,
+    // Stored: without its cost, like every record gemi keeps (#1146).
+    usage: withoutCost(usage),
   };
   try {
     await params.store.saveSummary(params.threadId, summary);

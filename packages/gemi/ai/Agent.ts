@@ -3,6 +3,7 @@ import { Log } from "../facades/Log";
 import { RequestContext } from "../http/requestContext";
 import type {
   AgentProvider,
+  ProviderEvent,
   ProviderRetryInfo,
   ProviderToolChoice,
   ProviderToolNamespace,
@@ -21,13 +22,15 @@ import {
   appendText,
   bestEffortParse,
   emptyUsage,
+  addCost,
   outputFormat,
   parseOutput,
   raceAbort,
   resolveRope,
   RunAborted,
+  withoutCost,
 } from "./runtime";
-import { openMeter, recordUsage, type UsageMeter, type UsageTotals } from "./usageMeter";
+import { eventWithCost, openMeter, recordStopped, type UsageMeter, type UsageTotals } from "./usageMeter";
 import { supportsStrict } from "./Schema";
 import { applyRedaction, rememberUnredacted, ToolError } from "./redact";
 import type { ErrorRedactor } from "./redact";
@@ -538,6 +541,10 @@ export type ToolEditImageParams = ToolGenerateImageParams & {
  * exactly as it would from the model's arguments. This list narrows which of
  * the caller's own files a tool reaches for; it grants nothing.
  *
+ * A message that joined the turn while it ran (`AgentMessage.joined`) is part
+ * of it: a tool called after one gets the files of the turn's message and of
+ * every message that joined it before the call, in order.
+ *
  * Inside a sub-run the turn is the sub-run's own: the message its parent's
  * tool started it with, which has files only if that tool put them there. The
  * parent's upload is not inherited — the tool that called `runAgent` read its
@@ -545,7 +552,8 @@ export type ToolEditImageParams = ToolGenerateImageParams & {
  */
 export interface ToolTurn {
   /**
-   * The `attachmentId`s on that user message's file parts, in order, without
+   * The `attachmentId`s on that user message's file parts (and those of the
+   * messages that joined the turn), in order, without
    * duplicates, and only ids of gemi's own shape. Frozen, and computed once
    * before the body runs.
    */
@@ -1680,9 +1688,12 @@ export interface CreateAgentParams<
    * The provider's `prompt_cache_key` (#1223): requests with the same key and
    * the same prompt prefix are routed to the same cache, so a run's first
    * step can hit what another run of this agent just warmed. Default: the
-   * agent's name and a short hash of the call's instructions and tools
-   * (`defaultPromptCacheKey`), so runs that share that prefix share a key. A
-   * string is sent as is (at most 64 characters); `false` sends none.
+   * agent's name and a short hash of its own `instructions` and the run's
+   * tools (`defaultPromptCacheKey`), so it stays the same when a turn adds
+   * instructions (`AgentController.instructions()`, a memory block) or a
+   * step narrows the tools (`prepareStep`), and the calls of all its runs
+   * share a key. A string is sent as is (at most 64 characters); `false`
+   * sends none.
    */
   promptCacheKey?: string | false;
   /**
@@ -1765,6 +1776,8 @@ export type PrepareStepContext<Ctx = AgentContext> = {
   activeTools: readonly string[] | undefined;
   /** The `toolChoice` an earlier hook answered. `undefined`: the model chooses. */
   toolChoice: ProviderToolChoice | undefined;
+  /** The trailing context this call would send (`AgentStreamParams.trailingContext`, or an earlier hook's). */
+  trailingContext: string | undefined;
   /**
    * The app's own fields from the turn's request body, as tools get them in
    * `ToolContext.body`. CLIENT-CONTROLLED: read the user from `context`.
@@ -1823,11 +1836,21 @@ export type PrepareStepResult = {
    * the run doesn't offer fails the run. The next step offers the run's tools
    * again.
    *
-   * The provider's prompt cache keys on the tool list, so a step with a
-   * different list misses it. To keep the prefix, answer `toolChoice: "none"`
-   * (no tool on this call) or have the tool refuse in `execute` instead.
+   * A provider that declares `capabilities.allowedTools` (the built-in
+   * OpenAI and Azure OpenAI providers on gpt-5 models) is sent the run's full
+   * tool list and told which of them this call may use (#1345), so the
+   * prompt cache keeps the prefix. Elsewhere only the narrowed list is sent,
+   * and a step with a different list misses the cache: answer `toolChoice:
+   * "none"` (no tool on this call) or have the tool refuse in `execute` there
+   * instead.
    */
   activeTools?: readonly string[];
+  /**
+   * The trailing context for this call alone (#1345), in place of the run's
+   * (`AgentStreamParams.trailingContext`). `""` sends none. The next step
+   * goes back to the run's.
+   */
+  trailingContext?: string;
   /**
    * Whether the model must call a tool on this call alone (#1010):
    * `"auto"` (it chooses, the default), `"required"` (some tool), `"none"`
@@ -1837,8 +1860,9 @@ export type PrepareStepResult = {
    *
    * On a provider that cannot force a tool (`capabilities.
    * supportsForcedToolChoice` is `false`), a forced choice is emulated
-   * (#1261): the call's system prompt ends with a line naming the tool (or
-   * "one of your tools"), and a step that answers without any tool call is
+   * (#1261): the call is sent a line naming the tool (or "one of your
+   * tools") after the conversation, with the trailing context, so the
+   * system prompt stays the same; and a step that answers without any tool call is
    * asked once more with the same choice and line, as the next step (a hook
    * that answers a `toolChoice` of its own for that step wins). If that
    * answer has no tool call either, the run ends as it would have.
@@ -1906,6 +1930,17 @@ interface AgentStreamParamsBase<Ctx = AgentContext> {
   /** Aborted by an explicit `stop`, not by a disconnect. */
   signal?: AbortSignal;
   /**
+   * Leave the open tool calls of other turns open (#1355): a run started
+   * beside others on one thread (`ifBusy: "parallel"`) does not refuse the
+   * questions another turn is still waiting on when it brings a message of
+   * its own. Without it a new message refuses every open call, as a person
+   * who moves on from a question refuses it. A request that only answers
+   * calls never refuses another turn's, with or without this, nor the
+   * other questions of its own turn (#1380). The controller sets it for a
+   * parallel run and for every server turn (`startTurn`, #1371).
+   */
+  keepOtherTurnsOpen?: boolean;
+  /**
    * Messages for the run while it works (#1222): before each model call the
    * run takes what is in it and adds each as a user message to the history
    * (reported to `onMessage`, and put on the stream as a `message` frame),
@@ -1966,6 +2001,19 @@ interface AgentStreamParamsBase<Ctx = AgentContext> {
    * can. `AgentController` sets this from its `runTools()` method.
    */
   activeTools?: readonly string[];
+  /**
+   * Text for the model sent after the conversation on every model call of
+   * this run (#1345): the current screen, the time, a small note on the
+   * app's state. Never stored, never counted by `contextWindow`, and not
+   * part of the cached prefix, so it can change on every turn (or every
+   * step, through `PrepareStepResult.trailingContext`) without a cache miss
+   * or a change of `instructions`. A provider that declares
+   * `capabilities.trailingContext` places it itself (the built-in ones:
+   * after the last message, with the cache breakpoint before it); for any
+   * other it is sent as a last user message. Not handed down to a sub-run.
+   * `AgentController` sets this from its `trailingContext()` method.
+   */
+  trailingContext?: string;
   /**
    * The app's own fields from the turn's request body, handed to every tool of
    * this run as `ctx.body`.
@@ -2365,6 +2413,12 @@ export interface AgentRun<T extends ToolShapes = ToolShapes, O = unknown> extend
    * came (#1260). See `CreateAgentParams.rememberDenials`.
    */
   readonly denials: readonly ToolDenial[];
+  /**
+   * The turn this run answers (#1339), once the run has taken its turn in:
+   * the id every message it writes carries as `AgentMessage.turn`. Optional,
+   * so an `AgentRun` written by hand still type-checks.
+   */
+  readonly turn?: AgentRunTurn;
   /** Numbered events, replayable from a cursor. `toResponse` is this, encoded. */
   frames(from?: number): AsyncIterable<AgentStreamFrame<T, O>>;
   toResponse(params?: { from?: number }): Response;
@@ -2386,7 +2440,57 @@ export interface AgentRun<T extends ToolShapes = ToolShapes, O = unknown> extend
    * talking instead of starting over.
    */
   stop(params?: { reason?: string }): void;
+  /**
+   * Adds a user message to this run while it goes: the run takes it before
+   * its next model call, so the model reads it there, and it is stored after
+   * the message the run was writing when it arrived, with
+   * `AgentMessage.joined` set. `AgentController` calls it for a turn whose
+   * busy policy is `"join"`.
+   *
+   * Answers `null` when the run will not make another model call to read it:
+   * it has ended or is ending, it was stopped, its current step is its last
+   * (`maxSteps`), it is a sub-run, or `turn` has no text, files or event. A
+   * message the run has accepted is taken even when the model was about to
+   * finish: the run makes one more call for it instead. If the run ends some
+   * other way before taking it (a question for the user, an error, a stop, a
+   * limit), `taken` settles `null` and the message is not in the run: the
+   * caller starts a turn of its own with it.
+   */
+  join?(turn: AgentJoinTurn): AgentRunJoin | null;
 }
+
+/**
+ * The turn a run answers (#1339), as `AgentRun.turn` and the controller's
+ * hooks (`ctx.turn`) see it.
+ */
+export type AgentRunTurn = {
+  /** The id of the user message that started the turn: `AgentMessage.turn` on every message the run writes. */
+  id: string;
+  /** Set when the run adds no message of its own and carries on an earlier turn: answers to its tool calls, or a bare continuation. */
+  continues?: true;
+  /** The tool calls the request answered, by `toolCallId`. */
+  answers?: string[];
+};
+
+/** What `AgentRun.join` takes: a client turn's text and files, or a server turn's event. */
+export type AgentJoinTurn = {
+  text?: string;
+  files?: ClientTurn["files"];
+  /** The client's id for its own copy, answered with a `message-id` frame (#466). */
+  localId?: string;
+  /** A server turn's event (#1181), in place of a person's words. */
+  event?: TurnEvent & { text?: string };
+};
+
+/** What `AgentRun.join` answers when the run accepted the message. */
+export type AgentRunJoin = {
+  /**
+   * Settles with the message once the run has taken it into its history
+   * (before the model call that reads it), or `null` when the run ended
+   * without taking it.
+   */
+  taken: Promise<AgentMessage | null>;
+};
 
 /**
  * A tool plus where it sits in the prompt. Fixed for the life of the agent,
@@ -3120,9 +3224,37 @@ function withActiveTools(config: RunConfig, names: readonly string[], owner: str
 }
 
 /**
- * The system line that stands in for a forced `toolChoice` on a provider that
+ * `AgentStreamParams.trailingContext` as a message, for a provider that does
+ * not place it itself (#1345). Sent, never stored. In the current turn
+ * (`turn`), so `splitTurns`/`turnOf` reading the request don't take it for
+ * the start of a new one.
+ */
+function trailingMessage(text: string, turn: string | undefined): AgentMessage {
+  return {
+    id: "msg_trailing_context",
+    role: "user",
+    content: [{ type: "text", text }],
+    createdAt: new Date().toISOString(),
+    finishReason: "stop",
+    ...(turn ? { turn } : {}),
+  };
+}
+
+/**
+ * The line, sent after the conversation, that stands in for a forced `toolChoice` on a provider that
  * cannot force one (#1261).
  */
+/**
+ * What the first model call of a turn is told when it answers a question the
+ * model had replied past (#1380). The result is where the call was, several
+ * items back, and the model's own last message may still say it is waiting.
+ */
+function answeredEarlierLine(tools: string[]): string | undefined {
+  if (tools.length === 0) return undefined;
+  const names = tools.map((name) => `"${name}"`).join(", ");
+  return `The user has now answered the question for ${names}: its result is with the call, above. Carry on from it.`;
+}
+
 function forcedToolLine(choice: ProviderToolChoice): string {
   return typeof choice === "object"
     ? `In this step, call the tool "${choice.name}". The turn is not done until you have called it.`
@@ -3156,9 +3288,10 @@ function toolChoiceProblem(
 
 /**
  * The default `prompt_cache_key` (#1223): the agent's name and the first 16
- * hex digits of a SHA-256 over the call's instructions and tool list. Runs
- * whose requests start with the same instructions and tools get the same key,
- * so the provider routes them to the cache that holds that prefix.
+ * hex digits of a SHA-256 over its own instructions and the run's tool list
+ * (#1345: not the call's, which a turn or a step can change). Runs of one
+ * agent get the same key, so the provider routes them to the cache that holds
+ * their shared prefix.
  */
 export function defaultPromptCacheKey(
   agent: string,
@@ -3558,6 +3691,45 @@ class ReplayMemo<R> {
   }
 }
 
+/** The user message a turn (or a message joining one) is stored as. */
+/** A user turn as the message stored for it. Internal: the controller stores a joined message no run took with it. */
+export function userTurnMessage(
+  text: string | undefined,
+  files: ClientTurn["files"],
+  event: (TurnEvent & { text?: string }) | undefined,
+): AgentMessage {
+  return {
+    id: `msg_${crypto.randomUUID()}`,
+    role: "user",
+    content: [
+      ...(text ? [{ type: "text" as const, text }] : []),
+      // Field by field rather than spread: an entry can carry whatever
+      // `attach()` answered (`downgraded`, `size`), and only these four
+      // mean anything on a `FilePart`. `attachmentId` is among them — it is
+      // what lets the model name this file to a tool — and an absent
+      // `fileId` is a storage-only upload, left out rather than written as
+      // `undefined`.
+      ...(files ?? []).map((file) => ({
+        type: "file" as const,
+        ...(file.fileId ? { fileId: file.fileId } : {}),
+        name: file.name,
+        mimeType: file.mimeType,
+        ...(file.attachmentId ? { attachmentId: file.attachmentId } : {}),
+      })),
+    ],
+    createdAt: new Date().toISOString(),
+    finishReason: "stop",
+    ...(event
+      ? {
+          event: {
+            name: event.name,
+            ...(event.data !== undefined ? { data: event.data } : {}),
+          },
+        }
+      : {}),
+  } as AgentMessage;
+}
+
 class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   readonly runId: string;
 
@@ -3616,7 +3788,24 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    */
   private readonly unreported = new Set<AgentMessage>();
 
+  /**
+   * The run's usage, without its cost: this is what the `usage` frame and
+   * hooks see. The cost (`Usage.costUsd`, #1146) is kept apart in `cost` and
+   * put back only on `result().usage`, so it never reaches a client frame or
+   * a stored message.
+   */
   private usage: Usage = emptyUsage();
+  private cost: number | null | undefined;
+
+  /** Where an unpriced model is told: the run's log (#1146). */
+  private readonly costWarn = (message: string, extra: Record<string, unknown>) => this.writeLog(message, extra);
+
+  /** Adds `usage` to the run: its tokens to `usage`, its cost to `cost`. */
+  private addSpent(usage: Usage | undefined) {
+    if (!usage) return;
+    this.usage = addUsage(this.usage, withoutCost(usage));
+    this.cost = addCost(this.cost, usage.costUsd);
+  }
   /** The run's own model calls and executed tool calls, for `usageLimits` (#1124). */
   private modelSteps = 0;
   private toolCallCount = 0;
@@ -3632,6 +3821,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private readonly approvals = new Map<string, ToolApprovalRecord>();
   /** See `AgentRun.denials`. */
   readonly denials: ToolDenial[] = [];
+  /** See `AgentRun.turn`. Set by `ingestTurn`, before any message of the run's is written. */
+  turn: AgentRunTurn | undefined;
   private finishReason: FinishReason = "stop";
   /** Calls cut at `maxToolArgumentChars` sent back to the model so far (#1259). */
   private cutCalls = 0;
@@ -3670,6 +3861,33 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private readonly onPending: "escalate" | "deny";
   /** How many tool calls were open when the client's turn arrived. */
   private openedWith = 0;
+  /** Whether an answer of the client's turn named a call that was open (#1355). */
+  private answeredOpen = false;
+  /**
+   * Questions of this run's own turn that the client's answers left open
+   * (#1380): a reply asked two, and the request answered one. Keyed by the
+   * top-level call; the values are the `pending` entries the user was shown.
+   * They stay open through this run, a stop included, and ride along on its
+   * `awaiting-input` frame.
+   */
+  private readonly siblingsOpen = new Map<string, PendingToolCall[]>();
+  /**
+   * The tools of the calls this turn answered that are not on the last
+   * message of the history (#1380): a question answered after the model had
+   * already replied past it. The first model call is told so at the end of
+   * its input, where it reads what is new, since the result sits back where
+   * the call was.
+   */
+  private answeredEarlier: string[] = [];
+  /** Messages `join` accepted, waiting for the next model call to take them. */
+  private readonly joins: {
+    turn: AgentJoinTurn;
+    resolve: (message: AgentMessage | null) => void;
+  }[] = [];
+  /** Cleared once the run will make no further model call: `join` answers `null` from then on. */
+  private joinable = true;
+  /** The model step under way, 0 before the first. */
+  private step = 0;
   /**
    * Sub-runs that have not yet written their transcript to the tool call.
    *
@@ -3756,7 +3974,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // the run starts — a parent run's, for a sub-run — so its calls count
     // there too. Closed when the loop settles: a background summary that
     // lands later is billed to the next run, not metered here.
-    const meter = openMeter();
+    // Its log hears about unpriced models for every call inside (#1146).
+    const meter = openMeter({ warn: this.costWarn });
     this.meter = meter.meter;
     this.settled = meter.run(() => this.execute());
     this.settled.then(meter.close, meter.close);
@@ -3891,6 +4110,24 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.controller.abort();
   }
 
+  join(turn: AgentJoinTurn): AgentRunJoin | null {
+    // Synchronous, like `stop`: the caller decides on the answer, and nothing
+    // may change between the check and the push. See `AgentRun.join`.
+    if (this.depth > 0 || this.ended || !this.joinable || this.controller.signal.aborted) {
+      return null;
+    }
+    // The step under way is the last one: no call is left to read it.
+    if (this.step >= Math.max(1, this.config.maxSteps)) return null;
+    const text = turn.event ? turn.event.text : turn.text;
+    if (!turn.event && !text && !(turn.files && turn.files.length > 0)) return null;
+    let resolve!: (message: AgentMessage | null) => void;
+    const taken = new Promise<AgentMessage | null>((settle) => {
+      resolve = settle;
+    });
+    this.joins.push({ turn, resolve });
+    return { taken };
+  }
+
   /**
    * `maxRunDurationMs` ran out. Stopped through the same controller as
    * `stop()`, so everything that already honours a stop (the provider request,
@@ -3927,7 +4164,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         this.finishReason = "error";
       } else if (escalated.length > 0) {
         this.finishReason = "awaiting-input";
-        this.emit({ type: "awaiting-input", runId: this.runId, pending: escalated });
+        this.emit({
+          type: "awaiting-input",
+          runId: this.runId,
+          pending: this.withSiblings(this.withTurn(escalated)),
+        });
       } else if (this.answersOnlyStale()) {
         // Answers and nothing else, for calls that were all answered already:
         // a second tab answering the question the first one did (#1052), or a
@@ -3942,6 +4183,23 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         this.finishReason = "error";
       } else {
         await this.loop();
+        // The turn is still waiting on a question an earlier answer left
+        // open (#1380): the run ends saying so, as one that asked would. A
+        // client keeps the card from this frame (an older one included, whose
+        // answer took every card of the turn off), and `AgentTurnResult`
+        // and `onAwaitingInput` see a turn that needs input. The message keeps
+        // the reason the model gave; the run's is `awaiting-input` when that
+        // was `stop`.
+        if (
+          this.depth === 0 &&
+          this.siblingsOpen.size > 0 &&
+          this.finishReason !== "awaiting-input" &&
+          this.finishReason !== "error" &&
+          this.finishReason !== "aborted"
+        ) {
+          this.emit({ type: "awaiting-input", runId: this.runId, pending: this.withSiblings([]) });
+          if (this.finishReason === "stop") this.finishReason = "awaiting-input";
+        }
       }
     } catch (error) {
       if (error instanceof RunAborted || this.controller.signal.aborted) {
@@ -3960,9 +4218,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
     }
     this.cancelDeadline();
+    // No model call is coming any more. A message accepted and not taken goes
+    // back to whoever joined it, who starts a turn of its own with it.
+    this.joinable = false;
+    for (const join of this.joins.splice(0)) join.resolve(null);
     if (this.limiter) {
       try {
-        await this.limiter.report(this.spent(), true);
+        await this.limiter.report(this.spent(), true, this.cost);
       } catch (error) {
         this.writeLog(`[gemi/ai] agent "${this.config.name}" could not record its usage`, {
           error,
@@ -3985,7 +4247,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       runId: this.runId,
       messages: this.produced as AgentMessage<ToolShapes, unknown>[],
       finishReason: this.finishReason,
-      usage: this.usage,
+      usage: this.cost === undefined ? this.usage : { ...this.usage, costUsd: this.cost },
       metered: this.meter.totals(),
       output: this.output,
       // Only when there is one, so a successful result has the same keys it
@@ -4224,6 +4486,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const maxSteps = Math.max(1, this.config.maxSteps);
 
     for (let step = 1; step <= maxSteps; step++) {
+      this.step = step;
       if (this.limiter) {
         const hit = await this.limiter.check(this.spent(), { steps: 1, tokens: 1 });
         if (hit) {
@@ -4232,11 +4495,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
       }
       await this.takeInbox();
+      await this.takeJoins();
       const message = this.startMessage();
       const outcome = await this.runStep(message, step);
       this.modelSteps++;
       this.lastStep = { reason: outcome.reason, usage: message.usage };
-      await this.limiter?.report(this.spent());
+      await this.limiter?.report(this.spent(), false, this.cost);
 
       // A call cut at `maxToolArgumentChars` that goes back to the model
       // (#1259) instead of failing the run. It has its result already.
@@ -4262,13 +4526,22 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
 
       if (calls.length === 0 && !cut) {
+        // A message joined while the model was writing this answer: one more
+        // call reads it, rather than the run ending with it unanswered.
+        if (this.joins.length > 0 && step < maxSteps && outcome.reason === "stop") {
+          await this.finalizeMessage(outcome.reason);
+          continue;
+        }
+        // Before the first `await`, so a `join` from here on is refused
+        // rather than accepted by a run that has decided to end.
+        this.joinable = false;
         this.finishReason = outcome.reason;
         await this.finalizeMessage(outcome.reason);
         return;
       }
 
       const pending = calls.length > 0 ? await this.runTools(message, calls, step) : [];
-      await this.limiter?.report(this.spent());
+      await this.limiter?.report(this.spent(), false, this.cost);
       // A tool call refused by a limit ends the run once its step is closed:
       // another model call would only meet the same refusal. A step that left
       // a question for the user ends as that instead, below.
@@ -4287,9 +4560,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // Kept on the message as well as sent on the frame (#1052): the frame
         // reaches only a client watching now, and a page opened later reads
         // the thread. See `AgentMessage.pending`.
-        if (this.depth === 0) message.pending = pending;
+        const asked = this.withTurn(pending);
+        if (this.depth === 0) message.pending = asked;
         await this.finalizeMessage("awaiting-input");
-        this.emit({ type: "awaiting-input", runId: this.runId, pending });
+        // The frame lists every question the turn is waiting on: the ones
+        // asked now, and the ones an earlier answer left open (#1380). The
+        // message keeps only its own; the others are on theirs.
+        this.emit({ type: "awaiting-input", runId: this.runId, pending: this.withSiblings(asked) });
         return;
       }
 
@@ -4298,7 +4575,6 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // A cut call did not succeed, so the step cannot end the run.
       const closing = cut ? null : await this.closingText(message, calls, step);
       if (closing !== null) {
-        this.finishReason = "stop";
         await this.finalizeMessage(outcome.reason);
         if (closing) {
           // What the follow-up model step would have produced, minus the
@@ -4310,6 +4586,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           this.emit({ type: "text-delta", messageId: reply.id, delta: closing });
           await this.finalizeMessage("stop");
         }
+        // The tools finished the job, and a message joined meanwhile: the
+        // next call answers it.
+        if (this.joins.length > 0 && step < maxSteps) continue;
+        // Set only once the run is ending here: a run that went on for a
+        // joined message ends with whatever its later steps say.
+        this.finishReason = "stop";
         return;
       }
 
@@ -4388,6 +4670,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         content: [{ type: "text", text }],
         createdAt: new Date().toISOString(),
         finishReason: "stop",
+        // Read by this run, so part of its turn rather than one of its own.
+        ...this.turnField(),
       };
       this.history.push(message);
       this.produced.push(message);
@@ -4396,17 +4680,114 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     }
   }
 
+  /**
+   * Adds what `join` accepted to the history, as user messages marked
+   * `joined`, before the model call that reads them. Each is reported to
+   * `onMessage` and put on the stream: as a `message-id` frame (with the
+   * message) for a client that showed its own copy, and as a `message` frame
+   * otherwise, since no client watching has it.
+   */
+  private async takeJoins(): Promise<void> {
+    while (this.joins.length > 0) {
+      const { turn, resolve } = this.joins.shift()!;
+      const start = this.turnStartId();
+      const message: AgentMessage = {
+        ...userTurnMessage(turn.event ? turn.event.text : turn.text, turn.files, turn.event),
+        turn: start,
+        joined: start,
+      };
+      this.history.push(message);
+      this.produced.push(message);
+      if (turn.localId && !turn.event) {
+        this.emit({ type: "message-id", localId: turn.localId, messageId: message.id, message });
+      } else {
+        this.emit({ type: "message", message });
+      }
+      await this.report(message);
+      resolve(message);
+    }
+  }
+
+  /**
+   * The turn a run that adds no message of its own carries on (#1339): the
+   * turn of the message whose tool calls it answers, or, with nothing to
+   * answer, of the thread's last message. A message stored without `turn`
+   * belongs to the last turn start at or before it, found as `turnStarts`
+   * finds one.
+   */
+  private continuedTurn(asking: AgentMessage | undefined): string {
+    const at = asking ? this.history.indexOf(asking) : this.history.length - 1;
+    const from = this.history[at];
+    if (from?.turn !== undefined) return from.turn;
+    const injected = injectedMessageIds(this.history);
+    for (let i = at; i >= 0; i--) {
+      const message = this.history[i]!;
+      if (message.turn !== undefined) return message.turn;
+      if (message.role === "user" && !message.joined && !injected.has(message.id)) return message.id;
+    }
+    return this.history[0]?.id ?? "";
+  }
+
+  /**
+   * `pending` with the run's turn on each call (#1355), at the top level,
+   * where a client reads them: a sub-run's questions reach the user as its
+   * parent's, in the parent's turn.
+   */
+  private withTurn(pending: PendingToolCall[], asked?: string): PendingToolCall[] {
+    const turn = this.depth === 0 ? (asked ?? this.turn?.id) : undefined;
+    return turn ? pending.map((call) => (call.turn === turn ? call : { ...call, turn })) : pending;
+  }
+
+  /**
+   * Whether `message` (one holding an open call) belongs to a turn other
+   * than this run's (#1355). Never for a sub-run or a run with no turn. A
+   * message's turn is its own `turn`, or for one stored without it, the turn
+   * start before it (`continuedTurn`); only an empty history has none, and
+   * then the run settles it, as before.
+   */
+  private othersTurn(message: AgentMessage): boolean {
+    if (!this.turn || this.depth > 0) return false;
+    const turn = this.continuedTurn(message);
+    return turn !== "" && turn !== this.turn.id;
+  }
+
+  /**
+   * The id of the message that started the turn this run is answering: the
+   * last user message in its history that no tool injected and that joined
+   * nothing itself. What a joined message names (`AgentMessage.joined`).
+   */
+  private turnStartId(): string {
+    if (this.turn) return this.turn.id;
+    const injected = injectedMessageIds(this.history);
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const message = this.history[i]!;
+      if (message.role === "user" && !message.joined && !injected.has(message.id)) return message.id;
+    }
+    return this.history[0]?.id ?? "";
+  }
+
+  /** `{ turn }` for a message this run writes, or nothing before the turn is known. */
+  private turnField(): { turn?: string } {
+    return this.turn ? { turn: this.turn.id } : {};
+  }
+
   private startMessage(): AgentMessage {
     const message: AgentMessage = {
       id: `msg_${crypto.randomUUID()}`,
       role: "assistant",
       content: [],
       createdAt: new Date().toISOString(),
+      ...this.turnField(),
     };
     this.current = message;
     this.history.push(message);
     this.produced.push(message);
-    this.emit({ type: "message-start", messageId: message.id, role: "assistant" });
+    this.emit({
+      type: "message-start",
+      messageId: message.id,
+      role: "assistant",
+      ...(message.turn ? { turn: message.turn } : {}),
+    });
     return message;
   }
 
@@ -4481,9 +4862,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const emulating = forced && provider.capabilities.supportsForcedToolChoice === false;
     const secondAsk = this.forceAgain !== undefined;
     this.forceAgain = undefined;
-    const systemPrompt = emulating
-      ? [request.instructions, forcedToolLine(request.toolChoice!)].filter(Boolean).join("\n\n")
-      : request.instructions;
+    // After the conversation, with the trailing context, rather than in the
+    // system prompt (#1345): a forced step would otherwise move the cached
+    // prefix from the system prompt on.
+    const systemPrompt = request.instructions;
 
     let outcome: StepOutcome = { reason: "stop" };
     const partialArgs = new Map<string, { name: string; args: string; namespace?: string }>();
@@ -4498,14 +4880,33 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     };
     let outputText = "";
 
+    // A provider that does not place a trailing context itself is sent it
+    // as a last user message (#1345). Never in the history.
+    const trailing =
+      [
+        request.trailingContext,
+        step === 1 ? answeredEarlierLine(this.answeredEarlier) : undefined,
+        emulating ? forcedToolLine(request.toolChoice!) : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n\n") || undefined;
+    const placesTrailing = provider.capabilities.trailingContext === true;
     const stream = provider.stream({
       // Not `this.history` directly: an image a tool showed is in the history
       // forever and must not be in every *request* forever, and a long thread
       // is cut to the context window. See `prepareRequest`.
-      messages: request.messages,
+      messages:
+        trailing && !placesTrailing
+          ? [...request.messages, trailingMessage(trailing, this.turn?.id)]
+          : request.messages,
+      ...(trailing && placesTrailing ? { trailingContext: trailing } : {}),
+      ...(request.allowedTools ? { allowedTools: request.allowedTools } : {}),
       systemPrompt,
       tools: request.tools.length > 0 ? request.tools : undefined,
-      ...promptCacheKeyParam(this.config, request.instructions, request.tools),
+      // The agent's own instructions and the run's tools, not this call's
+      // (#1345): what a turn or a step adds to them, or narrows, would move
+      // every call to a cache of its own.
+      ...promptCacheKeyParam(this.config, this.config.instructions, this.config.providerTools),
       ...(request.toolChoice !== undefined ? { toolChoice: request.toolChoice } : {}),
       output: this.config.output ? outputFormat(this.config.output) : undefined,
       reasoning: request.reasoning,
@@ -4514,16 +4915,33 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // While a cut call can go back to the model, asking the provider the
       // same again only cuts it again (#1291).
       ...(this.cutCalls < this.config.cutCallsToModel ? { retryToolArgumentsTooLong: false } : {}),
+      agent: { name: this.config.name, depth: this.depth },
       signal,
     });
 
     const iterator = stream[Symbol.asyncIterator]();
+    // What the call has used so far, from its `usage` events (#1353): billed
+    // when the run is stopped, since the `finish` that would have said it is
+    // never read then. A `finish` replaces it.
+    let callSoFar: Extract<ProviderEvent, { type: "usage" }> | undefined;
     for (;;) {
-      const next = await raceAbort(Promise.resolve(iterator.next()), signal);
+      const next = await raceAbort(Promise.resolve(iterator.next()), signal).catch((error: unknown) => {
+        if (callSoFar && error instanceof RunAborted) {
+          this.addSpent(eventWithCost(callSoFar, provider.model, provider).usage);
+          recordStopped(callSoFar, provider.model, provider);
+          message.usage = addUsage(message.usage ?? emptyUsage(), callSoFar.usage);
+          callSoFar = undefined;
+        }
+        throw error;
+      });
       if (next.done) break;
       const event = next.value;
 
       switch (event.type) {
+        case "usage": {
+          callSoFar = event;
+          break;
+        }
         case "text-delta": {
           appendText(message, "text", event.delta);
           this.emit({ type: "text-delta", messageId: message.id, delta: event.delta });
@@ -4625,8 +5043,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           break;
         }
         case "finish": {
-          this.usage = addUsage(this.usage, event.usage);
-          recordUsage(event.model ?? provider.model, event.usage);
+          callSoFar = undefined;
+          // Priced per model: a fallback chain's finish splits by leg (#1146).
+          if (event.usage) {
+            this.addSpent(eventWithCost(event, provider.model, provider).usage);
+            recordStopped(event, provider.model, provider);
+          }
           // This step's own cost, on the message the step wrote (#467). The run
           // total above is the whole turn — every step plus tools' sub-runs,
           // `generate()` calls and images — and putting it on the last message
@@ -4820,6 +5242,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         /** The tools this call offers, when `activeTools` narrowed them. */
         offered: ReadonlySet<string> | undefined;
         toolChoice: ProviderToolChoice | undefined;
+        /** The tool names this call may use, when it narrowed them and the provider takes `allowedTools`. */
+        allowedTools: string[] | undefined;
+        trailingContext: string | undefined;
       }
     | { error: AgentError }
   > {
@@ -4834,7 +5259,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
             signal: this.controller.signal,
             // Billed whether or not the summary came out, as `ctx.generate` is.
             onUsage: (usage) => {
-              this.usage = addUsage(this.usage, usage);
+              this.addSpent(usage);
             },
             memo: this.compactMemo,
           })
@@ -4844,6 +5269,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     let maxOutputTokens = this.config.maxOutputTokens;
     let activeTools: readonly string[] | undefined;
     let toolChoice: ProviderToolChoice | undefined;
+    let trailingContext = (this.depth === 0 ? this.params.trailingContext : undefined) || undefined;
 
     for (const hook of this.config.prepareStep) {
       let answer: PrepareStepResult | void;
@@ -4857,6 +5283,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           maxOutputTokens,
           activeTools,
           toolChoice,
+          trailingContext,
           body: this.params.body ?? {},
           usage: this.usage,
           ...(this.lastStep?.usage ? { lastStepUsage: this.lastStep.usage } : {}),
@@ -4893,6 +5320,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       if (answer.maxOutputTokens !== undefined) maxOutputTokens = answer.maxOutputTokens;
       if (answer.activeTools !== undefined) activeTools = answer.activeTools;
       if (answer.toolChoice !== undefined) toolChoice = answer.toolChoice;
+      if (answer.trailingContext !== undefined) trailingContext = answer.trailingContext || undefined;
     }
     // The second ask of a forced step a provider could not force (#1261).
     // A hook that answered a choice of its own for this step still wins.
@@ -4926,14 +5354,23 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
     }
 
+    // The full list and the names this call may use, for a provider that
+    // holds a call to them (#1345): the tool list, and the cache prefix
+    // with it, stays the run's.
+    const allowedTools =
+      activeTools && offered && this.config.provider.capabilities.allowedTools === true
+        ? [...offered]
+        : undefined;
     return {
       messages,
       instructions,
       reasoning,
       maxOutputTokens,
-      tools,
+      tools: allowedTools ? this.config.providerTools : tools,
       offered: activeTools ? offered : undefined,
       toolChoice,
+      allowedTools,
+      trailingContext,
     };
   }
 
@@ -5623,7 +6060,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // way, and a stopped turn throws `RunAborted` rather than a
         // `throwOnError` rejection the tool might catch and carry on from.
         settled: (result) => {
-          this.usage = addUsage(this.usage, result.usage);
+          this.addSpent(result.usage);
           if (turn.aborted) throw new RunAborted();
         },
       },
@@ -5898,7 +6335,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         label,
         messages,
         finishReason: result.finishReason,
-        usage: resuming ? addUsage(recorded.usage ?? emptyUsage(), result.usage) : result.usage,
+        usage: withoutCost(resuming ? addUsage(recorded.usage ?? emptyUsage(), result.usage) : result.usage),
         // A parked record is what the next turn re-enters the tool on, and in
         // stateless mode it comes back from the browser. Signed here, by the
         // run that knows it is true, over where the sub-run parked, what it is
@@ -5926,7 +6363,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       write(record);
       // Only what this turn actually spent. A memoized sub-run adds nothing,
       // above, because the turn that ran it already counted it.
-      this.usage = addUsage(this.usage, result.usage);
+      this.addSpent(result.usage);
       return { result, record };
     })();
 
@@ -6176,7 +6613,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // Counted against the run exactly as a nested agent's is, so
       // `AgentRunResult.usage` is the whole cost of the turn and not only its
       // text. `imageInputTokens` keeps the image share legible inside it.
-      this.usage = addUsage(this.usage, image.usage);
+      this.addSpent(image.usage);
 
       const extension = image.mimeType === "image/jpeg" ? "jpg" : "png";
       const record = await park(
@@ -6186,7 +6623,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           mimeType: image.mimeType,
           ...(params.showModel ? { showModel: true } : {}),
         },
-        { size: image.size, usage: image.usage },
+        // Without its cost: the record is on the tool call, which goes to
+        // clients and the store (#1146).
+        { size: image.size, usage: withoutCost(image.usage) },
       );
 
       write(record);
@@ -6274,15 +6713,38 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private toolTurn(messageId: string): ToolTurn {
     const at = this.history.findIndex((message) => message.id === messageId);
     const injected = injectedMessageIds(this.history);
-    let user: AgentMessage | undefined;
-    for (let i = at - 1; i >= 0; i--) {
+    // The turn's own message, and every message that joined the turn before
+    // the call (`AgentMessage.joined`): the files of all of them are the
+    // turn's.
+    // By `turn` when the message holding the call has one (#1339): with
+    // parallel runs, the last user message before it may be another turn's.
+    const named = this.history[at]?.turn;
+    let start: AgentMessage | undefined = named
+      ? this.history.find((message) => message.id === named)
+      : undefined;
+    for (let i = at - 1; !start && i >= 0; i--) {
       const message = this.history[i];
-      if (message.role !== "user" || injected.has(message.id)) continue;
-      user = message;
-      break;
+      if (message.role === "user" && !message.joined && !injected.has(message.id)) {
+        start = message;
+        break;
+      }
     }
+    const users = start
+      ? [
+          start,
+          ...this.history
+            .slice(0, Math.max(0, at))
+            .filter(
+              (message) =>
+                message.role === "user" &&
+                message !== start &&
+                !injected.has(message.id) &&
+                (message.joined === start.id || message.turn === start.id),
+            ),
+        ]
+      : [];
     const ids: string[] = [];
-    for (const part of user?.content ?? []) {
+    for (const part of users.flatMap((message) => message.content)) {
       if (part.type !== "file") continue;
       // The prefix test `providers/request.ts` applies before telling the model
       // an id. A stateless client's history can put anything here, and a value
@@ -6388,6 +6850,8 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     if (this.ended || this.controller.signal.aborted) return;
     for (const message of queued) {
       if (this.history.some((held) => held.id === message.id)) continue;
+      // Shown by the turn that settles the call, so it is that turn's file.
+      if (this.turn && message.turn === undefined) message.turn = this.turn.id;
       this.history.push(message);
       this.produced.push(message);
       this.emit({ type: "message", message });
@@ -6489,6 +6953,46 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const turn = this.params.turn;
     const open = this.openCalls();
     this.openedWith = open.length;
+
+    // The turn's own message, made now so its id is the turn's before any
+    // message of the run's is written (a re-entered tool's file, say), and
+    // added to the history below, after the answers, as before.
+    const event = this.depth === 0 ? this.params.event : undefined;
+    const opening =
+      event || (turn && (turn.text || (turn.files && turn.files.length > 0)))
+        ? userTurnMessage(event ? event.text : turn?.text, turn?.files, event)
+        : undefined;
+    const answers = [...new Set((turn?.toolResults ?? []).map((answer) => answer.toolCallId))];
+    // The turn of the call answered, not of the first call open: with
+    // parallel runs, two turns can each be waiting on a question. A request
+    // answering calls of both carries on the turn of the first answer it
+    // lists.
+    //
+    // Found by the call this run made: the answer's own id for a top-level
+    // call, the host (`path`) for a sub-agent's question.
+    const answered = (turn?.toolResults ?? [])
+      .map((answer) => {
+        const below = pathBelow(answer.path, this.pathPrefix);
+        if (below === null) return undefined;
+        const host = below[0] ?? answer.toolCallId;
+        return open.find(({ call }) => call.toolCallId === host);
+      })
+      .find((entry) => entry !== undefined);
+    this.answeredOpen = answered !== undefined;
+    // Answers alone that matched no open call carry on no turn: the run ends
+    // as stale, and borrowing one would name a turn nobody answered.
+    const id =
+      opening?.id ??
+      (this.answersOnly() && !this.answeredOpen ? undefined : this.continuedTurn((answered ?? open[0])?.message));
+    // An empty thread continued with nothing has no turn to name.
+    this.turn = id
+      ? {
+          id,
+          ...(opening ? {} : { continues: true as const }),
+          ...(answers.length > 0 ? { answers } : {}),
+        }
+      : undefined;
+    if (opening) opening.turn = opening.id;
     /** Questions a re-entered tool asked again. The run ends on these. */
     const escalated: PendingToolCall[] = [];
 
@@ -6633,7 +7137,53 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
       }
 
-      for (const entry of open) {
+      // Another turn's question is that turn's to answer (#1355): one
+      // request answering a call of turn B does not refuse the call turn A
+      // is waiting on, and a parallel run's message does not either. Left
+      // open, the call keeps its `pending`, and the provider's request
+      // builder pairs it for the model as for any call still running.
+      //
+      // A request of answers alone that matched no open call (the same answer
+      // sent twice, a retried submit, an id that was never asked) settles
+      // nothing: it has no turn of its own to settle, and borrowing another
+      // turn's would refuse a question nobody answered. It ends as stale.
+      //
+      // A question of the answering turn's own that this request did not
+      // answer stays open too (#1380): one reply can ask two things, and the
+      // user answers them one at a time. Only a question the user was shown
+      // (in its message's `pending`), and only at the top level: a sub-run's
+      // questions resolve together, because its tool is re-entered once.
+      const last = this.history.at(-1)?.id;
+      this.answeredEarlier = [
+        ...new Set(
+          open
+            .filter((entry) => answered.has(entry.call.toolCallId) && entry.message.id !== last)
+            .map((entry) => String(entry.call.name)),
+        ),
+      ];
+      // A call the request named and did not get answered (a bad signature,
+      // a rewritten input) is refused, as before.
+      const named = new Set(
+        (turn?.toolResults ?? []).map((answer) => {
+          const below = pathBelow(answer.path, this.pathPrefix);
+          return below?.[0] ?? answer.toolCallId;
+        }),
+      );
+      const stale = this.answersOnly() && !this.answeredOpen;
+      const settled = stale
+        ? []
+        : open.filter((entry) => {
+            if (answered.has(entry.call.toolCallId)) return true;
+            if (!this.othersTurn(entry.message)) {
+              const asked =
+                this.answersOnly() && !named.has(entry.call.toolCallId) ? this.askedOf(entry) : [];
+              if (asked.length === 0) return true;
+              this.siblingsOpen.set(entry.call.toolCallId, asked);
+              return false;
+            }
+            return opening !== undefined && this.params.keepOtherTurnsOpen !== true;
+          });
+      for (const entry of settled) {
         if (answered.has(entry.call.toolCallId)) continue;
         // The turn said something else. That is a refusal — the honest reading,
         // and the only one that cannot strand the thread. A tool whose
@@ -6649,44 +7199,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         });
       }
 
-      if (this.depth === 0) this.restatePending(open, escalated);
+      if (this.depth === 0) this.restatePending(settled, escalated);
 
       await this.reportDeferred();
     }
 
-    const event = this.depth === 0 ? this.params.event : undefined;
-    if (event || (turn && (turn.text || (turn.files && turn.files.length > 0)))) {
-      const text = event ? event.text : turn?.text;
-      const message: AgentMessage = {
-        id: `msg_${crypto.randomUUID()}`,
-        role: "user",
-        content: [
-          ...(text ? [{ type: "text" as const, text }] : []),
-          // Field by field rather than spread: an entry can carry whatever
-          // `attach()` answered (`downgraded`, `size`), and only these four
-          // mean anything on a `FilePart`. `attachmentId` is among them — it is
-          // what lets the model name this file to a tool — and an absent
-          // `fileId` is a storage-only upload, left out rather than written as
-          // `undefined`.
-          ...(turn?.files ?? []).map((file) => ({
-            type: "file" as const,
-            ...(file.fileId ? { fileId: file.fileId } : {}),
-            name: file.name,
-            mimeType: file.mimeType,
-            ...(file.attachmentId ? { attachmentId: file.attachmentId } : {}),
-          })),
-        ],
-        createdAt: new Date().toISOString(),
-        finishReason: "stop",
-        ...(event
-          ? {
-              event: {
-                name: event.name,
-                ...(event.data !== undefined ? { data: event.data } : {}),
-              },
-            }
-          : {}),
-      };
+    if (opening) {
+      const message = opening;
       this.history.push(message);
       this.produced.push(message);
       // A sub-run's turn was written by the tool that started it, not typed by
@@ -6880,9 +7399,36 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * history the turn arrived with.
    */
   private answersOnlyStale(): boolean {
+    return this.answersOnly() && (this.openedWith === 0 || !this.answeredOpen);
+  }
+
+  /**
+   * The questions the user was shown for an open top-level call: the
+   * `pending` entries on its message that stand for it (the call itself, or
+   * a sub-agent's question nested under it). None for a sub-run, or for a
+   * call that never reached the user as a question.
+   */
+  private askedOf(entry: { message: AgentMessage; call: ToolCallPart }): PendingToolCall[] {
+    if (this.depth > 0 || !this.turn) return [];
+    return (entry.message.pending ?? []).filter(
+      (call) => (call.path?.[0] ?? call.toolCallId) === entry.call.toolCallId,
+    );
+  }
+
+  /** The questions of this turn still open beside the ones this run asks (#1380), with its turn. */
+  private withSiblings(asked: PendingToolCall[]): PendingToolCall[] {
+    if (this.siblingsOpen.size === 0) return asked;
+    const ids = new Set(asked.map((call) => `${(call.path ?? []).join("/")}#${call.toolCallId}`));
+    const siblings = this.withTurn([...this.siblingsOpen.values()].flat()).filter(
+      (call) => !ids.has(`${(call.path ?? []).join("/")}#${call.toolCallId}`),
+    );
+    return [...siblings, ...asked];
+  }
+
+  /** Whether the client's turn is answers and nothing else. */
+  private answersOnly(): boolean {
     const turn = this.params.turn;
-    if (!turn?.toolResults?.length || turn.text || turn.files?.length) return false;
-    return this.openedWith === 0;
+    return Boolean(turn?.toolResults?.length) && !turn?.text && !turn?.files?.length && !(this.depth === 0 && this.params.event);
   }
 
   /**
@@ -6908,8 +7454,18 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     for (const [original, ids] of calls) {
       const still = escalated.filter((call) => ids.has(call.path?.[0] ?? call.toolCallId));
       if (still.length === 0 && original.pending === undefined) continue;
+      // The questions beside them this turn left open (#1380) keep theirs.
+      const kept = (original.pending ?? []).filter((call) =>
+        this.siblingsOpen.has(call.path?.[0] ?? call.toolCallId),
+      );
+      const next = [...kept, ...(still.length > 0 ? this.withTurn(still, original.turn) : [])];
+      if (
+        next.length === original.pending?.length &&
+        next.every((call, i) => call === original.pending![i])
+      )
+        continue;
       const message = this.amend(original);
-      if (still.length > 0) message.pending = still;
+      if (next.length > 0) message.pending = next;
       else delete message.pending;
       this.unreported.add(message);
     }
@@ -7354,6 +7910,15 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // in the very transcript this method exists to keep valid.
     for (const entry of this.openCalls()) {
       if (entry.message === this.current) continue;
+      // A stop ends this run's turn, not another's still waiting on its
+      // question (#1355).
+      if (this.othersTurn(entry.message)) continue;
+      // Nor the questions of its own turn the user has yet to answer (#1380):
+      // this run did not ask them, and stopping it does not answer them. The
+      // call this run *answered* is still closed as `stopped` here if its
+      // approved tool had not finished: what a second answer that supersedes
+      // this run (another tab, an app sending it itself) does to the first.
+      if (this.siblingsOpen.has(entry.call.toolCallId)) continue;
       this.attachToHistory(entry, {
         type: "tool-result",
         toolCallId: entry.call.toolCallId,

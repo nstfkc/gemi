@@ -17,6 +17,9 @@ import type {
   AnyAgent,
   ContextOf,
   PrepareStepContext,
+  AgentJoinTurn,
+  AgentRunJoin,
+  AgentRunTurn,
   PrepareStepResult,
   ReasoningEffort,
   SkillDefinition,
@@ -26,7 +29,7 @@ import type {
 import type { ContextWindowOptions } from "./contextWindow";
 import { modelOutputOf } from "./toolModelOutput";
 import { isSummaryStore, type ThreadSummary } from "./contextCompaction";
-import { injectedMessageIds, toolCallInputOf } from "./Agent";
+import { injectedMessageIds, toolCallInputOf, userTurnMessage } from "./Agent";
 import {
   type Attachment,
   ATTACHMENT_ID_PREFIX,
@@ -45,6 +48,7 @@ import {
 import {
   FrameCursorEvictedError,
   liveRuns as defaultLiveRuns,
+  type LiveRunInfo,
   LiveRunNotFoundError,
   MemoryLiveRuns,
 } from "./store/LiveRuns";
@@ -78,6 +82,7 @@ import { normalizeProviderError, ProviderHttpError } from "./providers/errors";
 import { redactError, unredactedError } from "./redact";
 import type { ErrorRedactionInfo } from "./redact";
 import { encodeFrame, sseHeaders, sseKeepalive, sseResponse } from "./store/sse";
+import { decodeSSE } from "./client/sse";
 import { settleInterrupted, TurnJournal } from "./store/TurnJournal";
 import { AgentJobs } from "./jobs/AgentJob";
 import { markOrphans, overlayJobs } from "./jobs/overlay";
@@ -97,6 +102,7 @@ import type {
   AgentError,
   AgentMessage,
   AgentStreamEvent,
+  AgentStreamFrame,
   ClientTurn,
   JsonToolShapes,
   PendingToolCall,
@@ -317,6 +323,14 @@ export type AgentHookContext = {
    * `CreateAgentParams.rememberDenials`.
    */
   readonly denials: readonly ToolDenial[];
+  /**
+   * The turn the run answers (#1339): `id` is `AgentMessage.turn` on every
+   * message it writes; `continues` is set when the request added no message
+   * of its own (answers to tool calls, or a bare continuation) and carries on
+   * that earlier turn; `answers` lists the tool calls it answered. Read live
+   * from the run: `undefined` before the run has taken its turn in.
+   */
+  readonly turn: AgentRunTurn | undefined;
 };
 
 /**
@@ -362,7 +376,8 @@ export type AgentTurnParams<Body extends object = Record<string, unknown>> = {
   /**
    * What to do when the thread already has a run going (#1178). See
    * `AgentTurnBusyPolicy`. Defaults to `"supersede"`, what a resend from the
-   * chat does.
+   * chat does. The controller's `busyPolicy` hook is asked with it as
+   * `requested`, and its answer is what happens; the default answers it.
    */
   ifBusy?: AgentTurnBusyPolicy;
   /**
@@ -389,8 +404,10 @@ export type AgentTurnEvent = {
 const EVENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 
 /**
- * What `startTurn` does on a thread that is busy: a run still going, or a
- * turn setting up on it (#1178).
+ * What a turn does on a thread that is busy: a run still going, or a turn
+ * setting up on it (#1178). A client sends it as `ifBusy` (`useChat`'s
+ * `ifBusy` option), server code passes it to `startTurn`, and the
+ * controller's `busyPolicy` hook has the last word.
  *
  * - `"supersede"` (the default) stops the running run and starts once its
  *   transcript is stored, as a resend from the chat does.
@@ -400,9 +417,79 @@ const EVENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
  *   waits: a person who sends meanwhile still supersedes the running run, and
  *   the queued turn then waits for theirs too. Per process, like the thread's
  *   lock.
- * - `"skip"` starts nothing and answers `{ skipped: true }`.
+ * - `"join"` adds the message to the running turn: the run reads it at its
+ *   next model call, and stores it after the message it was writing, marked
+ *   `AgentMessage.joined`. Nothing waits and nothing is cut off. The turn's
+ *   answer is that run's stream (`useChat` keeps showing the reply it was
+ *   showing). A run that cannot take it any more (it has just ended, or is on
+ *   its last step) is let finish, and the message starts a turn of its own
+ *   after it. Only a message joins: a turn with no text, files or event, or
+ *   one answering tool calls, is started after the run as `"queue"` would.
+ * - `"parallel"` starts a second run on the thread at once, beside the one
+ *   going. Each has its own `runId` and stream; their messages are stored in
+ *   the order they arrive. A parallel run reads the thread as it is when it
+ *   starts, without the messages another run is still writing, plus its own.
+ *   Each run counts against `maxConcurrentRuns`, and a thread takes at most
+ *   `maxThreadRuns` at once (a 429 `too_many_runs` past it).
+ * - `"skip"` starts nothing: `startTurn` answers `{ skipped: true }`, a client
+ *   turn a 409 `thread_busy`.
  */
-export type AgentTurnBusyPolicy = "supersede" | "queue" | "skip";
+export type AgentTurnBusyPolicy = "supersede" | "queue" | "join" | "parallel" | "skip";
+
+/** The busy policies a client turn may ask for (`ifBusy` in its body). */
+export type AgentClientBusyPolicy = "supersede" | "queue" | "join" | "parallel";
+
+/** One run going on the thread, as `AgentController.busyPolicy` is told about it. */
+export type AgentRunningTurn = {
+  runId: string;
+  /** When the run started. */
+  startedAt: Date;
+  /** Who started it (`runOwner`), `null` for an unowned run. A caller may join or supersede only a run it may access. */
+  owner: string | null;
+  /** What started the turn: the person's text and files, or a server turn's event. Empty for a turn with neither (answers, a continuation). */
+  turn: AgentRunningTurnMessage;
+  /**
+   * The turn the run answers (#1339): the id of the message that started it,
+   * `AgentMessage.turn` on everything the run writes. For a run that answers
+   * tool calls, the turn that asked them. `undefined` until the run has taken
+   * its turn in, a moment after it starts.
+   */
+  messageId: string | undefined;
+  /** The `body` the request that started the run carried, as `instructions()` got it. */
+  body: unknown;
+  /** The messages that joined it so far, oldest first. */
+  joined: AgentRunningTurnMessage[];
+};
+
+/** A message of a running turn, as `AgentRunningTurn` carries it. */
+export type AgentRunningTurnMessage = {
+  text?: string;
+  files?: ClientTurn["files"];
+  event?: { name: string };
+};
+
+/**
+ * What `AgentController.busyPolicy` is told about the turn arriving.
+ *
+ * `running` describes every run on the thread, other users' included, with
+ * their messages' text and files: server-side data to decide with, not to
+ * echo to the client.
+ */
+export type BusyPolicyParams<Body extends object = Record<string, unknown>> = {
+  threadId: string;
+  /** The runs going on the thread in this process, oldest first. Never empty: the hook is asked only when the thread is busy. */
+  running: AgentRunningTurn[];
+  /** What the turn asked for: the client's `ifBusy`, or `startTurn`'s. `undefined` when it asked nothing. */
+  requested: AgentTurnBusyPolicy | undefined;
+  /** Where the turn came from: a request to the route, or `startTurn`. */
+  source: "client" | "server";
+  /** The turn arriving: its text, files and answers, as `useChat` sends them. */
+  turn: ClientTurn | undefined;
+  /** The client's `body` option, as `instructions()` gets it. */
+  body: Body;
+  /** Who is sending (`runOwner`). */
+  owner: string | null;
+};
 
 /** What `startTurn({ ifBusy: "skip" })` answers when the thread was busy. */
 export type AgentTurnSkipped = {
@@ -416,6 +503,13 @@ export type AgentTurn = {
   threadId: string;
   /** The run: iterate it (or its `frames()`) to follow the turn as it goes. */
   run: AgentRun;
+  /**
+   * The turn's message joined a run already going (`ifBusy: "join"`): `run`
+   * is that run, and `result()` is its outcome. If the run ended before it
+   * took the message, `result()` is the outcome of the turn started for it
+   * after.
+   */
+  joined: boolean;
   /** What the chat's stop button does. */
   stop(params?: { reason?: string }): void;
   /**
@@ -522,6 +616,145 @@ function lastAssistantText(messages: AgentMessage[]): string {
   }
   return "";
 }
+
+/** The `AgentTurn` for a run `startTurn` started (or joined, with `joined`). */
+function serverTurnHandle(
+  threadId: string,
+  run: AgentRun,
+  hooks: Promise<void>,
+  joined = false,
+): AgentTurn {
+  let pending: PendingToolCall[] = [];
+  // The pending calls are on the `awaiting-input` event, not on the result.
+  // The run's frames are buffered from the start, so this misses nothing.
+  const watched = (async () => {
+    for await (const event of run) {
+      if (event.type === "awaiting-input") pending = event.pending as PendingToolCall[];
+    }
+  })().catch(noop);
+
+  let result: Promise<AgentTurnResult> | undefined;
+  return {
+    runId: run.runId,
+    threadId,
+    run,
+    joined,
+    stop: (stopParams) => stopByCaller(run, stopParams),
+    result: () =>
+      (result ??= (async () => {
+        const outcome = await run.result();
+        // After the transcript is stored and the hooks are done (or
+        // `hookHoldMs` passed), so a caller that reads the thread next sees
+        // this turn in it.
+        await Promise.all([hooks, watched]);
+        const messages = outcome.messages as AgentMessage[];
+        return {
+          ...outcome,
+          threadId,
+          text: lastAssistantText(messages),
+          pending: outcome.finishReason === "awaiting-input" ? pending : [],
+        };
+      })()),
+  };
+}
+
+/**
+ * The `AgentTurn` for a `startTurn` whose message joined a running run: that
+ * run's, and `result()` is the outcome of the run that answered the message.
+ * That is the joined run when it took it, the turn started for it when it did
+ * not (or the run it joined in turn), and the joined run's own outcome when a
+ * stop dropped it. A message no run could take, because the turn started for
+ * it was refused, rejects `result()` with that refusal.
+ */
+function joinedServerTurn(
+  threadId: string,
+  joined: { run: AgentRun; answer: Promise<JoinAnswer> },
+): AgentTurn {
+  // The running run's own request holds its hooks; the transcript being
+  // stored is what this caller can wait for.
+  const own = serverTurnHandle(
+    threadId,
+    joined.run,
+    persisted.get(joined.run) ?? joined.run.result().then(noop, noop),
+    true,
+  );
+  let result: Promise<AgentTurnResult> | undefined;
+  return {
+    ...own,
+    stop: (stopParams) => {
+      stopByCaller(joined.run, stopParams);
+      void joined.answer.then((answer) => {
+        if ("run" in answer) stopByCaller(answer.run, stopParams);
+      }, noop);
+    },
+    result: () =>
+      (result ??= (async () => {
+        const answer = await joined.answer;
+        if (answer.kind === "refused") {
+          await own.result();
+          throw answer.error;
+        }
+        if (answer.kind === "dropped" || answer.run === joined.run) return own.result();
+        return serverTurnHandle(threadId, answer.run, answer.hooks).result();
+      })()),
+  };
+}
+
+/** Every value `ifBusy` may be. */
+const BUSY_POLICIES: readonly AgentTurnBusyPolicy[] = [
+  "supersede",
+  "queue",
+  "join",
+  "parallel",
+  "skip",
+];
+
+/**
+ * What a turn hands `AgentRun.join`: its text and files, or a server turn's
+ * event. `null` for a turn that has nothing to join with: no message, or
+ * answers to tool calls, which belong to the end of a run, not its middle.
+ */
+function joinTurnOf(
+  turn: ClientTurn | undefined,
+  event: AgentTurnEvent | undefined,
+): AgentJoinTurn | null {
+  if (event) {
+    return {
+      event: {
+        name: event.name,
+        ...(event.text !== undefined ? { text: event.text } : {}),
+        ...(event.data !== undefined ? { data: event.data } : {}),
+      },
+    };
+  }
+  if (!turn || (turn.toolResults && turn.toolResults.length > 0)) return null;
+  if (!turn.text && !(turn.files && turn.files.length > 0)) return null;
+  return {
+    ...(turn.text ? { text: turn.text } : {}),
+    ...(turn.files && turn.files.length > 0 ? { files: turn.files } : {}),
+    ...(turn.localId ? { localId: turn.localId } : {}),
+  };
+}
+
+/** A turn's message as `AgentRunningTurn` describes it. */
+function runningTurnMessage(turn: ClientTurn | AgentJoinTurn | undefined): AgentRunningTurnMessage {
+  if (!turn) return {};
+  const event = "event" in turn ? turn.event : undefined;
+  const text = event ? event.text : turn.text;
+  return {
+    ...(text ? { text } : {}),
+    ...(!event && turn.files && turn.files.length > 0 ? { files: turn.files } : {}),
+    ...(event ? { event: { name: event.name } } : {}),
+  };
+}
+
+/** What a client may send as `ifBusy`: `"skip"` is `startTurn`'s alone. */
+const CLIENT_BUSY_POLICIES: readonly AgentClientBusyPolicy[] = [
+  "supersede",
+  "queue",
+  "join",
+  "parallel",
+];
 
 /** What `AgentController.attachmentLimits` answers. Both optional. */
 export type AttachmentLimits = {
@@ -656,8 +889,145 @@ const serverTurns = new WeakMap<
 
 /** The `scope` each `startTurn` was given, by the request it built (#1177). */
 const serverTurnScopes = new WeakMap<HttpRequest<any, any>, string>();
-/** `startTurn`'s busy policy, by the request it built (#1178). A route's turn has none: it supersedes. */
+/** `startTurn`'s busy policy, by the request it built (#1178). A route's turn reads the client's `ifBusy` instead. */
 const busyPolicies = new WeakMap<HttpRequest<any, any>, AgentTurnBusyPolicy>();
+
+/** Whether `response` is a run's stream rather than a refusal. */
+function isEventStream(response: Response): boolean {
+  return response.headers.get("Content-Type")?.startsWith("text/event-stream") ?? false;
+}
+
+/** What `busyPolicy` is told about each run a controller started. Weak, like `persisted`. */
+const runRecords = new WeakMap<
+  AgentRun,
+  {
+    startedAt: Date;
+    owner: string | null;
+    turn: AgentRunningTurnMessage;
+    joined: AgentRunningTurnMessage[];
+    body: unknown;
+  }
+>();
+
+/** Each threaded run's journal, so a parallel run can wait for what another has written. */
+const journals = new WeakMap<AgentRun, TurnJournal>();
+
+/**
+ * A joined turn's answer (`"join"`), by the response `withThread` built for
+ * it: settles once the stream it answers has ended, including the turn
+ * started after when the run did not take the message. What the turn's
+ * `maxConcurrentRuns` slot is held for.
+ */
+const joinHolds = new WeakMap<Response, Promise<unknown>>();
+
+/** The run each request started, once it has, with the promise its hooks are done. */
+const turnRuns = new WeakMap<HttpRequest<any, any>, { run: AgentRun; hooks: Promise<void> }>();
+
+/** How `stream`'s turn is started: alone on its thread, or beside the runs going (`"parallel"`). */
+type StartMode = {
+  parallel: boolean;
+  /** Frees the parallel run's own `maxConcurrentRuns` slot. */
+  release?: () => void;
+};
+const SOLO: StartMode = { parallel: false };
+
+/** What `withThread` needs to decide a busy thread's policy. */
+type BusyTurn = {
+  req: HttpRequest<any, any>;
+  requested: AgentTurnBusyPolicy | undefined;
+  /** Whether `busyPolicy` is asked; a regenerate is not. */
+  decide: boolean;
+  source: "client" | "server";
+  turn: ClientTurn | undefined;
+  body: any;
+  /** `runLimitKey`'s answer, for a parallel run's own slot. */
+  limitKey: string | null;
+  /**
+   * Set once a parallel turn has waited, outside the lock, for the runs going
+   * to take their turns in: the policy it was given, and the runs it waited
+   * for, which it does not wait for again (see `PARALLEL_INTAKE_WAIT_MS`).
+   */
+  intake?: { policy: AgentTurnBusyPolicy; waited: WeakSet<AgentRun> };
+};
+
+/**
+ * How long a parallel turn waits for a run going on its thread to take its
+ * own turn in before it reads the thread anyway. The wait is outside the
+ * thread's lock, so it holds up no other turn; the limit is for a run that
+ * takes long to reach its first model call (a slow tool it re-enters, a slow
+ * limiter).
+ */
+const PARALLEL_INTAKE_WAIT_MS = 5_000;
+
+/** Each run's intake (see `intakeOf`), once a parallel turn has asked. */
+const intakes = new WeakMap<AgentRun, { done: boolean; promise: Promise<void> }>();
+
+/** A `startTurn` that joined a run, by the request it built. See `AgentTurn.joined`. */
+const serverJoins = new WeakMap<
+  HttpRequest<any, any>,
+  { run: AgentRun; answer: Promise<JoinAnswer> }
+>();
+
+/**
+ * What became of a joined message (`"join"`):
+ *
+ * - `answered`: a run took it, the one it joined or, after that one ended
+ *   without it, the turn started for it (or a run that turn joined).
+ * - `dropped`: the run it joined was stopped by a caller (`/stop`,
+ *   `AgentTurn.stop`) before reading it. Nothing is started or stored for it:
+ *   a stop stops the conversation, messages sent into it included.
+ * - `refused`: the turn started for it was refused (a limit, another user's
+ *   run, `"skip"`). The message is stored, unanswered, so it is not lost, and
+ *   the refusal is reported: an `error` frame on the stream, and `result()`
+ *   rejecting for `startTurn`.
+ */
+type JoinAnswer =
+  | { kind: "answered"; run: AgentRun; hooks: Promise<void> }
+  | { kind: "dropped" }
+  | { kind: "refused"; error: AgentTurnError; stored: AgentMessage | null };
+
+/** By the response `joinResponse` answered: what became of its message. */
+const joinAnswers = new WeakMap<Response, Promise<JoinAnswer>>();
+
+/**
+ * Runs a caller stopped (`/stop`, `AgentTurn.stop`), as against runs stopped
+ * by a supersede or a time limit: their untaken joined messages are dropped
+ * rather than handed on to a turn of their own.
+ */
+const stoppedByCaller = new WeakSet<AgentRun>();
+
+function stopByCaller(run: AgentRun, params?: { reason?: string }): void {
+  stoppedByCaller.add(run);
+  run.stop(params);
+}
+
+/**
+ * Settles once `run` has taken its own turn in (its first model call has
+ * started, it asked a question, or it ended) and its journal has written
+ * what that changed. Watched from the first time a parallel turn asks.
+ */
+function intakeOf(
+  run: AgentRun,
+  journal: TurnJournal | undefined,
+): { done: boolean; promise: Promise<void> } {
+  const known = intakes.get(run);
+  if (known) return known;
+  const watched = (async () => {
+    for await (const frame of run.frames()) {
+      const type = frame.event.type;
+      if (type === "message-start" || type === "awaiting-input" || type === "run-end") return;
+    }
+  })().catch(noop);
+  const intake = { done: false, promise: Promise.resolve() };
+  intake.promise = Promise.race([watched, run.result().then(noop, noop)])
+    .then(() => journal?.settled())
+    .then(noop, noop)
+    .then(() => {
+      intake.done = true;
+    });
+  intakes.set(run, intake);
+  return intake;
+}
 
 /**
  * `startTurn`'s event, by the request it built (#1181). Kept off the request's
@@ -693,6 +1063,33 @@ export const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 export const DEFAULT_MAX_HISTORY_MESSAGES = 1000;
 /** `AgentController.maxConcurrentRuns`'s default. */
 export const DEFAULT_MAX_CONCURRENT_RUNS = 5;
+/**
+ * What `maxThreadRuns` answers: how many runs one thread may have going, and
+ * what a parallel turn past that does. A bare number refuses it (429
+ * `too_many_runs`); `overflow: "queue"` holds it until one of the runs ends,
+ * then starts it as a parallel run.
+ */
+export type ThreadRunLimit = number | { max: number; overflow: "queue" | "reject" };
+
+/**
+ * `maxThreadRuns`'s answer, checked: a typo must not turn the limit off
+ * (`NaN` is never reached) or turn a queue into a refusal. Throws, which
+ * fails the turn, as a `busyPolicy` answer it does not know does.
+ */
+function threadRunLimit(limit: ThreadRunLimit): { max: number; overflow: "queue" | "reject" } {
+  const { max, overflow } =
+    typeof limit === "number" ? { max: limit, overflow: "reject" as const } : (limit ?? ({} as never));
+  const whole = max === Infinity || (Number.isInteger(max) && max > 0);
+  if (!whole || (overflow !== "queue" && overflow !== "reject")) {
+    throw new TypeError(
+      `AgentController.maxThreadRuns answers a positive whole number (or Infinity), or { max, overflow: "queue" | "reject" }; got ${JSON.stringify(limit)}.`,
+    );
+  }
+  return { max, overflow };
+}
+
+/** `AgentController.maxThreadRuns`'s default. */
+export const DEFAULT_MAX_THREAD_RUNS = 3;
 /** The cap on `attach` and `stop` bodies, which carry ids and nothing else. */
 const SMALL_BODY_BYTES = 64 * 1024;
 
@@ -856,6 +1253,14 @@ export type AgentControllerHooks<Body extends object = object, Ctx = AgentContex
     req: HttpRequest<any, any>,
     params: { owner: string | null; threadId?: string },
   ) => string | null | Promise<string | null>;
+  busyPolicy?: (
+    req: HttpRequest<any, any>,
+    params: BusyPolicyParams<Body>,
+  ) => AgentTurnBusyPolicy | Promise<AgentTurnBusyPolicy>;
+  maxThreadRuns?: (
+    req: HttpRequest<any, any>,
+    params: { threadId: string; owner: string | null; body: Body },
+  ) => ThreadRunLimit | Promise<ThreadRunLimit>;
   instructions?: (
     req: HttpRequest<any, any>,
     extra: { body: Body },
@@ -876,6 +1281,10 @@ export type AgentControllerHooks<Body extends object = object, Ctx = AgentContex
     req: HttpRequest<any, any>,
     extra: { body: Body; context: Ctx },
   ) => AgentUsageLimits | void | Promise<AgentUsageLimits | void>;
+  trailingContext?: (
+    req: HttpRequest<any, any>,
+    extra: { body: Body; context: Ctx },
+  ) => string | void | Promise<string | void>;
   /** Builds the run's context. `Ctx` is the agents' (see `defineAgentHooks`). */
   context?: (req: HttpRequest<any, any>, extra: { body: Body }) => Ctx | Promise<Ctx>;
   memoryScopes?: (
@@ -1352,6 +1761,34 @@ export abstract class AgentController<
   }
 
   /**
+   * TEXT AFTER THE CONVERSATION (#1345): what the model should know on this
+   * turn that is not part of it (the screen the person is on, the time, a
+   * small note on the app's state), sent after the last message on every
+   * model call of the run.
+   *
+   * ```ts
+   * protected trailingContext(req, { body }) {
+   *   return `The person is looking at the page "${body.pageTitle}".`;
+   * }
+   * ```
+   *
+   * Unlike `instructions()`, it is not part of the prompt the provider
+   * caches, so it can change on every turn without a cache miss; and unlike a
+   * message, it is never stored, so the thread does not fill up with notes.
+   * Called once per turn, after `context()`, on turns from `useChat`,
+   * `startTurn` and voice alike. Answer nothing to send none (the default).
+   * `prepareStep` can change it for one call
+   * (`PrepareStepResult.trailingContext`). `body` is client-controlled, as
+   * in `instructions()`: treat it as what the client says, not as fact.
+   */
+  protected trailingContext(
+    req: HttpRequest<any, any>,
+    extra: { body: Body; context: ContextOf<A> },
+  ): string | void | Promise<string | void> {
+    return this.hooks?.trailingContext?.(req, extra);
+  }
+
+  /**
    * THE TURN'S USAGE LIMITS (#1124): budgets on what its run may spend, its
    * own and shared ones under keys this decides (the user, the tenant, the
    * month), and `onUsage` to hear what was spent.
@@ -1561,15 +1998,68 @@ export abstract class AgentController<
    *
    * Counted per `runLimitKey` (by default `runOwner`, the authenticated user),
    * and per conversation rather than per request: every turn on one thread is
-   * one slot, because a thread holds one run at a time and a new turn there
-   * supersedes the old one rather than adding to it. So a user resending
-   * mid-answer is never refused; a user with five chats answering at once and
-   * starting a sixth is, with a 429 `{ error: { kind: "rate_limit", message,
-   * status, code: "too_many_runs" } }`, after `authorizeRequest` and before the
-   * model is asked anything. A slot is freed when the run ends (stopped, timed
-   * out, or finished). `Infinity` turns it off.
+   * one slot, because a new turn there supersedes, joins or waits for the run
+   * going rather than adding to it. So a user resending mid-answer is never
+   * refused; a user with five chats answering at once and starting a sixth
+   * is, with a 429 `{ error: { kind: "rate_limit", message, status, code:
+   * "too_many_runs" } }`, after `authorizeRequest` and before the model is
+   * asked anything. The exception is a parallel run (`ifBusy: "parallel"`),
+   * which adds a run to the thread and takes a slot of its own; how many one
+   * thread may have going is `maxThreadRuns`. A slot is freed when the run
+   * ends (stopped, timed out, or finished). `Infinity` turns it off.
    */
   protected maxConcurrentRuns = DEFAULT_MAX_CONCURRENT_RUNS;
+
+  /**
+   * How many runs one thread may have going at once, with parallel turns
+   * (`ifBusy: "parallel"`). Asked per turn, so it can differ per thread (a
+   * plan, a kind of conversation): default `DEFAULT_MAX_THREAD_RUNS` (3). A
+   * parallel turn on a thread that already has this many going is refused
+   * with a 429 `too_many_runs` before anything runs; `busyPolicy` sees
+   * `running.length` and can join instead. Answer `{ max, overflow: "queue" }`
+   * to hold such a turn until one of the runs ends instead (#1339), as a
+   * queued turn waits: it then starts as one more parallel run. Only parallel
+   * turns are counted here: the other policies never add a run to the thread.
+   */
+  protected maxThreadRuns(
+    req: HttpRequest<any, any>,
+    params: { threadId: string; owner: string | null; body: Body },
+  ): ThreadRunLimit | Promise<ThreadRunLimit> {
+    const hook = this.hooks?.maxThreadRuns;
+    if (hook) return hook(req, params);
+    return DEFAULT_MAX_THREAD_RUNS;
+  }
+
+  /**
+   * What a turn does on a thread that already has a run going (see
+   * `AgentTurnBusyPolicy`): asked under the thread's lock, after
+   * `authorizeRequest`, for every turn that finds the thread busy, a client's
+   * and `startTurn`'s alike. Not asked on a free thread, nor for a regenerate,
+   * which always supersedes.
+   *
+   * `requested` is what the turn asked for (the client's `ifBusy`, or
+   * `startTurn`'s), and the default answers it, `"supersede"` when it asked
+   * nothing. `running` lists the runs going, oldest first, with what started
+   * each and what joined it, so an app can decide by what the new message is
+   * about:
+   *
+   *   protected async busyPolicy(req: HttpRequest, { running, turn }: BusyPolicyParams) {
+   *     const current = running.at(-1)!;
+   *     return (await sameTopic(current.turn.text, turn?.text)) ? "join" : "parallel";
+   *   }
+   *
+   * A client sends `ifBusy` only when asked (`useChat`'s `ifBusy` option), and
+   * a client that asks for anything but `"supersede"` leaves the running
+   * reply alone itself, so whatever this answers is what it shows.
+   */
+  protected busyPolicy(
+    req: HttpRequest<any, any>,
+    params: BusyPolicyParams<Body>,
+  ): AgentTurnBusyPolicy | Promise<AgentTurnBusyPolicy> {
+    const hook = this.hooks?.busyPolicy;
+    if (hook) return hook(req, params);
+    return params.requested ?? "supersede";
+  }
 
   /**
    * Who `maxConcurrentRuns` counts a turn against (#444). The default is
@@ -1579,7 +2069,7 @@ export abstract class AgentController<
    * nothing sound to count it under: a client address is the proxy's unless
    * `GEMI_TRUST_PROXY` is set, which would put every visitor in one bucket, and
    * the session cookie is the visitor's to drop. An app that serves anonymous
-   * chats returns its own key here (`ip:${clientIp(req)}` behind a trusted
+   * chats returns its own key here (`ip:${clientAddress(req)}` behind a trusted
    * proxy, say), sets `requireThread`, or puts `RateLimitMiddleware` on the
    * route.
    */
@@ -1731,9 +2221,13 @@ export abstract class AgentController<
    * On a thread that already has a run going, the turn supersedes it, as a
    * resend from the chat does. Server code reacting to an event usually
    * should not cut off the answer a person is reading: pass
-   * `ifBusy: "queue"` to start after it instead, or `ifBusy: "skip"` to start
-   * nothing (answered `{ skipped: true }`). See `AgentTurnBusyPolicy`. A
-   * queued turn's `startTurn` settles once the turn has started.
+   * `ifBusy: "queue"` to start after it instead, `"join"` to hand the running
+   * turn the message (or event) to read at its next step, `"parallel"` to
+   * run beside it, or `"skip"` to start nothing (answered
+   * `{ skipped: true }`). See `AgentTurnBusyPolicy`; the controller's
+   * `busyPolicy` decides, and answers `ifBusy` by default. A queued turn's
+   * `startTurn` settles once the turn has started; a joined one's at once,
+   * with `joined: true` and the running run as `run`.
    */
   static startTurn<C extends AgentController<any, any>>(
     this: new () => C,
@@ -1741,7 +2235,9 @@ export abstract class AgentController<
   ): Promise<AgentTurn | AgentTurnSkipped>;
   static startTurn<C extends AgentController<any, any>>(
     this: new () => C,
-    params: AgentTurnParams<ControllerBody<C>> & { ifBusy?: "supersede" | "queue" },
+    params: AgentTurnParams<ControllerBody<C>> & {
+      ifBusy?: "supersede" | "queue" | "join" | "parallel";
+    },
   ): Promise<AgentTurn>;
   static startTurn<C extends AgentController<any, any>>(
     this: new () => C,
@@ -1757,10 +2253,10 @@ export abstract class AgentController<
         "AgentController.startTurn needs a `threadId`: a server turn is stored on a thread. Create one with the store's `createThread`.",
       );
     }
-    const ifBusy = params.ifBusy ?? "supersede";
-    if (ifBusy !== "supersede" && ifBusy !== "queue" && ifBusy !== "skip") {
+    const ifBusy = params.ifBusy;
+    if (ifBusy !== undefined && !BUSY_POLICIES.includes(ifBusy)) {
       throw new TypeError(
-        `AgentController.startTurn's \`ifBusy\` is "supersede", "queue" or "skip"; got ${JSON.stringify(params.ifBusy)}.`,
+        `AgentController.startTurn's \`ifBusy\` is "supersede", "queue", "join", "parallel" or "skip"; got ${JSON.stringify(params.ifBusy)}.`,
       );
     }
     const event = params.event === undefined ? undefined : checkTurnEvent(params);
@@ -1785,7 +2281,7 @@ export abstract class AgentController<
     // Marks the request as `startTurn`'s, so only its run is kept here.
     serverTurns.set(req, null);
     if (params.scope !== undefined) serverTurnScopes.set(req, params.scope);
-    busyPolicies.set(req, ifBusy);
+    if (ifBusy !== undefined) busyPolicies.set(req, ifBusy);
     if (event) serverEvents.set(req, event);
     // A request scope of its own, carrying the caller's user, whether or not
     // this is called from inside another request: the run is not that
@@ -1794,8 +2290,9 @@ export abstract class AgentController<
       user: params.user ?? null,
     });
 
+    const joined = serverJoins.get(req);
     const started = serverTurns.get(req);
-    if (!started) {
+    if (!started && !joined) {
       const error = await AgentTurnError.from(response);
       if (ifBusy === "skip" && error.code === THREAD_BUSY) {
         return { skipped: true, threadId };
@@ -1803,41 +2300,14 @@ export abstract class AgentController<
       throw error;
     }
     serverTurns.delete(req);
+    serverJoins.delete(req);
     // Nobody reads the stream; the run goes on without it (see `toResponse`).
     response.body?.cancel().catch(noop);
 
-    const { run, hooks } = started;
-    let pending: PendingToolCall[] = [];
-    // The pending calls are on the `awaiting-input` event, not on the result.
-    // The run's frames are buffered from the start, so this misses nothing.
-    const watched = (async () => {
-      for await (const event of run) {
-        if (event.type === "awaiting-input") pending = event.pending as PendingToolCall[];
-      }
-    })().catch(noop);
+    if (joined) return joinedServerTurn(threadId, joined);
 
-    let result: Promise<AgentTurnResult> | undefined;
-    return {
-      runId: run.runId,
-      threadId,
-      run,
-      stop: (stopParams) => run.stop(stopParams),
-      result: () =>
-        (result ??= (async () => {
-          const outcome = await run.result();
-          // After the transcript is stored and the hooks are done (or
-          // `hookHoldMs` passed), so a caller that reads the thread next sees
-          // this turn in it.
-          await Promise.all([hooks, watched]);
-          const messages = outcome.messages as AgentMessage[];
-          return {
-            ...outcome,
-            threadId,
-            text: lastAssistantText(messages),
-            pending: outcome.finishReason === "awaiting-input" ? pending : [],
-          };
-        })()),
-    };
+    const { run, hooks } = started!;
+    return serverTurnHandle(threadId, run, hooks);
   }
 
   /**
@@ -1864,6 +2334,18 @@ export abstract class AgentController<
     // meaningful on a thread: a stateless client trims its own history.
     const regenerate = threadId !== undefined && body.regenerate === true;
     const clientRunId = typeof body.clientRunId === "string" ? body.clientRunId : undefined;
+    // What the turn asks to do on a busy thread: `startTurn`'s, or the
+    // client's `ifBusy`. `busyPolicy` has the last word. See `withThread`.
+    let requested: AgentTurnBusyPolicy | undefined = busyPolicies.get(req);
+    if (!serverTurns.has(req) && body.ifBusy !== undefined) {
+      if (!CLIENT_BUSY_POLICIES.includes(body.ifBusy)) {
+        return invalidRequest({
+          body: {},
+          error: `\`ifBusy\` is "supersede", "queue", "join" or "parallel"; got ${JSON.stringify(body.ifBusy)}.`,
+        });
+      }
+      requested = body.ifBusy as AgentClientBusyPolicy;
+    }
     // The app's fields, separated once and handed to every method that reads
     // them — `authorizeRequest`, `instructions`, `context`, `attachmentScope` —
     // so none of them can disagree about what the client sent. They cannot read
@@ -1942,9 +2424,9 @@ export abstract class AgentController<
     // What a regenerate took out of the thread, kept until the run replacing
     // it has started.
     let removed: AgentMessage[] = [];
-    const start = async (): Promise<Response> => {
+    const start = async (mode: StartMode = SOLO): Promise<Response> => {
       try {
-        return await startRun();
+        return await startRun(mode);
       } finally {
         // A regenerate that never started its run — stopped while it waited,
         // or a throw from the app's hooks — puts back what it took out, since
@@ -1955,9 +2437,11 @@ export abstract class AgentController<
             .appendMessages(threadId, removed)
             .catch((err) => this.reportHookFailure(err));
         }
+        // A parallel turn's own slot, when it did not get as far as a run.
+        if (mode.release && (started as AgentRun | null) === null) mode.release();
       }
     };
-    const startRun = async (): Promise<Response> => {
+    const startRun = async (mode: StartMode): Promise<Response> => {
       let messages: AgentMessage[];
       // The `<jobs>` block for this turn's system prompt (#461), on a thread
       // that has background jobs.
@@ -1989,7 +2473,20 @@ export abstract class AgentController<
         // lock and after the previous run's transcript is stored, so the only
         // unfinished message left is one no run in this process owns.
         const thread = await this.settleThread(threadId, history, { write: true });
-        messages = thread.messages;
+        // Without what another run on the thread is still writing (a parallel
+        // run, `ifBusy: "parallel"`): an unfinished message is no history to
+        // answer from, and a tool call in it with no result yet is one the
+        // provider refuses. This run reads the thread as it was when it
+        // started, plus its own.
+        messages = thread.messages.filter(
+          (message) =>
+            !(
+              message.role === "assistant" &&
+              message.finishReason === undefined &&
+              message.runId &&
+              this.liveRuns.isRunning(message.runId)
+            ),
+        );
         jobsBlock = this.jobsBlock(thread.jobs);
         if (regenerate) {
           const cut = regenerationCut(messages);
@@ -2030,6 +2527,7 @@ export abstract class AgentController<
       const skills = (await this.skills(req, { body: extraBody })) || undefined;
       const runTools = (await this.runTools(req, { body: extraBody, context })) || undefined;
       const usageLimits = (await this.usageLimits(req, { body: extraBody, context })) || undefined;
+      const trailingContext = (await this.trailingContext(req, { body: extraBody, context })) || undefined;
       // Above the cancel check, not below it, and that placement is the whole
       // reason this is a separate statement rather than an argument on the call
       // below: the comment on that check says nothing yields between it and
@@ -2078,12 +2576,16 @@ export abstract class AgentController<
       // it for its first frame.
       const runId = `run_${crypto.randomUUID()}`;
       let denials: readonly ToolDenial[] = [];
+      let ofRun: AgentRun | undefined;
       const ctx: AgentHookContext = {
         req,
         runId,
         threadId,
         get denials() {
           return denials;
+        },
+        get turn() {
+          return ofRun?.turn;
         },
       };
 
@@ -2096,6 +2598,15 @@ export abstract class AgentController<
         messages,
         turn,
         threadId,
+        // Beside other runs, a new message leaves their questions open
+        // (#1355): a run started parallel, or a turn that asked to be one
+        // and found the thread free (the other turns parked on questions).
+        // A server turn (`startTurn`: a scheduled report, an event, a job's
+        // result) always does, queued or not (#1371): the person said
+        // nothing, so nobody moved on from a question.
+        ...(mode.parallel || requested === "parallel" || serverTurns.has(req)
+          ? { keepOtherTurnsOpen: true }
+          : {}),
         // The run reports each message as it finishes it, the user's turn
         // first and before the model is asked anything. Only the store hears
         // about most of them here: the app's `onMessage` runs after the run,
@@ -2125,6 +2636,7 @@ export abstract class AgentController<
         // The turn's own tools and which tools are offered (#1123).
         ...(runTools?.tools && runTools.tools.length > 0 ? { tools: runTools.tools } : {}),
         ...(runTools?.activeTools ? { activeTools: runTools.activeTools } : {}),
+        ...(trailingContext ? { trailingContext } : {}),
         // Budgets on what the run may spend (#1124).
         ...(usageLimits ? { usageLimits } : {}),
         // Built from this request once, here, and the only thing the run knows
@@ -2190,6 +2702,7 @@ export abstract class AgentController<
           : {}),
       }) as AgentRun;
       denials = run.denials;
+      ofRun = run;
 
       // Registered before the response is built: the run is now owned by the
       // process rather than by this request, which is the property `/attach`
@@ -2210,7 +2723,21 @@ export abstract class AgentController<
       });
 
       started = run;
-      if (journal) this.follow(run, journal);
+      // What `busyPolicy` is told about this run while it goes.
+      const event = serverEvents.get(req);
+      runRecords.set(run, {
+        startedAt: new Date(),
+        owner,
+        turn: event
+          ? { ...(event.text ? { text: event.text } : {}), event: { name: event.name } }
+          : runningTurnMessage(turn),
+        joined: [],
+        body: extraBody,
+      });
+      if (journal) {
+        journals.set(run, journal);
+        this.follow(run, journal);
+      }
       // After `register`, so a watcher that attaches on hearing it finds it.
       if (threadId) announceRun(this.liveRuns, threadId, run.runId);
 
@@ -2229,7 +2756,10 @@ export abstract class AgentController<
           : null;
       const { stored, hooks } = this.persistRun(run, ctx, eventHooks, journal, early, afterTurn);
       persisted.set(run, stored);
+      turnRuns.set(req, { run, hooks });
       if (serverTurns.has(req)) serverTurns.set(req, { run, hooks });
+      // A parallel run's own `maxConcurrentRuns` slot, held until it ends.
+      if (mode.release) run.result().then(mode.release, mode.release);
       // Registered now, while the request is certainly open: `waitUntil` is
       // ignored once it has ended, and the run settling can end it before a
       // single hook has been called.
@@ -2277,16 +2807,32 @@ export abstract class AgentController<
           `You already have ${this.maxConcurrentRuns} conversations answering. Wait for one to finish, or stop it, and send again.`,
         );
       }
+      let response: Response | undefined;
       try {
-        return threadId
-          ? await this.withThread(threadId, owner, start, busyPolicies.get(req) ?? "supersede")
+        response = threadId
+          ? await this.withThread(threadId, owner, start, {
+              req,
+              // A regenerate replaces the thread's last answer, so it always
+              // supersedes: there is no answer to join or run beside.
+              requested: regenerate ? "supersede" : requested,
+              decide: !regenerate,
+              source: serverTurns.has(req) ? "server" : "client",
+              turn,
+              body: extraBody,
+              limitKey,
+            })
           : await start();
+        return response;
       } finally {
         // A turn that never started a run (a dead thread, stopped while it
-        // waited, a throw) frees its slot now; one that did, when the run ends.
+        // waited, a throw) frees its slot now; one that did, when the run ends;
+        // one that joined a run, when the stream it answers has ended.
         const run = started as AgentRun | null;
+        const held = response ? joinHolds.get(response) : undefined;
         if (run) {
           run.result().then(release, release);
+        } else if (held) {
+          held.then(release, release);
         } else {
           release();
         }
@@ -2340,15 +2886,15 @@ export abstract class AgentController<
   private async withThread(
     threadId: string,
     owner: string | null,
-    fn: () => Promise<Response>,
-    ifBusy: AgentTurnBusyPolicy = "supersede",
+    fn: (mode: StartMode) => Promise<Response>,
+    busy: BusyTurn,
   ): Promise<Response> {
-    if (ifBusy === "skip" && threadLocks.has(threadId)) {
+    if (busy.requested === "skip" && threadLocks.has(threadId)) {
       // A turn is setting up on the thread, or superseding its run: busy.
       return threadBusy(threadId);
     }
     for (;;) {
-      const outcome = await this.underThreadLock(threadId, owner, fn, ifBusy);
+      const outcome = await this.underThreadLock(threadId, owner, fn, busy);
       if (!("waitFor" in outcome)) return outcome.response;
       // A queued turn (#1178) waits for the run outside the lock, so a person
       // who sends meanwhile is not held up behind it: their turn takes the
@@ -2359,12 +2905,12 @@ export abstract class AgentController<
     }
   }
 
-  /** One pass of `withThread` under the thread's lock: start, or name the run a queued turn waits for. */
+  /** One pass of `withThread` under the thread's lock: start, join, or name the runs a waiting turn waits for. */
   private async underThreadLock(
     threadId: string,
     owner: string | null,
-    fn: () => Promise<Response>,
-    ifBusy: AgentTurnBusyPolicy,
+    fn: (mode: StartMode) => Promise<Response>,
+    busy: BusyTurn,
   ): Promise<{ response: Response } | { waitFor: Promise<unknown> }> {
     const previous = threadLocks.get(threadId) ?? Promise.resolve();
     let release!: () => void;
@@ -2375,39 +2921,295 @@ export abstract class AgentController<
     threadLocks.set(threadId, tail);
     await previous;
     try {
-      const live = await this.liveRuns.find({ threadId });
-      if (live && ifBusy !== "supersede" && this.liveRuns.isRunning(live.runId)) {
-        if (ifBusy === "skip") return { response: threadBusy(threadId) };
-        const run = this.liveRuns.get(live.runId);
-        // Its transcript stored, as for a supersede; a run of another
-        // process's registry has no `persisted`, and its end is enough.
-        const ended = run ? (persisted.get(run) ?? run.result()) : null;
-        if (ended) return { waitFor: ended.then(noop, noop) };
+      const running = this.liveRuns
+        .running({ threadId })
+        .map((info) => ({ info, run: this.liveRuns.get(info.runId) }))
+        .filter((entry): entry is { info: LiveRunInfo; run: AgentRun } => entry.run !== null);
+
+      if (running.length === 0) {
+        // A run that already ended is still `find`-able for `ttlMs`, and may
+        // still be appending its transcript: the load below has to come after.
+        const live = await this.liveRuns.find({ threadId });
+        const ended = live ? this.liveRuns.get(live.runId) : null;
+        if (ended) await persisted.get(ended);
+        return { response: await fn(SOLO) };
       }
-      if (
-        live &&
-        this.liveRuns.isRunning(live.runId) &&
-        !this.liveRuns.mayAccess(live.runId, owner)
-      ) {
+
+      const policy =
+        busy.intake?.policy ??
+        (busy.decide
+          ? await this.decideBusy(threadId, owner, running, busy)
+          : (busy.requested ?? "supersede"));
+      // Its transcript stored, as for a supersede; a run of another
+      // process's registry has no `persisted`, and its end is enough.
+      const ended = (run: AgentRun) => (persisted.get(run) ?? run.result()).then(noop, noop);
+
+      if (policy === "skip") return { response: threadBusy(threadId) };
+      if (policy === "queue") {
+        return { waitFor: Promise.all(running.map(({ run }) => ended(run))) };
+      }
+
+      if (policy === "join") {
+        const mine = running.filter(({ info }) => this.liveRuns.mayAccess(info.runId, owner));
+        // Joining puts a message into a run, which is someone else's to
+        // allow (#442), as superseding is.
+        if (mine.length === 0) return { response: notYourRun() };
+        // The newest run this caller may reach: the reply it is most likely
+        // reading.
+        const target = mine[mine.length - 1]!;
+        const joinTurn = joinTurnOf(busy.turn, serverEvents.get(busy.req));
+        const accepted = joinTurn ? (target.run.join?.(joinTurn) ?? null) : null;
+        // The run is ending (or this turn has nothing to join with): it is
+        // let finish, and the turn looks again after it, when the thread is
+        // most likely free.
+        if (!accepted) return { waitFor: ended(target.run) };
+        runRecords.get(target.run)?.joined.push(runningTurnMessage(joinTurn!));
+        return {
+          response: this.joinResponse(threadId, owner, target.run, accepted, joinTurn!, fn, busy),
+        };
+      }
+
+      if (policy === "parallel") {
+        // A parallel run reads the thread once the runs going on it have
+        // taken their own turns in: a turn that answers (or refuses) a
+        // question amends the message that asked it, and a parallel run that
+        // read the thread before that write would refuse it a second time.
+        // Waited for outside the lock, like a queued turn, then looked at
+        // again: a person who supersedes meanwhile is not held up by it.
+        const intake = (busy.intake ??= { policy, waited: new WeakSet() });
+        const behind = running.filter(
+          ({ run }) => !intakeOf(run, journals.get(run)).done && !intake.waited.has(run),
+        );
+        if (behind.length > 0) {
+          for (const { run } of behind) intake.waited.add(run);
+          const all = Promise.all(behind.map(({ run }) => intakeOf(run, journals.get(run)).promise));
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const limit = new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, PARALLEL_INTAKE_WAIT_MS);
+          });
+          return { waitFor: Promise.race([all, limit]).finally(() => clearTimeout(timer)) };
+        }
+        const { max, overflow } = threadRunLimit(
+          await this.maxThreadRuns(busy.req, { threadId, owner, body: busy.body }),
+        );
+        if (running.length >= max) {
+          // Looked at again once one has ended: another turn may have taken
+          // the slot by then, and this one waits again.
+          if (overflow === "queue") return { waitFor: Promise.race(running.map(({ run }) => ended(run))) };
+          return {
+            response: limitResponse(
+              429,
+              "too_many_runs",
+              `This conversation already has ${running.length} answers going. Wait for one to finish, or stop it, and send again.`,
+            ),
+          };
+        }
+        const slot =
+          busy.limitKey === null
+            ? noop
+            : runSlotsFor(this.liveRuns).take(
+                busy.limitKey,
+                `run:${crypto.randomUUID()}`,
+                this.maxConcurrentRuns,
+              );
+        if (!slot) {
+          return {
+            response: limitResponse(
+              429,
+              "too_many_runs",
+              `You already have ${this.maxConcurrentRuns} conversations answering. Wait for one to finish, or stop it, and send again.`,
+            ),
+          };
+        }
+        return { response: await fn({ parallel: true, release: slot }) };
+      }
+
+      // "supersede"
+      if (running.some(({ info }) => !this.liveRuns.mayAccess(info.runId, owner))) {
         // Superseding is a stop, and someone else's run is not this caller's to
         // stop (#442). Only while it is still going: an ended run is kept for
         // `ttlMs` but a turn after it touches nothing of it. Whether this caller
         // may post on the thread at all is `authorizeRequest`'s question.
         return { response: notYourRun() };
       }
-      const run = live ? this.liveRuns.get(live.runId) : null;
-      if (run) {
-        // A run that already ended is still `find`-able for `ttlMs`; stopping
-        // it is a no-op and waiting on it is the append it may still be doing.
+      for (const { run } of running) {
         run.stop({ reason: "superseded by a later turn on this thread" });
-        await persisted.get(run);
       }
-      return { response: await fn() };
+      await Promise.all(running.map(({ run }) => persisted.get(run)));
+      return { response: await fn(SOLO) };
     } finally {
       release();
       if (threadLocks.get(threadId) === tail) {
         threadLocks.delete(threadId);
       }
+    }
+  }
+
+  /** `busyPolicy`, asked about the runs going on the thread, its answer checked. */
+  private async decideBusy(
+    threadId: string,
+    owner: string | null,
+    running: { info: LiveRunInfo; run: AgentRun }[],
+    busy: BusyTurn,
+  ): Promise<AgentTurnBusyPolicy> {
+    const policy = await this.busyPolicy(busy.req, {
+      threadId,
+      owner,
+      requested: busy.requested,
+      source: busy.source,
+      turn: busy.turn,
+      body: busy.body,
+      running: running.map(({ info, run }) => {
+        const record = runRecords.get(run);
+        return {
+          runId: info.runId,
+          startedAt: record?.startedAt ?? new Date(info.startedAt),
+          owner: this.liveRuns.ownerOf(info.runId),
+          turn: record?.turn ?? {},
+          messageId: run.turn?.id,
+          body: record?.body,
+          joined: [...(record?.joined ?? [])],
+        };
+      }),
+    });
+    if (!BUSY_POLICIES.includes(policy)) {
+      throw new TypeError(
+        `AgentController.busyPolicy answers "supersede", "queue", "join", "parallel" or "skip"; got ${JSON.stringify(policy)}.`,
+      );
+    }
+    return policy;
+  }
+
+  /**
+   * The answer to a turn that joined `run`: that run's stream, from its first
+   * frame, so a client that was not following it gets the whole reply, and
+   * one that was drops what it already has (`seq`). The joined message shows
+   * on it as the run takes it in (a `message-id` frame, or `message`).
+   *
+   * If the run ends without taking the message (`taken` is `null`: it asked
+   * a question, failed, was superseded, ran into a limit), the message starts
+   * a turn of its own, as it would have a moment later, and the stream goes
+   * on with that run's frames. That turn starts whether or not anyone is
+   * still reading, so the message is answered either way. A run a caller
+   * stopped drops the message instead, and a turn that is refused stores it
+   * and reports the refusal: see `JoinAnswer`.
+   */
+  private joinResponse(
+    threadId: string,
+    owner: string | null,
+    run: AgentRun,
+    accepted: AgentRunJoin,
+    joinTurn: AgentJoinTurn,
+    fn: (mode: StartMode) => Promise<Response>,
+    busy: BusyTurn,
+  ): Response {
+    const answered = (target: AgentRun): JoinAnswer => ({
+      kind: "answered",
+      run: target,
+      hooks: persisted.get(target) ?? target.result().then(noop, noop),
+    });
+    // The second attempt's response, when the run did not take the message.
+    const followUp = accepted.taken.then(async (message): Promise<Response | null> => {
+      if (message || stoppedByCaller.has(run)) return null;
+      return this.withThread(threadId, owner, fn, busy);
+    });
+    const answer: Promise<JoinAnswer> = followUp.then(
+      async (next) => {
+        if (!next) return stoppedByCaller.has(run) ? { kind: "dropped" } : answered(run);
+        // It joined another run in turn: that one's answer is this one's.
+        const nested = joinAnswers.get(next);
+        if (nested) return nested;
+        const started = turnRuns.get(busy.req);
+        if (started && isEventStream(next)) return { kind: "answered", ...started };
+        const error = await AgentTurnError.from(next);
+        return { kind: "refused", error, stored: await this.storeUnanswered(threadId, run, joinTurn) };
+      },
+      async (err) => {
+        this.reportHookFailure(err);
+        const error = new AgentTurnError("The turn started for a joined message failed.", {
+          status: 500,
+        });
+        return { kind: "refused", error, stored: await this.storeUnanswered(threadId, run, joinTurn) };
+      },
+    );
+    if (serverTurns.has(busy.req)) serverJoins.set(busy.req, { run, answer });
+
+    async function* frames(): AsyncGenerator<AgentStreamFrame, void, void> {
+      let last = -1;
+      for await (const frame of run.frames()) {
+        last = frame.seq;
+        yield frame;
+      }
+      const next = await followUp.catch(() => null);
+      const outcome = await answer;
+      if (outcome.kind === "refused") {
+        next?.body?.cancel().catch(noop);
+        // On the joined run's stream, after its end: the client's copy is
+        // renamed to what was stored, and the refusal is its error.
+        if (outcome.stored && joinTurn.localId) {
+          yield {
+            seq: ++last,
+            event: {
+              type: "message-id",
+              localId: joinTurn.localId,
+              messageId: outcome.stored.id,
+              message: outcome.stored,
+            },
+          };
+        }
+        const limited = outcome.error.status === 429;
+        yield {
+          seq: ++last,
+          event: {
+            type: "error",
+            error: {
+              code: limited ? "rate_limited" : "unknown",
+              message: `Your message was not answered: ${outcome.error.message}`,
+              retryable: limited,
+            },
+          },
+        };
+        return;
+      }
+      if (!next?.body) return;
+      try {
+        for await (const frame of decodeSSE(next.body)) yield frame as AgentStreamFrame;
+      } finally {
+        // A reader that went away; the turn goes on without it.
+        next.body.cancel().catch(noop);
+      }
+    }
+
+    const finished = (async () => {
+      await run.result().catch(noop);
+      const outcome = await answer;
+      if (outcome.kind === "answered") await outcome.run.result().catch(noop);
+    })();
+    const response = sseResponse(frames());
+    joinHolds.set(response, finished);
+    joinAnswers.set(response, answer);
+    return response;
+  }
+
+  /**
+   * Stores a joined message no run answered, once the run it joined has
+   * stored its own transcript, so it lands after it. A turn start, not
+   * `joined`: it joined nothing in the end.
+   */
+  private async storeUnanswered(
+    threadId: string,
+    run: AgentRun,
+    turn: AgentJoinTurn,
+  ): Promise<AgentMessage | null> {
+    await persisted.get(run);
+    const message = userTurnMessage(turn.event ? turn.event.text : turn.text, turn.files, turn.event);
+    message.turn = message.id;
+    try {
+      await this.store.appendMessages(threadId, [message]);
+      return message;
+    } catch (err) {
+      this.reportHookFailure(err);
+      return null;
     }
   }
 
@@ -2455,7 +3257,15 @@ export abstract class AgentController<
     // because a client that gets one re-reads the thread anyway (see
     // `onAttachMiss`) and learns there. The thread's own 404 is `stream`'s,
     // where a turn would otherwise be persisted under it.
-    const live = await this.liveRuns.find({ threadId });
+    // A run the client names that is still going on this thread is the one it
+    // asks for: with parallel runs (`ifBusy: "parallel"`) the thread has more
+    // than one, and `watch` announces each by id. Otherwise the thread's
+    // newest, as before.
+    const named = typeof body.runId === "string" ? body.runId : undefined;
+    const live =
+      named && this.liveRuns.isRunning(named) && this.liveRuns.threadOf(named) === threadId
+        ? { runId: named }
+        : await this.liveRuns.find({ threadId });
     if (live && !this.liveRuns.mayAccess(live.runId, await this.runOwner(req))) {
       // Another caller's run (#442): none of its frames, ended or not.
       return notYourRun();
@@ -2541,7 +3351,6 @@ export abstract class AgentController<
     const owner = await this.runOwner(req);
     const liveRuns = this.liveRuns;
     const watchers = watchersFor(liveRuns);
-    const live = await liveRuns.find({ threadId });
 
     let listener: ((runId: string) => void) | null = null;
     let keepalive: ReturnType<typeof sseKeepalive> | null = null;
@@ -2578,7 +3387,8 @@ export abstract class AgentController<
           watchers.set(threadId, set);
         }
         set.add(send);
-        if (live && liveRuns.isRunning(live.runId)) send(live.runId);
+        // Every run going on it: more than one with parallel turns.
+        for (const { runId } of liveRuns.running({ threadId })) send(runId);
       },
       cancel() {
         close();
@@ -2652,6 +3462,20 @@ export abstract class AgentController<
       }
     }
     if (!runId && typeof body.threadId === "string") {
+      // By thread, every run going on it (parallel turns), when there is more
+      // than one: the stop button stops the conversation. The caller's own
+      // are stopped; refused only when none of them is its to stop.
+      const going = this.liveRuns.running({ threadId: body.threadId });
+      if (going.length > 1) {
+        const mine = going.filter((info) => this.liveRuns.mayAccess(info.runId, caller));
+        if (mine.length === 0) return notYourRun();
+        const reason = typeof body.reason === "string" ? body.reason : undefined;
+        for (const info of mine) {
+          const run = this.liveRuns.get(info.runId);
+          if (run) stopByCaller(run, { reason });
+        }
+        return { stopped: true };
+      }
       runId = (await this.liveRuns.find({ threadId: body.threadId }))?.runId;
     }
 
@@ -2666,7 +3490,7 @@ export abstract class AgentController<
       return notYourRun();
     }
 
-    run.stop({ reason: typeof body.reason === "string" ? body.reason : undefined });
+    stopByCaller(run, { reason: typeof body.reason === "string" ? body.reason : undefined });
 
     // Deliberately not awaiting `run.result()`. Unwinding means letting tools
     // in flight settle into `denied` results and finalizing the assistant
@@ -4094,7 +4918,7 @@ type EarlyTurn = {
  * change; an app that depended on their shape would break on a release that
  * never mentioned them.
  */
-const ENVELOPE_KEYS = ["turn", "clientRunId", "threadId", "messages", "regenerate"] as const;
+const ENVELOPE_KEYS = ["turn", "clientRunId", "threadId", "messages", "regenerate", "ifBusy"] as const;
 
 /**
  * The turn's own fields, which `toClientTurn` reads off the top level when the

@@ -182,6 +182,73 @@ describe("the fixed code in development", () => {
   });
 });
 
+describe("two verifies at once for a new address (#1356)", () => {
+  /** Both requests find no user before either creates one; the email is unique, as in a database. */
+  function racing() {
+    const find = provider.findUserByEmailAddress.bind(provider);
+    provider.findUserByEmailAddress = async (email: string) => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return find(email);
+    };
+    const create = provider.createUser.bind(provider);
+    provider.createUser = async (args) => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (provider.users.some((user) => user.email === args.email)) {
+        throw new Error(`Unique constraint violated on User.create for email`);
+      }
+      return create(args);
+    };
+  }
+
+  test("with the fixed code, both sign in to one account, created once", async () => {
+    vi.stubEnv("AUTH_FIXED_CODE", "000000");
+    const created = vi.fn();
+    auth = manager();
+    (auth.config as any).onUserCreated = created;
+    racing();
+    const answers = await Promise.allSettled([
+      verify({ email: EMAIL, code: "000000" }),
+      verify({ email: EMAIL, code: "000000" }),
+    ]);
+    expect(answers.map((answer) => answer.status)).toEqual(["fulfilled", "fulfilled"]);
+    const values = answers.map((answer) => (answer as PromiseFulfilledResult<{ isNewUser: boolean }>).value);
+    expect(values.map((value) => value.isNewUser).sort()).toEqual([false, true]);
+    expect(provider.users).toHaveLength(1);
+    expect(created).toHaveBeenCalledTimes(1);
+  });
+
+  test("with an issued code, one signs in and the other is a clean invalid_code", async () => {
+    auth = manager();
+    const { pin: code } = await auth.issueOneTimeCode(EMAIL, 6);
+    racing();
+    const answers = await Promise.allSettled([verify({ email: EMAIL, code }), verify({ email: EMAIL, code })]);
+    expect(answers.filter((answer) => answer.status === "fulfilled")).toHaveLength(1);
+    const refused = answers.find((answer) => answer.status === "rejected") as PromiseRejectedResult;
+    expect(refused.reason).toMatchObject({ errors: { code: ["invalid_code"] } });
+    expect(provider.users).toHaveLength(1);
+  });
+
+  test("an onUserCreated that throws still fails, even when the user is left behind", async () => {
+    vi.stubEnv("AUTH_FIXED_CODE", "000000");
+    auth = manager();
+    (auth.config as any).onUserCreated = async () => {
+      throw new Error("the welcome email failed");
+    };
+    // A transaction that does not roll back: the user stays.
+    await expect(verify({ email: EMAIL, code: "000000" })).rejects.toThrow("the welcome email failed");
+    expect(provider.users).toHaveLength(1);
+  });
+
+  test("an insert that fails for another reason still fails", async () => {
+    vi.stubEnv("AUTH_FIXED_CODE", "000000");
+    auth = manager();
+    provider.createUser = async () => {
+      throw new Error("the database is down");
+    };
+    await expect(verify({ email: EMAIL, code: "000000" })).rejects.toThrow("the database is down");
+  });
+});
+
 describe("isFixedSignInCode, for an app's own code flow", () => {
   test("honours AUTH_FIXED_CODE, in constant time, and nothing in production", async () => {
     const { fixedSignInCode, isFixedSignInCode } = await import("./isFixedSignInCode");

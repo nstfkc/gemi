@@ -108,7 +108,29 @@ export type ChatState<T extends ToolShapes = ToolShapes, O = unknown> = {
    * Each assistant message's own share is on `AgentMessage.usage` (#467).
    */
   usage?: Usage;
+  /**
+   * The run-scoped fields of every other run this state has followed, by
+   * `runId`: a second run streaming on the same thread at once (parallel
+   * turns), or one that ended and whose cursor still tells its redelivered
+   * frames apart. The fields above are the primary run's: the one `useChat`
+   * reports as `runId` and `cursor`. See `applyRunFrame`.
+   */
+  lanes?: Record<string, RunLane>;
 };
+
+/** The fields of `ChatState` that belong to one run. */
+export type RunLane = {
+  runId?: string;
+  seq: number;
+  cursorRunId?: string;
+  runMessageIds: string[];
+  loadedTools: string[];
+  finishReason?: FinishReason;
+  usage?: Usage;
+};
+
+/** How many ended runs' lanes are kept for their cursors. */
+const MAX_LANES = 16;
 
 export function initialChatState<T extends ToolShapes = ToolShapes, O = unknown>(
   init: {
@@ -135,6 +157,66 @@ export function initialChatState<T extends ToolShapes = ToolShapes, O = unknown>
     runMessageIds: [],
     loadedTools: [],
   };
+}
+
+/**
+ * The turn each tool call in `messages` was asked in (`AgentMessage.turn` of
+ * the message holding it), by `toolCallId`: for a pending call without its
+ * own `turn`. `undefined` for a call stored without one.
+ */
+function callTurns(messages: readonly AgentMessage<any, any>[]): Map<string, string | undefined> {
+  const turns = new Map<string, string | undefined>();
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type === "tool-call") turns.set(part.toolCallId, message.turn);
+    }
+  }
+  return turns;
+}
+
+/** The top-level call a pending one stands for: itself, or the call its sub-run is nested under. */
+const hostOf = (call: { toolCallId: string; path?: string[] }) => call.path?.[0] ?? call.toolCallId;
+
+/**
+ * The held calls an answer to the calls in `ids` settles: those calls, and
+ * the other questions of a sub-agent run one of them was asked in, since
+ * answering re-enters that run's tool once. Every other held call stays open
+ * on the server and here: another turn's question is that turn's to answer
+ * (#1355), and so is another question of the same reply (#1380).
+ */
+export function settledBy(
+  pending: readonly PendingToolCall<any>[],
+  ids: ReadonlySet<string>,
+): Set<string> {
+  const answered = pending.filter((call) => ids.has(call.toolCallId));
+  const runs = new Set(answered.filter((call) => call.path?.length).map(hostOf));
+  return new Set(
+    pending
+      .filter((call) => ids.has(call.toolCallId) || (call.path?.length && runs.has(hostOf(call))))
+      .map((call) => call.toolCallId),
+  );
+}
+
+/**
+ * The held calls in `pending` that belong to a turn none of `next` belongs
+ * to: what an `awaiting-input` frame for one turn leaves standing (#1355).
+ * None when a turn can't be told, as before.
+ */
+function othersTurns<T extends ToolShapes>(
+  messages: readonly AgentMessage<T, any>[],
+  pending: readonly PendingToolCall<T>[],
+  next: readonly PendingToolCall<T>[],
+): PendingToolCall<T>[] {
+  if (pending.length === 0) return [];
+  const turns = callTurns(messages);
+  const turnOf = (call: PendingToolCall<T>) => call.turn ?? turns.get(hostOf(call));
+  const asking = new Set(next.map(turnOf));
+  if (asking.has(undefined) || asking.size === 0) return [];
+  const replaced = new Set(next.map((call) => call.toolCallId));
+  return pending.filter((call) => {
+    const turn = turnOf(call);
+    return turn !== undefined && !asking.has(turn) && !replaced.has(call.toolCallId);
+  });
 }
 
 /**
@@ -191,6 +273,134 @@ export function applyFrame<T extends ToolShapes = ToolShapes, O = unknown>(
   return { ...reduce(state, frame.event, now), seq: frame.seq };
 }
 
+/**
+ * Apply one frame of the run `runId`, when several runs stream into one state
+ * at once: parallel turns on a thread, or a reply joined while it
+ * streams on two connections.
+ *
+ * `seq` and the run-scoped fields are per run, so each run is applied against
+ * its own: the primary run's are the state's own fields, every other run's a
+ * lane (`ChatState.lanes`). The transcript, `pending` and `error` are shared.
+ * A frame of a run the state has not seen starts a lane, or takes the primary
+ * place when the primary run is over. When the primary run ends and another is
+ * still going, that one becomes the primary. `runId` undefined (a stream that
+ * has not said which run it is) is the primary's, as `applyFrame` is.
+ *
+ * Which run a stream carries is learned from its `run-start`, so a caller
+ * applying a stream's frames passes that run's id from then on; a frame
+ * before it goes to the primary. Every gemi stream (a turn, an attach, a
+ * joined reply) opens with `run-start`.
+ */
+export function applyRunFrame<T extends ToolShapes = ToolShapes, O = unknown>(
+  state: ChatState<T, O>,
+  runId: string | undefined,
+  frame: AgentStreamFrame<T, O>,
+  now: string = new Date().toISOString(),
+): ChatState<T, O> {
+  if (runId === undefined || runId === state.cursorRunId) {
+    const next = applyFrame(state, frame, now);
+    return next === state ? state : promote(next);
+  }
+  const lanes = state.lanes ?? {};
+  const lane = lanes[runId];
+  if (!lane && state.runId === undefined) {
+    // The primary run is over (or there never was one): this run takes its
+    // place, and the run that held it keeps a lane for its cursor.
+    const kept = state.cursorRunId
+      ? keepLanes({ ...lanes, [state.cursorRunId]: laneOf(state) })
+      : lanes;
+    const next = applyFrame({ ...state, ...freshLane(runId), lanes: kept }, frame, now);
+    return promote(next);
+  }
+  const own = lane ?? freshLane(runId);
+  const swapped: ChatState<T, O> = { ...state, ...own };
+  const next = applyFrame(swapped, frame, now);
+  if (next === swapped) return state;
+  return promote({
+    ...next,
+    ...laneOf(state),
+    lanes: { ...lanes, [runId]: laneOf(next) },
+  });
+}
+
+/**
+ * `markAborted` over every run the state is following: what `stop()` does
+ * when more than one is streaming.
+ */
+export function markAllAborted<T extends ToolShapes = ToolShapes, O = unknown>(
+  state: ChatState<T, O>,
+): ChatState<T, O> {
+  let next = markAborted(state);
+  const lanes = { ...state.lanes };
+  for (const [runId, lane] of Object.entries(lanes)) {
+    if (lane.runId === undefined) continue;
+    const aborted = markAborted({ ...next, ...lane });
+    lanes[runId] = laneOf(aborted);
+    next = { ...next, messages: aborted.messages };
+  }
+  return { ...next, lanes };
+}
+
+/** The ids of the runs the state is following that are still going, the primary first. */
+export function liveRunIds(state: ChatState<any, any>): string[] {
+  const ids = state.runId ? [state.runId] : [];
+  for (const lane of Object.values(state.lanes ?? {})) {
+    if (lane.runId !== undefined && !ids.includes(lane.runId)) ids.push(lane.runId);
+  }
+  return ids;
+}
+
+/** The run's own position, if this state has followed it: what `/attach` is asked to resume from. */
+export function runCursor(state: ChatState<any, any>, runId: string): number | undefined {
+  if (state.cursorRunId === runId) return state.seq;
+  return state.lanes?.[runId]?.seq;
+}
+
+function laneOf(state: ChatState<any, any>): RunLane {
+  return {
+    runId: state.runId,
+    seq: state.seq,
+    cursorRunId: state.cursorRunId,
+    runMessageIds: state.runMessageIds,
+    loadedTools: state.loadedTools,
+    finishReason: state.finishReason,
+    usage: state.usage,
+  };
+}
+
+function freshLane(runId: string): RunLane {
+  return {
+    runId,
+    seq: -1,
+    cursorRunId: runId,
+    runMessageIds: [],
+    loadedTools: [],
+    finishReason: undefined,
+    usage: undefined,
+  };
+}
+
+/** The primary run ended while another is going: that one becomes the primary. */
+function promote<T extends ToolShapes, O>(state: ChatState<T, O>): ChatState<T, O> {
+  if (state.runId !== undefined || !state.lanes) return state;
+  const live = Object.entries(state.lanes).find(([, lane]) => lane.runId !== undefined);
+  if (!live) return state;
+  const [runId, lane] = live;
+  const lanes = { ...state.lanes };
+  delete lanes[runId];
+  if (state.cursorRunId) lanes[state.cursorRunId] = laneOf(state);
+  return { ...state, ...lane, lanes: keepLanes(lanes) };
+}
+
+/** At most `MAX_LANES` ended lanes, the oldest dropped first; live ones are all kept. */
+function keepLanes(lanes: Record<string, RunLane>): Record<string, RunLane> {
+  const entries = Object.entries(lanes);
+  const ended = entries.filter(([, lane]) => lane.runId === undefined);
+  if (ended.length <= MAX_LANES) return lanes;
+  const drop = new Set(ended.slice(0, ended.length - MAX_LANES).map(([id]) => id));
+  return Object.fromEntries(entries.filter(([id]) => !drop.has(id)));
+}
+
 function reduce<T extends ToolShapes, O>(
   state: ChatState<T, O>,
   event: AgentStreamFrame<T, O>["event"],
@@ -222,6 +432,7 @@ function reduce<T extends ToolShapes, O>(
       return withMessage(state, event.messageId, now, (message) => ({
         ...message,
         role: event.role,
+        ...(event.turn && message.turn === undefined ? { turn: event.turn } : {}),
       }));
 
     // The two additive cases, and the only two that can double text. `seq`
@@ -455,7 +666,13 @@ function reduce<T extends ToolShapes, O>(
     }
 
     case "awaiting-input":
-      return { ...state, runId: event.runId, pending: [...event.pending] };
+      // The questions of this run's turn (#1355): another turn's, still
+      // waiting beside it, are kept.
+      return {
+        ...state,
+        runId: event.runId,
+        pending: [...othersTurns(state.messages, state.pending, event.pending), ...event.pending],
+      };
 
     case "message-end":
       return withMessage(state, event.messageId, now, (message) => ({
@@ -507,7 +724,12 @@ function reduce<T extends ToolShapes, O>(
       // Clearing `pending` here is what keeps "pending is non-empty exactly
       // when the UI is awaiting input" true: a run that errored is not holding
       // a question any more, it is holding a failure.
-      return { ...state, error: event.error, pending: [] };
+      //
+      // Calls that name their turn are kept (#1355): they are other turns'
+      // questions, still open on the server. A run's own turn holds none by
+      // the time it fails, since it settled them on the way in, and
+      // `awaiting-input` is terminal.
+      return { ...state, error: event.error, pending: state.pending.filter((call) => call.turn !== undefined) };
 
     case "run-end":
       return {

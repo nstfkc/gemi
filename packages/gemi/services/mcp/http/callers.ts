@@ -86,7 +86,7 @@ export type McpApiKey = {
 
 export type McpApiKeyResolverOptions = {
   /**
-   * The prefix every key of this app starts with, like `"kyte_mcp_"`.
+   * The prefix every key of this app starts with, like `"acme_mcp_"`.
    * Required: a bearer token without it is left for the next resolver (an
    * OAuth access token), and a key is never looked up by a resolver that did
    * not issue it. Also what makes a leaked key recognisable to a secret

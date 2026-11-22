@@ -51,10 +51,10 @@ class ProxiedKernel extends Kernel {
       api: { rootRouter: Api },
       view: { root: createRoot(() => createElement("div")), rootRouter: Views },
       domains: {
-        root: "kyte.app",
+        root: "example.app",
         trustProxy: {
-          hostHeader: "x-kyte-host",
-          secret: { header: "x-kyte-proxy-secret", value: PROXY_SECRET },
+          hostHeader: "x-app-host",
+          secret: { header: "x-app-proxy-secret", value: PROXY_SECRET },
         },
         groups: [{ subdomain: "admin" }, { subdomain: ":site" }],
         custom: {
@@ -70,9 +70,9 @@ const app = new App({ kernel: ProxiedKernel });
 
 /** A request as it reaches the app: addressed to the platform's own domain. */
 const origin = (path: string, headers: Record<string, string> = {}) =>
-  new Request(`http://kyte.up.railway.app${path}`, {
+  new Request(`http://app.up.railway.app${path}`, {
     headers: {
-      "x-forwarded-host": "kyte.up.railway.app",
+      "x-forwarded-host": "app.up.railway.app",
       "x-forwarded-proto": "https",
       ...headers,
     },
@@ -80,7 +80,7 @@ const origin = (path: string, headers: Record<string, string> = {}) =>
 
 /** The same, having come through the CDN for `host`. */
 const viaCdn = (path: string, host: string) =>
-  origin(path, { "x-kyte-host": host, "x-kyte-proxy-secret": PROXY_SECRET });
+  origin(path, { "x-app-host": host, "x-app-proxy-secret": PROXY_SECRET });
 
 async function json(req: Request) {
   const res = (await app.fetch(req)) as Response;
@@ -100,8 +100,8 @@ describe("behind the CDN, with the secret", () => {
   });
 
   test("so is a subdomain of the root", async () => {
-    expect((await json(viaCdn("/api/who", "acme.kyte.app"))).body).toMatchObject({
-      host: "acme.kyte.app",
+    expect((await json(viaCdn("/api/who", "acme.example.app"))).body).toMatchObject({
+      host: "acme.example.app",
       group: ":site",
       params: { site: "acme" },
       custom: false,
@@ -109,8 +109,8 @@ describe("behind the CDN, with the secret", () => {
   });
 
   test("links are built on the host the client addressed, over https", async () => {
-    expect((await json(viaCdn("/api/url", "acme.kyte.app"))).body).toEqual({
-      url: "https://admin.kyte.app/users/7",
+    expect((await json(viaCdn("/api/url", "acme.example.app"))).body).toEqual({
+      url: "https://admin.example.app/users/7",
     });
   });
 
@@ -128,24 +128,24 @@ describe("behind the CDN, with the secret", () => {
 
 describe("around the CDN", () => {
   test("a spoofed host header without the secret is ignored", async () => {
-    const spoofed = origin("/api/who", { "x-kyte-host": "acme.com" });
-    // `kyte.up.railway.app` is outside the root and not a customer: 404.
+    const spoofed = origin("/api/who", { "x-app-host": "acme.com" });
+    // `app.up.railway.app` is outside the root and not a customer: 404.
     expect(await json(spoofed)).toEqual({ status: 404, body: "Unknown host" });
   });
 
   test("a wrong secret is the same as none", async () => {
     const spoofed = origin("/api/who", {
-      "x-kyte-host": "acme.com",
-      "x-kyte-proxy-secret": "not-the-proxy-secret",
+      "x-app-host": "acme.com",
+      "x-app-proxy-secret": "not-the-proxy-secret",
     });
     expect((await json(spoofed)).status).toBe(404);
   });
 
   test("the app's own domains still work when reached directly", async () => {
-    const direct = new Request("http://acme.kyte.app/api/who", {
-      headers: { "x-kyte-host": "acme.com" },
+    const direct = new Request("http://acme.example.app/api/who", {
+      headers: { "x-app-host": "acme.com" },
     });
-    expect((await json(direct)).body).toMatchObject({ host: "acme.kyte.app", custom: false });
+    expect((await json(direct)).body).toMatchObject({ host: "acme.example.app", custom: false });
   });
 });
 
@@ -155,14 +155,14 @@ describe("a `proxy()` route", () => {
       .spyOn(globalThis, "fetch")
       .mockImplementation(async () => new Response("ok", { status: 200 }));
 
-    const res = (await app.fetch(viaCdn("/api/upstream", "acme.kyte.app"))) as Response;
+    const res = (await app.fetch(viaCdn("/api/upstream", "acme.example.app"))) as Response;
 
     expect(res.status).toBe(200);
     expect(upstream).toHaveBeenCalledTimes(1);
     const headers = new Headers(upstream.mock.calls[0][1]?.headers as HeadersInit);
-    expect(headers.get("x-kyte-proxy-secret")).toBeNull();
+    expect(headers.get("x-app-proxy-secret")).toBeNull();
     // Nothing else changes about what it forwards.
-    expect(headers.get("x-kyte-host")).toBe("acme.kyte.app");
+    expect(headers.get("x-app-host")).toBe("acme.example.app");
     expect(headers.get("x-added")).toBe("yes");
   });
 });

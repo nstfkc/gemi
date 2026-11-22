@@ -1,6 +1,7 @@
 import { SQL } from "bun";
 import type { ConnectionConfig } from "./config";
 import { MissingDatabaseUrlError, inferDialect, type Dialect } from "./dialect";
+import { SQLITE_FILE_PRAGMAS, isFileDatabase, plainSqliteClient } from "./sqliteClient";
 import { AmbiguousSqlitePathError, resolveSqliteUrl, strandedDatabase } from "./sqlitePath";
 
 /**
@@ -117,7 +118,14 @@ export class CrossConnectionTransactionError extends Error {
  * declares and never queries therefore costs an object.
  */
 export class Connection implements DatabaseConnection {
+  /**
+   * The client every statement goes through. On a SQLite file it stands in
+   * for two Bun clients (#1375): transactions (`begin`) run on one connection
+   * and statements outside a transaction on the other. See `sqliteClient.ts`.
+   */
   public readonly sql: SQL;
+  /** The Bun clients behind `sql`: one, or on a SQLite file two. Closed together. */
+  private readonly clients: SQL[];
   public readonly dialect: Dialect;
   public readonly url: string;
 
@@ -160,9 +168,19 @@ export class Connection implements DatabaseConnection {
     }
 
     this.url = resolved.url;
-    this.sql = config.options
-      ? new SQL(this.url, config.options as any)
-      : new SQL(this.url);
+    const client = () => (config.options ? new SQL(this.url, config.options as any) : new SQL(this.url));
+    const first = client();
+    if (this.dialect === "sqlite" && isFileDatabase(first)) {
+      // Statements outside a transaction on `first`, transactions on the
+      // second (#1375). `:memory:` keeps one client: a second connection
+      // would open a second, empty database.
+      const transactions = client();
+      this.clients = [first, transactions];
+      this.sql = plainSqliteClient(first, transactions);
+    } else {
+      this.clients = [first];
+      this.sql = first;
+    }
     this.ready = this.configure();
   }
 
@@ -205,7 +223,49 @@ export class Connection implements DatabaseConnection {
    */
   private async configure(): Promise<void> {
     if (this.dialect !== "sqlite") return;
-    await this.sql.unsafe("pragma foreign_keys = ON");
+    if (this.clients.length === 1) {
+      await this.sql.unsafe("pragma foreign_keys = ON");
+      return;
+    }
+    // Every pragma on both clients, each issued before anything else it runs.
+    // WAL lets a plain read go on beside an open write transaction; it is a
+    // property of the file, but setting it twice costs nothing. `busy_timeout`
+    // stays 0: a wait inside SQLite would block the event loop (see
+    // `sqliteClient.ts`).
+    //
+    // All issued now, synchronously, so each is ahead of every statement a
+    // caller sends after the constructor returns. A file another process
+    // holds locked can refuse the switch to WAL, and SQLite then answers with
+    // the mode it kept rather than an error. The statements still work
+    // without WAL, but a plain read can then meet a writer's lock and wait its
+    // turn like a write, so it is worth one warning, not a failure.
+    let refused: unknown;
+    await Promise.all(
+      this.clients.flatMap((client) =>
+        SQLITE_FILE_PRAGMAS.map((pragma) => {
+          const run = client.unsafe(pragma) as Promise<unknown>;
+          if (!pragma.includes("journal_mode")) return run;
+          return run.then(
+            (rows) => {
+              const mode = (rows as { journal_mode?: string }[] | undefined)?.[0]?.journal_mode;
+              if (String(mode).toLowerCase() !== "wal") refused ??= mode;
+            },
+            (error) => {
+              refused ??= error;
+            },
+          );
+        }),
+      ),
+    );
+    if (refused !== undefined) {
+      console.warn(
+        `[gemi] The SQLite database for the "${this.name}" connection could not be switched to ` +
+          `WAL mode (${refused instanceof Error ? refused.message : `it stayed in "${String(refused)}"`}). ` +
+          `Statements still work, but a read outside a transaction can now wait for a writer, ` +
+          `and one issued inside a transaction through the pool fails after 5 seconds. Keep the ` +
+          `file on a local disk, and make sure no other process holds it open when the app starts.`,
+      );
+    }
   }
 
   // Escape hatch matching Bun's own API, so `connection.query` reads like `sql`
@@ -223,6 +283,6 @@ export class Connection implements DatabaseConnection {
     // rejection is expected rather than something to surface. Marked handled
     // here rather than suppressed globally, and only on the way out.
     this.ready.catch(() => {});
-    await this.sql.close();
+    await Promise.all(this.clients.map((client) => client.close()));
   }
 }

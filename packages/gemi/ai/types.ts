@@ -122,6 +122,19 @@ export type Usage = {
   cachedAudioInputTokens?: number;
   audioOutputTokens?: number;
   totalTokens: number;
+  /**
+   * What this usage cost in USD, at the prices `Usage.configure({ pricing })`
+   * (or the innermost `Usage.meter`'s) gives as a table (`ModelPrices`).
+   * Set per model call when the call finishes, and summed with the usage, so
+   * a run's `usage.costUsd` is its calls' total.
+   *
+   * - Absent when no table is in effect (no pricing, or a pricing function,
+   *   whose unit isn't known to be USD).
+   * - `null` when a call's model isn't in the table: gemi has no built-in
+   *   prices and never guesses one. A total with an unpriced call in it is
+   *   `null` too. The first unpriced call of each model warns once.
+   */
+  costUsd?: number | null;
 };
 
 export type FinishReason =
@@ -725,6 +738,38 @@ export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
    * a bubble. Only the server sets it: a client cannot send one.
    */
   event?: TurnEvent;
+  /**
+   * Set on a user message that joined a turn still going (`ifBusy: "join"`):
+   * the id of the message that started that turn. Sent while the run was
+   * answering, and read by that run at its next model call. Stored with the
+   * message.
+   *
+   * It belongs to the turn it names, wherever it is stored: with runs side by
+   * side (`"parallel"`) another turn's messages can come between. So it is
+   * not a turn start, `splitTurns` puts it with its turn, `contextWindow`
+   * never cuts between it and its turn, and a tool after it sees the turn's
+   * files and its own (`ctx.turn`). A message that came too late to join (its
+   * run had just ended) starts a turn of its own and does not carry this.
+   *
+   * @deprecated Read `turn`: a joined message carries the same id there. Kept
+   * for one minor version, for code that reads it (#1339).
+   */
+  joined?: string;
+  /**
+   * The turn this message belongs to: the id of the user message that started
+   * it, or the message's own id when it starts one (#1339). Set on every
+   * message a run writes: the turn's own message, each assistant message, a
+   * file a tool showed, a message that joined the turn, and the messages a
+   * turn that answers tool calls writes (those belong to the turn that asked).
+   * Stored with the message.
+   *
+   * It is what ties a reply to its message when parallel runs
+   * (`ifBusy: "parallel"`) interleave their messages in storage:
+   * `splitTurns` groups by it and `contextWindow` never cuts a message off
+   * from its turn. A message stored before gemi set it has none, and is grouped by
+   * position as before.
+   */
+  turn?: string;
 };
 
 /** What `AgentMessage.event` carries (#1181). */
@@ -782,6 +827,13 @@ export type PendingToolCall<T extends ToolShapes = ToolShapes> = {
      * answering a sub-agent's question writes what it writes for any other one.
      */
     path?: string[];
+    /**
+     * The turn that asked it (#1355): `AgentMessage.turn` of the message
+     * holding the call. A request answering it settles that turn's calls
+     * only, so a client keeps the questions of other turns open. Not signed,
+     * and absent on calls stored before it.
+     */
+    turn?: string;
     /**
      * What the tool's `approvalPreview` computed for this call (#1060): the
      * dry run to show next to Approve and Reject, such as the SQL and how many
@@ -877,7 +929,16 @@ export type ClientTurn = {
  */
 export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
   | { type: "run-start"; runId: string; threadId?: string }
-  | { type: "message-start"; messageId: string; role: "assistant" }
+  | {
+      type: "message-start";
+      messageId: string;
+      role: "assistant";
+      /**
+       * The message's `AgentMessage.turn` (#1344), when the run knows it: the
+       * turn a client shows the reply under while it streams.
+       */
+      turn?: string;
+    }
   | { type: "text-delta"; messageId: string; delta: string }
   /**
    * `id` is the provider's own reasoning-item id, and it is carried for one

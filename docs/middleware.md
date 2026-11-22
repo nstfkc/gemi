@@ -136,7 +136,7 @@ Limits how often one client may hit a route. `N` is the number of requests, `W` 
 | `rate-limit:100` | 100 requests per 60s |
 | `rate-limit:10,30` | 10 requests per 30s |
 
-The default bucket is the client's IP (the `x-forwarded-for` address the server settled on — see [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy)) **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
+The default bucket is the client's address, `clientAddress(req)` (see [The client's address](#the-clients-address)), **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
 
 Counting uses a **sliding window**, so a client cannot spend a full budget at the end of one window and another at the start of the next. See [Rate limiting](#rate-limiting) below for drivers, Redis, and limiting by something other than an IP.
 
@@ -630,9 +630,10 @@ App providers run after the framework's, so they can rebind anything the framewo
 | Driver | Use it when |
 | --- | --- |
 | `InMemoryRateLimiter` (default) | one instance, or local development |
+| `DatabaseRateLimiter` | budgets that must outlast a deploy (daily quotas, sign-up caps), or several instances without Redis |
 | `RedisRateLimiter` | more than one instance — counters are shared, so the limit is the limit |
 
-The in-memory driver keeps counters in the process that served the request. With N instances behind a load balancer the effective limit is N × the configured limit, and it resets on every deploy. Switch to Redis as soon as you scale past one:
+The in-memory driver keeps counters in the process that served the request. With N instances behind a load balancer the effective limit is N × the configured limit, and it resets on every deploy. In production, `gemi` logs a warning at boot when the queue uses the database driver and the rate limiter is still in memory. Switch to the database or Redis as soon as you scale past one instance, or as soon as a budget must last longer than a deploy:
 
 ```typescript
 // app/config/ratelimiter.ts
@@ -659,6 +660,69 @@ export default defineRateLimiterConfig({
 | `onError` | one `console.error` line a minute | called with every Redis failure |
 | `failOpen` | | deprecated: `true` is `onRedisError: "open"`, `false` is `"closed"` |
 
+#### The database driver
+
+`DatabaseRateLimiter` counts in the application's database, in the locks table the database queue already uses (`gemi_locks`). Budgets survive restarts and deploys, and every instance on the database shares them.
+
+**Create the table first.** An app on the database queue has it already. Otherwise add the Prisma model from [Locks](./jobs-and-queues.md#locks--the-lock-facade), or call `new DatabaseLockStore(app(DatabaseManager)).createTable()` once. Without it every limited request fails, since a database error refuses the call.
+
+```typescript
+// app/config/ratelimiter.ts
+import { DatabaseRateLimiter, defineRateLimiterConfig } from "gemi/services";
+
+export default defineRateLimiterConfig({
+  driver: new DatabaseRateLimiter(),
+});
+```
+
+```typescript
+// Three starts a day per visitor, durable across deploys.
+await RateLimiter.enforce(`starts:visitor:${visitor.id}`, { limit: 3, window: 86_400 });
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `table` | `gemi_locks` | the locks table the default store uses |
+| `prefix` | `ratelimit:` | prepended to every key, so limiter rows never meet a lock's |
+| `store` | a `DatabaseLockStore` on the default connection | another `LockStore`, or `() => LockStore` built on the first call |
+| `pruneEvery` | `1000` | every this many calls, delete ended windows in the background; `0` turns it off |
+| `pruneBatch` | `1000` | the most rows one prune deletes |
+| `hashKeys` | `true` | store each key as its HMAC-SHA256 under `SECRET`; a string keys with that secret instead, `false` stores keys as given |
+
+**What is stored.** Each key gets one row: the prefix in clear plus an HMAC of the key (`ratelimit:#3f9a…`), a count and the window's end. The key itself never reaches the database, so a client address (`RateLimitMiddleware` keys on it) or an email (the email-code limits) isn't kept. A row stays until its window ends and the next prune deletes it: the window plus up to `pruneEvery` calls, or your cron interval with `pruneEvery: 0`. For a daily limit that can be more than a day. Without `SECRET` (and no `hashKeys` secret given), a production boot fails, a development boot warns, and every limited call fails rather than storing keys in clear. Set a `SECRET` in test environments too. Changing `SECRET` starts every budget again.
+
+Unlike the other two drivers it counts a **fixed window**: the window starts at the first call after the last window ended and lasts `window`. A client that spends its whole budget at the end of one window gets a new budget when the next one starts. That suits quotas (so many a day). For a burst limit on a busy route, the sliding window of the memory and Redis drivers is smoother.
+
+Each call is one guarded write, so concurrent calls never admit more than the limit. On Postgres and SQLite that is a single upsert (one round trip), with one more read when it refuses. On MySQL it is three statements: insert the row if missing, update it, read it back. `allowed` is exact everywhere. `remaining` is exact for an allowed call on Postgres and SQLite; on MySQL, and `retryAfter` on a refusal everywhere, are read just after the decision and may already include other instances' calls, so treat them as hints.
+
+Costs are whole numbers (a fractional `cost` is rounded up). A `cost` above the limit is always refused, and a `cost` of `0` always passes: it reads the budget without checking it. With `hashKeys: false`, a key longer than 150 characters is stored as its SHA-256. A database error rejects the call, so the request fails rather than going unlimited.
+
+**Old windows are deleted as it goes.** Each key is one row, and a per-IP limit sees a new key for every new address, so every `pruneEvery` calls the limiter deletes up to `pruneBatch` windows that have ended, in the background. It deletes only rows under its own `prefix` (compared as a string, not a `LIKE` pattern), never a lock's. To prune on a schedule instead, set `pruneEvery: 0` and call `prune()` from a cron job:
+
+```typescript
+// app/config/ratelimiter.ts
+import { DatabaseRateLimiter, defineRateLimiterConfig } from "gemi/services";
+
+export const limiter = new DatabaseRateLimiter({ pruneEvery: 0 });
+export default defineRateLimiterConfig({ driver: limiter });
+```
+
+```typescript
+// app/cron/PruneRateLimits.ts
+import { CronJob } from "gemi/services";
+import { limiter } from "@/app/config/ratelimiter";
+
+export class PruneRateLimits extends CronJob {
+  name = "PruneRateLimits";
+  cron = CronJob.exp("*/5 * * * *");
+
+  async callback() {
+    // A batch at a time, until no ended window is left.
+    while ((await limiter.prune()) > 0) {}
+  }
+}
+```
+
 #### When Redis fails
 
 `onRedisError` decides what a call gets when Redis fails, times out, or the client says it is disconnected:
@@ -673,12 +737,25 @@ Not sending is what keeps an outage from being counted twice. Bun's client queue
 
 Each call costs at most `timeout`: without it a request would wait as long as Bun's client does, which is the connect timeout plus the reconnect loop (10 to 30 s), and forever when Redis stops answering on an open connection. `onError` gets a `RedisRateLimiterTimeoutError` for a call that timed out, a `RedisRateLimiterDisconnectedError` for one skipped because the client said it was disconnected, and the client's own error otherwise; while Redis stays down it also gets each failed `PING`, so at most one a second. The default writes one `console.error` line at most once a minute, with how many calls were answered without Redis since the last one, and a `console.info` line when Redis answers again.
 
+### The client's address
+
+`clientAddress(req)` is the address a limit should be keyed on. It is `clientIp(req)` (the `x-forwarded-for` address the server settled on, see [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy)), grouped:
+
+| `clientIp(req)` | `clientAddress(req)` |
+| --- | --- |
+| `203.0.113.7` | `203.0.113.7` |
+| `2001:db8:1:2:aaaa:bbbb:cccc:dddd` | `2001:db8:1:2::/64` |
+| `::ffff:203.0.113.7` (IPv4-mapped) | `203.0.113.7` |
+| `unknown`, or anything else that is not an address | unchanged |
+
+An IPv6 client is counted by its /64 because one host is usually given a whole /64 and can use any address in it: keyed on the full address, it would get a fresh budget each time it changed address. `clientAddress(req, { ipv6Prefix: 48 })` groups by a different prefix length (0 to 128; 128 keeps the full address). It is the default key of `rate-limit`, the [auth limits](./authentication.md) and the MCP endpoints' limits. Use it in your own keys too, and keep `clientIp(req)` for logs, where the exact address is what you want.
+
 ### Limiting by something other than an IP
 
 Under `gemi start` the IP cannot be spoofed past the proxies [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy) trusts, but it still does not distinguish two users behind one NAT. `configure()` replaces the key with anything you can read off the request:
 
 ```typescript
-import { RateLimitMiddleware, clientIp } from "gemi/http";
+import { RateLimitMiddleware, clientAddress } from "gemi/http";
 
 export default class extends MiddlewareServiceProvider {
   aliases = {
@@ -687,7 +764,7 @@ export default class extends MiddlewareServiceProvider {
     "user-rate-limit": RateLimitMiddleware.configure({
       limit: 60,
       window: 60,
-      key: (req) => `user:${req.ctx().user?.id ?? clientIp(req)}`,
+      key: (req) => `user:${req.ctx().user?.id ?? clientAddress(req)}`,
     }),
   };
 }

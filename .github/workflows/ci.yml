@@ -562,6 +562,15 @@ jobs:
         env:
           VITEST_MIN_PASSED: "20"
 
+      # The database rate limiter (#1341): the driver contract, a restart,
+      # long keys and pruning, on the lock store's upsert (Postgres) and its
+      # three-statement path (MySQL).
+      - name: Database rate limiter on Postgres and MySQL
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" services/rate-limiter/drivers/DatabaseRateLimiterDriver.test.ts -t "postgres|mysql"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "20"
+
       # OAuth connections' token table, encrypted, with the revision
       # compare-and-swap that serialises refreshes (#845).
       - name: OAuth connection store on Postgres and MySQL
@@ -569,6 +578,29 @@ jobs:
         working-directory: packages/gemi
         env:
           VITEST_MIN_PASSED: "14"
+
+      # Two email-code sign-ups at once for a new address (#1356): one user,
+      # no 500, the losing insert waiting on the winner's commit.
+      - name: Email-code sign-up race on Postgres
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" auth/AuthController.emailCodeRace.test.ts -t "postgres"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "3"
+
+      # Work a transaction doesn't wait for, run after it finished or during
+      # its COMMIT, is outside it (#1376). The COMMIT window needs Postgres.
+      - name: Detached transactions on Postgres
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" orm/detachedTransaction.test.ts -t "postgres"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "7"
+
+      # Two OAuth or password sign-ups at once for a new person (#1361).
+      - name: Sign-up race on Postgres
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" auth/AuthController.signUpRace.test.ts -t "postgres"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "4"
 
       # The change feed's database driver on Postgres: the driver contract,
       # publishing inside transactions, and LISTEN/NOTIFY between instances

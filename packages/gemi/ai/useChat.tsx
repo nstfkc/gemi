@@ -2,10 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RPC } from "../client/rpc";
 import { useParams } from "../client/useParams";
 import {
-  applyFrame,
+  applyRunFrame,
   initialChatState,
-  markAborted,
+  liveRunIds,
+  markAllAborted,
   openPending,
+  settledBy,
+  runCursor,
   type ChatState,
 } from "./client/reducer";
 import { decodeSSE } from "./client/sse";
@@ -64,6 +67,33 @@ type BodyOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { body: infer 
  * the difference will either look hung or look finished.
  */
 export type ChatStatus = "idle" | "submitted" | "streaming" | "awaiting-input" | "error";
+
+/**
+ * One reply of the chat's (#1344): a run streaming into it, or a turn waiting
+ * on its questions. With runs side by side (`ifBusy: "parallel"`) there is one
+ * per running reply, so a UI can show each with its own status and questions.
+ *
+ * - `id`: a client-side id, the same for as long as the entry is listed: a
+ *   key for the UI. A turn waiting on its questions is keyed by its turn
+ *   (`turn:<turn>`), and the answer to that turn alone keeps the id while it
+ *   streams. An answer that covers several turns' questions gets a new id.
+ * - `runId`: the run, once its stream says (`run-start`, or the run an attach
+ *   asked for). None before that, and none for a turn waiting on its
+ *   questions: its run has ended.
+ * - `turn`: the turn the reply belongs to, `AgentMessage.turn` of its
+ *   messages, once known: the pending calls of `pending` with the same `turn`
+ *   are its questions. None until the run's first message starts, for a run
+ *   answering calls that carry none, or a server older than this field.
+ * - `status`: `"submitted"` before the stream says anything, `"streaming"`
+ *   once a frame of it has landed, `"awaiting-input"` for a turn whose run
+ *   ended asking.
+ */
+export type ChatRun = {
+  id: string;
+  runId?: string;
+  turn?: string;
+  status: "submitted" | "streaming" | "awaiting-input";
+};
 
 /**
  * A pending call as `useChat` holds it: the server's `PendingToolCall`, plus
@@ -174,6 +204,26 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
    * Defaults to false.
    */
   watch?: boolean;
+  /**
+   * What a message sent while a reply is still coming does to it, asked of
+   * the server with each turn (`ifBusy`): `"supersede"` cuts the reply off
+   * and answers the new message, `"queue"` answers it once the reply is done,
+   * `"join"` hands it to the running reply, which reads it at its next step
+   * and goes on, and `"parallel"` starts a second reply beside the first.
+   * The controller's `busyPolicy` decides in the end, so an app can pick per
+   * message (join when it is about the same thing, parallel otherwise).
+   *
+   * Left out, the hook behaves as it always has: a send cuts off the reply
+   * this chat is streaming, here and on the server, before it posts, and
+   * sends no `ifBusy` (the server supersedes). Given, the hook leaves the
+   * running reply alone and follows whatever the server did: the reply it
+   * was showing goes on (and takes the new message, for a join), a parallel
+   * reply streams in beside it, each finishing on its own, and a superseded
+   * one ends `aborted` from the server's own frames. Threaded chats only:
+   * a stateless chat has no run to join and supersedes as before.
+   * `sendMessage`'s `ifBusy` overrides it per message.
+   */
+  ifBusy?: ChatBusyPolicy;
   /**
    * Merged into the request body, and read back on the server in
    * `instructions(req, { body })` and on every tool's `ctx.body`. `uploadFile`
@@ -399,6 +449,15 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    */
   pending: ChatPendingToolCall<ToolsOf<P>>[];
   /**
+   * The replies in progress (#1344): the requests in flight (a send, an
+   * answer, an attach that found a run), in the order they started, then the
+   * turns waiting on their questions. Empty when the chat is idle: an attach
+   * or a probe that has not found a run yet is not listed. One entry for a
+   * chat that never runs side by side; several with `ifBusy: "parallel"`.
+   * See `ChatRun`.
+   */
+  runs: ChatRun[];
+  /**
    * The deferred tools the model has pulled in during the run in flight.
    *
    * Somewhere for a UI to put "…looking for the right tool" instead of an
@@ -513,6 +572,8 @@ export type SendMessageOptions<P extends keyof AgentRoutes> = {
    * answers) has nowhere to keep it.
    */
   metadata?: Record<string, unknown>;
+  /** This message's `ifBusy`, over the hook's. See `UseChatParams.ifBusy`. */
+  ifBusy?: ChatBusyPolicy;
 };
 
 /** The second argument to `attach()`. */
@@ -602,7 +663,16 @@ export type AgentRequestBody = {
    * store and runs that turn again (#451). Sent by `regenerate()`.
    */
   regenerate?: boolean;
+  /** What to do if the thread has a run going. See `UseChatParams.ifBusy`. */
+  ifBusy?: ChatBusyPolicy;
 } & Record<string, unknown>;
+
+/**
+ * What a turn asks the server to do when its thread already has a run going:
+ * the server's `AgentTurnBusyPolicy` a client may ask for. See
+ * `UseChatParams.ifBusy`.
+ */
+export type ChatBusyPolicy = "supersede" | "queue" | "join" | "parallel";
 
 /**
  * What `POST /api<path>/attach` receives: which thread, and how far this client
@@ -891,6 +961,73 @@ function turnFrom(message: AgentMessage): ClientTurn {
  * dropped, while `progress` is not. The client's own copy is untouched: this
  * shapes the request body only, so a UI still renders every yield it received.
  */
+/** Answers going out as one turn, and the turns of the calls they answer (`undefined` when one names none). */
+type AnswerBatch = {
+  results: ClientToolResult[];
+  flushed: Promise<void>;
+  turns?: ReadonlySet<string>;
+};
+
+/** The turns of the held calls `results` answer, or `undefined` when one can't be told. */
+function turnsOf(pending: readonly PendingToolCall[], results: readonly ClientToolResult[]) {
+  const turns = new Set<string>();
+  for (const result of results) {
+    const turn = pending.find((call) => call.toolCallId === result.toolCallId)?.turn;
+    if (!turn) return undefined;
+    turns.add(turn);
+  }
+  return turns;
+}
+
+/** Whether two answers are to different turns' questions, both known. */
+function besideEachOther(a: ReadonlySet<string> | undefined, b: ReadonlySet<string> | undefined) {
+  return a !== undefined && b !== undefined && ![...a].some((turn) => b.has(turn));
+}
+
+/**
+ * `next` with the `answering` mark kept on the calls `previous` had marked
+ * (#1380). An `awaiting-input` frame restates every open question of its
+ * turn, a card whose answer is waiting to go out among them, and the reducer
+ * takes the frame's copies. Untouched when nothing was marked.
+ */
+function keepAnswering<S extends { pending: PendingToolCall[] }>(previous: S, next: S): S {
+  if (next === previous || next.pending === previous.pending) return next;
+  const marked = new Set(
+    (previous.pending as ChatPendingToolCall[])
+      .filter((call) => call.answering)
+      .map((call) => `${(call.path ?? []).join("/")}#${call.toolCallId}`),
+  );
+  if (marked.size === 0) return next;
+  let changed = false;
+  const pending = (next.pending as ChatPendingToolCall[]).map((call) => {
+    if (call.answering || !marked.has(`${(call.path ?? []).join("/")}#${call.toolCallId}`))
+      return call;
+    changed = true;
+    return { ...call, answering: true as const };
+  });
+  return changed ? { ...next, pending } : next;
+}
+
+/**
+ * `history` with each held call in the `pending` of the message that made it
+ * (the top-level call, for a sub-agent's question), as a stored thread keeps
+ * them (#1052). Messages that hold none are left as they are.
+ */
+function withHeld(messages: AgentMessage[], held: readonly PendingToolCall[]): AgentMessage[] {
+  if (held.length === 0) return messages;
+  return messages.map((message) => {
+    const calls = new Set(
+      message.content.flatMap((part) => (part.type === "tool-call" ? [part.toolCallId] : [])),
+    );
+    const asked = held.filter((call) => calls.has(call.path?.[0] ?? call.toolCallId));
+    if (asked.length === 0) return message;
+    return {
+      ...message,
+      pending: asked.map(({ answering: _answering, ...call }: ChatPendingToolCall) => call),
+    };
+  });
+}
+
 function forWire(messages: AgentMessage[]): AgentMessage[] {
   return messages.map((full) => {
     // The client's own key and the app's notes on a message it sent (#818):
@@ -945,6 +1082,63 @@ function findToolCall(messages: AgentMessage[], toolCallId: string): ToolCallPar
   return undefined;
 }
 
+/**
+ * One request of the hook's in flight: a send, or an attach. `runId` is the
+ * run its stream carries, once known (its `run-start`, or the run an attach
+ * asked for), which is what a later `stop()` or supersede names it by.
+ */
+type Flight = {
+  controller: AbortController;
+  clientRunId?: string;
+  runId?: string;
+  /**
+   * The run an attach asked for, which its frames are applied as until a
+   * `run-start` names one. Not a handle to stop by: the server may have
+   * answered with another run's tail.
+   */
+  asked?: string;
+  /**
+   * The turns this send carries on (#1355): the turns of the calls an
+   * answer answers, or `"new"` for a new message, which is a turn of its
+   * own. Unknown for an attach, or an answer to calls without a `turn`.
+   */
+  turns?: ReadonlySet<string> | "new";
+  /** The turn its stream's messages belong to, from their messages (#1344). */
+  turn?: string;
+  /** `ChatRun.id` of this request. */
+  id: string;
+  /** A frame of its stream has been applied: it is streaming. */
+  seen?: boolean;
+};
+
+/** `ChatRun` of a request in flight. */
+function flightRun(flight: Flight): ChatRun {
+  const answered = flight.turns instanceof Set && flight.turns.size === 1 ? [...flight.turns][0] : undefined;
+  const turn = flight.turn ?? answered;
+  const runId = flight.runId ?? flight.asked;
+  return {
+    id: flight.id,
+    ...(runId ? { runId } : {}),
+    ...(turn ? { turn } : {}),
+    status: flight.seen ? "streaming" : "submitted",
+  };
+}
+
+/**
+ * Whether `flight` is a reply in progress. An attach (a mount, focus or
+ * `watch` probe, `reattach`) is one only once a frame of a run has landed:
+ * until then it may find nothing, and showing it would show a reply that
+ * isn't there.
+ */
+const listed = (flight: Flight) => flight.clientRunId !== undefined || flight.seen === true;
+
+const sameRuns = (a: ChatRun[], b: ChatRun[]) =>
+  a.length === b.length &&
+  a.every(
+    (run, i) =>
+      run.id === b[i]!.id && run.runId === b[i]!.runId && run.turn === b[i]!.turn && run.status === b[i]!.status,
+  );
+
 /** How often a run announced mid-stream checks whether the chat is free to attach it. */
 const WATCH_RECHECK_MS = 100;
 /** The first wait before `watch` follows the thread again after a dropped stream. */
@@ -973,6 +1167,7 @@ export function useChat<P extends keyof AgentRoutes>(
     attach: attachOnMount = true,
     reattachOnFocus = false,
     watch = false,
+    ifBusy: hookIfBusy,
     body: extraBody,
     headers,
     onFinish,
@@ -1026,10 +1221,23 @@ export function useChat<P extends keyof AgentRoutes>(
   const [phase, setPhase] = useState<"idle" | "submitted" | "streaming">("idle");
 
   const mountedRef = useRef(true);
-  // The request in flight, carrying the id `stop()` names it by. The two travel
-  // together because a controller with no handle can only close the connection,
-  // and closing the connection is exactly what no longer stops a run.
-  const abortRef = useRef<{ controller: AbortController; clientRunId?: string } | null>(null);
+  // The requests in flight, each carrying the ids `stop()` names it by. The
+  // two travel together because a controller with no handle can only close
+  // the connection, and closing the connection is exactly what no longer
+  // stops a run. More than one when replies stream at once: a parallel turn,
+  // or a send while a reply streams that did not cut it off (`ifBusy`).
+  const flightsRef = useRef(new Set<Flight>());
+  // `runs` of the requests in flight, set whenever `flightsRef` or a
+  // flight's run or turn changes (`syncRuns`). A ref alone would not render.
+  const [flightRuns, setFlightRuns] = useState<ChatRun[]>([]);
+  const syncRuns = useCallback(() => {
+    if (!mountedRef.current) return;
+    const next = [...flightsRef.current].filter(listed).map(flightRun);
+    setFlightRuns((current) => (sameRuns(current, next) ? current : next));
+  }, []);
+  // The phase as last set, for a send that must not turn a streaming chat
+  // back to `submitted`.
+  const phaseRef = useRef<"idle" | "submitted" | "streaming">("idle");
   // The latest callbacks, so a stream started three renders ago still calls the
   // ones the component has now instead of a stale closure.
   const handlers = useRef({
@@ -1050,15 +1258,15 @@ export function useChat<P extends keyof AgentRoutes>(
     onAttachMiss,
     onRetry,
   };
-  const requestRef = useRef({ base, headers, extraBody });
-  requestRef.current = { base, headers, extraBody };
+  const requestRef = useRef({ base, headers, extraBody, ifBusy: hookIfBusy });
+  requestRef.current = { base, headers, extraBody, ifBusy: hookIfBusy };
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      abortRef.current?.controller.abort();
-      abortRef.current = null;
+      for (const flight of flightsRef.current) flight.controller.abort();
+      flightsRef.current.clear();
     };
   }, []);
 
@@ -1070,8 +1278,19 @@ export function useChat<P extends keyof AgentRoutes>(
   }, []);
 
   const setPhaseSafe = useCallback((next: "idle" | "submitted" | "streaming") => {
+    phaseRef.current = next;
     if (mountedRef.current) setPhase(next);
   }, []);
+
+  /** Ends a request: idle once none is left. */
+  const land = useCallback(
+    (flight: Flight) => {
+      if (!flightsRef.current.delete(flight)) return;
+      syncRuns();
+      if (flightsRef.current.size === 0) setPhaseSafe("idle");
+    },
+    [setPhaseSafe, syncRuns],
+  );
 
   /**
    * Report a failure without touching the conversation.
@@ -1132,16 +1351,35 @@ export function useChat<P extends keyof AgentRoutes>(
   );
 
   const consume = useCallback(
-    async (response: Response, signal: AbortSignal) => {
+    async (response: Response, flight: Flight) => {
+      const signal = flight.controller.signal;
       for await (const frame of decodeSSE(response.body)) {
         // The signal is checked here as well as by `fetch`, because `stop()`
         // has to stop the *UI* whether or not the transport under it honours an
         // abort promptly. A token that lands after the user cancelled is worse
         // than one that never arrives.
         if (!mountedRef.current || signal.aborted) return;
+        // Which run the stream carries, so each run is applied against its own
+        // cursor when several stream at once (`applyRunFrame`). A stream can
+        // carry a second run after the first: a joined message the run did
+        // not take starts a turn of its own on the same stream.
+        if (frame.event.type === "run-start") flight.runId = frame.event.runId;
         setPhaseSafe("streaming");
         const previous = stateRef.current!;
-        const next = applyFrame(previous, frame);
+        const next = keepAnswering(
+          previous,
+          applyRunFrame(previous, flight.runId ?? flight.asked, frame),
+        );
+        // `runs` (#1344): streaming from its first frame, and its turn from
+        // the message a frame names: a `message-start`, or for an attach
+        // whose tail began after it, the message already in the transcript.
+        const named = "messageId" in frame.event ? frame.event.messageId : undefined;
+        const turn = named ? next.messages.find((m: AgentMessage) => m.id === named)?.turn : undefined;
+        if (!flight.seen || frame.event.type === "run-start" || (turn && flight.turn !== turn)) {
+          flight.seen = true;
+          if (turn) flight.turn = turn;
+          syncRuns();
+        }
         // A frame at or below the cursor. Reattachment and retrying proxies both
         // produce these; applying the deltas again would double the text, and
         // firing `onFinish` again would double whatever the app does with it.
@@ -1214,7 +1452,7 @@ export function useChat<P extends keyof AgentRoutes>(
         }
       }
     },
-    [commit, setPhaseSafe],
+    [commit, setPhaseSafe, syncRuns],
   );
 
   const send = useCallback(
@@ -1224,9 +1462,47 @@ export function useChat<P extends keyof AgentRoutes>(
         regenerate?: boolean;
         body?: Record<string, unknown>;
         metadata?: Record<string, unknown>;
+        ifBusy?: ChatBusyPolicy;
       } = {},
     ) => {
-      const { base: url, extraBody } = requestRef.current;
+      const { base: url, extraBody, ifBusy: defaultIfBusy } = requestRef.current;
+      // Only on a thread: a stateless chat has no run on the server to join or
+      // run beside, so it supersedes as it always has.
+      const asked = stateRef.current!.threadId ? (options.ifBusy ?? defaultIfBusy) : undefined;
+      // The turns an answer carries on, when every answered call names one.
+      const held = stateRef.current!.pending as ChatPendingToolCall[];
+      const answerTurns = (() => {
+        if (!turn.toolResults?.length || turn.text || turn.files?.length) return undefined;
+        const turns = new Set<string>();
+        for (const result of turn.toolResults) {
+          const call = held.find((candidate) => candidate.toolCallId === result.toolCallId);
+          if (!call?.turn) return undefined;
+          turns.add(call.turn);
+        }
+        return turns;
+      })();
+      // An answer to another turn's question than the ones this chat is
+      // streaming (#1355) is that turn's to carry on: it runs beside them
+      // (`parallel`), and cuts nothing. Without this, answering A while B's
+      // answer streams stopped B.
+      const beside =
+        stateRef.current!.threadId !== undefined &&
+        answerTurns !== undefined &&
+        flightsRef.current.size > 0 &&
+        // A flight whose turns are unknown (an attach, `reattach`, a run
+        // `watch` announced) counts as beside it too: the answer's own turns
+        // are known, so it is not the stream's to cut, and the server still
+        // decides through `busyPolicy`.
+        [...flightsRef.current].every(
+          (flight) =>
+            flight.turns === undefined ||
+            flight.turns === "new" ||
+            ![...flight.turns].some((id) => answerTurns.has(id)),
+        );
+      const ifBusy = beside ? "parallel" : asked;
+      // Whether this send cuts off what this chat is streaming itself. Asked
+      // for anything else, the server decides, and the streams show it.
+      const cuts = ifBusy === undefined || ifBusy === "supersede";
       // This send's own fields over the hook's (#818), read now rather than
       // through a render, so a send never goes out with another's.
       const body = options.body
@@ -1235,9 +1511,10 @@ export function useChat<P extends keyof AgentRoutes>(
             ...options.body,
           }
         : extraBody;
-      // One run at a time per hook. A second send while the first is streaming
-      // is a user who changed their mind, not a request to interleave two
-      // assistants into one transcript.
+      // One run at a time per hook, unless the app asked otherwise (`ifBusy`).
+      // A second send while the first is streaming is then a user who changed
+      // their mind, not a request to interleave two assistants into one
+      // transcript. With `ifBusy` the server decides, and nothing is cut here.
       //
       // The superseded turn is marked aborted as it is cut, not left to whatever
       // stamps it later: a message with no finish reason is indistinguishable
@@ -1245,13 +1522,28 @@ export function useChat<P extends keyof AgentRoutes>(
       // find it and label an answer that stopped mid-sentence "stop". In
       // stateless mode that reason is posted back to the server on every later
       // turn, so the model would be told the interruption never happened.
-      const superseded = abortRef.current;
-      superseded?.controller.abort();
+      const superseded = cuts ? [...flightsRef.current] : [];
+      for (const flight of superseded) {
+        flight.controller.abort();
+        flightsRef.current.delete(flight);
+      }
       const clientRunId = localId();
       const controller = new AbortController();
-      abortRef.current = { controller, clientRunId };
+      // An answer to one turn's questions keeps that turn's entry id, so a row
+      // keyed by `run.id` stays mounted from waiting to streaming. Unless a
+      // request in flight already carries it (a second answer to that turn).
+      const single = answerTurns?.size === 1 ? `turn:${[...answerTurns][0]}` : undefined;
+      const flight: Flight = {
+        controller,
+        clientRunId,
+        id: single && ![...flightsRef.current].some((other) => other.id === single) ? single : clientRunId,
+        ...(answerTurns ? { turns: answerTurns } : turn.text || turn.files?.length ? { turns: "new" as const } : {}),
+      };
+      const wasBusy = flightsRef.current.size > 0;
+      flightsRef.current.add(flight);
+      syncRuns();
 
-      if (superseded) {
+      for (const cut of superseded) {
         // Aborting the fetch only closes the connection, and a closed connection
         // no longer stops a run: the superseded one would keep going server
         // side, blind to this turn and still billing. So it is stopped the way
@@ -1262,10 +1554,14 @@ export function useChat<P extends keyof AgentRoutes>(
         // anyway when the new turn reaches the thread. Not awaited: the server
         // orders the two, and a round trip before every "changed my mind" would
         // be paid for nothing.
-        const { runId, threadId } = stateRef.current!;
+        const { threadId } = stateRef.current!;
+        // The run its stream named; a lone one that named none is the run the
+        // state is showing, as before.
+        const runId =
+          cut.runId ?? (superseded.length === 1 ? stateRef.current!.runId : undefined);
         const body: AgentStopBody = {
           ...(runId ? { runId } : {}),
-          ...(superseded.clientRunId ? { clientRunId: superseded.clientRunId } : {}),
+          ...(cut.clientRunId ? { clientRunId: cut.clientRunId } : {}),
         };
         if (Object.keys(body).length > 0) {
           // A failure here does not go through `fail`. The post is not awaited,
@@ -1280,7 +1576,8 @@ export function useChat<P extends keyof AgentRoutes>(
         }
       }
 
-      const previous = superseded ? markAborted(stateRef.current!) : stateRef.current!;
+      const previous =
+        superseded.length > 0 ? markAllAborted(stateRef.current!) : stateRef.current!;
       const history = previous.messages;
       // The id this turn's message shows under until the server's `message-id`
       // renames it (#466). The app's own when it passed one.
@@ -1309,23 +1606,40 @@ export function useChat<P extends keyof AgentRoutes>(
       // back to plain pending if the request fails: dropping them on the way
       // out left a failed approval with no card to answer again.
       //
-      // Every held call is marked, not only the answered ones: the turn
-      // resolves all of them (the server denies what it leaves out), so a
-      // second card answered while this one flies would only race it.
+      // Only the answered calls are marked (and the other questions of a
+      // sub-agent run one of them came from, which its answer re-enters
+      // once). The reply's other questions (#1380) and other turns' (#1355)
+      // stay open on the server, and here.
+      // A plain new message's held calls that name their turn: put back
+      // once the run ends if the server refused none of them (no result in
+      // the transcript), which is what a `busyPolicy` answering "parallel"
+      // does (#1355). A single-turn chat sees the refusals, and nothing
+      // comes back.
+      const setAside =
+        authored.length > 0 && !turn.toolResults?.length && ifBusy !== "parallel" && previous.threadId
+          ? // Not a card being answered: its answer settles it, whatever the
+            // message's run does.
+            (previous.pending as ChatPendingToolCall[]).filter((call) => call.turn !== undefined && !call.answering)
+          : [];
       const answered = turn.toolResults?.length
-        ? new Set(previous.pending.map((call: PendingToolCall) => call.toolCallId))
+        ? settledBy(
+            previous.pending,
+            new Set(turn.toolResults.map((result) => result.toolCallId)),
+          )
         : null;
       // Run once the server has said whether it took the turn, and only while
       // this send is still the hook's request: a send that superseded it has
       // already settled `pending` for its own turn.
       let settled = false;
       const settle = (taken: boolean) => {
-        if (!answered || settled || abortRef.current?.controller !== controller) return;
+        if (!answered || settled || !flightsRef.current.has(flight)) return;
         settled = true;
         const current = stateRef.current!;
         commit({
           ...current,
-          pending: taken ? [] : withAnswering(current.pending, answered, false),
+          pending: taken
+            ? current.pending.filter((call: PendingToolCall) => !answered.has(call.toolCallId))
+            : withAnswering(current.pending, answered, false),
         });
       };
 
@@ -1335,16 +1649,26 @@ export function useChat<P extends keyof AgentRoutes>(
         // The error belonged to the attempt being retried. Leaving it up while
         // the retry streams is a UI that reports a failure and a success at once.
         error: null,
-        // Answered or not, this turn resolves every pending call — the server
-        // denies whatever the turn left out — so holding them would leave the UI
+        // A new message resolves every pending call — the server denies
+        // whatever the turn left out — so holding them would leave the UI
         // asking a question that is already settled. No local tool-result parts
         // are fabricated here: the server emits one per call, denials included,
         // and guessing at the output of a call it has not run yet would be a lie
         // the stream then contradicts. A turn that answers keeps them until the
         // server takes it (`settle`), so a failed answer can be sent again.
-        pending: answered ? withAnswering(previous.pending, answered, true) : [],
+        // A new message beside other turns (`ifBusy: "parallel"`) leaves
+        // their questions open on the server (#1355), so they stay here too.
+        // Asked otherwise they go now, as before; the ones the server left
+        // open (the app's `busyPolicy` ran the message beside them) come
+        // back when the run ends (`setAside`).
+        pending: answered
+          ? withAnswering(previous.pending, answered, true)
+          : ifBusy === "parallel" && authored.length > 0
+            ? previous.pending
+            : [],
       });
-      setPhaseSafe("submitted");
+      // A reply still streaming beside this send keeps the chat `streaming`.
+      if (!wasBusy || phaseRef.current !== "streaming") setPhaseSafe("submitted");
 
       try {
         const payload: AgentRequestBody = {
@@ -1377,11 +1701,19 @@ export function useChat<P extends keyof AgentRoutes>(
           threadId: stateRef.current!.threadId,
           // Stripped of the progress logs, which no part of the server reads and
           // which every later turn would otherwise re-upload.
-          messages: stateRef.current!.threadId ? undefined : forWire(history),
+          // A stateless history carries the questions still held (#1380), on
+          // the messages that asked them, as a stored thread does: the server
+          // keeps a reply's other questions open only when it can see them.
+          messages: stateRef.current!.threadId
+            ? undefined
+            : forWire(withHeld(history, previous.pending as PendingToolCall[])),
           // On a thread the server holds the history, so trimming the local
           // copy alone changes nothing: this asks it to drop its last answer
           // and run the turn before it again (#451). Stateless needs no flag.
           ...(options.regenerate && stateRef.current!.threadId ? { regenerate: true } : {}),
+          // Asked only when the app chose one, so a chat that did not sends
+          // what it always sent.
+          ...(ifBusy !== undefined ? { ifBusy } : {}),
         };
         const response = await post(url, payload, controller.signal);
         if (!response.ok) {
@@ -1393,7 +1725,21 @@ export function useChat<P extends keyof AgentRoutes>(
         // A 2xx is the server taking the turn: the answered calls are its now,
         // and the stream reports what became of them.
         settle(true);
-        await consume(response, controller.signal);
+        await consume(response, flight);
+        if (setAside.length > 0) {
+          const current = stateRef.current!;
+          const resolved = new Set(
+            current.messages.flatMap((message: AgentMessage) =>
+              message.content.flatMap((part) => (part.type === "tool-result" ? [part.toolCallId] : [])),
+            ),
+          );
+          const held = new Set(current.pending.map((call: PendingToolCall) => call.toolCallId));
+          const open = setAside.filter(
+            (call) => !resolved.has(call.path?.[0] ?? call.toolCallId) && !held.has(call.toolCallId),
+          );
+          // Ahead of what the message's own run asked: they were asked first.
+          if (open.length > 0) commit({ ...current, pending: [...open, ...current.pending] });
+        }
       } catch (error) {
         // An abort is `stop()` or unmount; both already put the UI where it
         // belongs, and reporting it as a failure would be wrong twice.
@@ -1406,13 +1752,10 @@ export function useChat<P extends keyof AgentRoutes>(
           });
         }
       } finally {
-        if (abortRef.current?.controller === controller) {
-          abortRef.current = null;
-          setPhaseSafe("idle");
-        }
+        land(flight);
       }
     },
-    [commit, consume, fail, post, postStop, setPhaseSafe],
+    [commit, consume, fail, land, post, postStop, setPhaseSafe, syncRuns],
   );
 
   const sendMessage = useCallback(
@@ -1420,6 +1763,7 @@ export function useChat<P extends keyof AgentRoutes>(
       send(typeof turn === "string" ? { text: turn } : turn, {
         ...(options.body ? { body: options.body as Record<string, unknown> } : {}),
         ...(options.metadata ? { metadata: options.metadata } : {}),
+        ...(options.ifBusy ? { ifBusy: options.ifBusy } : {}),
       }),
     [send],
   );
@@ -1427,18 +1771,24 @@ export function useChat<P extends keyof AgentRoutes>(
   /**
    * Answers queued within one tick become one turn.
    *
-   * This is not an optimisation. A turn that leaves a pending call unanswered
-   * denies it, so sending three approvals as three turns would have the first
+   * Since #1380 a turn of answers leaves the questions it does not answer
+   * open, so three turns would each carry the reply on; one turn carries it on
+   * once. Before that, a turn that left a pending call unanswered denied
+   * it, so sending three approvals as three turns would have the first
    * one refuse the other two — and the natural UI code, a loop over `pending`
    * calling `approve` for each, is exactly that shape. Coalescing on the
    * microtask is what makes the declared per-call signature safe to use the way
    * it reads.
    */
-  const queued = useRef<{ results: ClientToolResult[]; flushed: Promise<void> } | null>(null);
+  const queued = useRef<AnswerBatch | null>(null);
   // The answer turn that has gone out and not settled yet, so an answer given
   // while it flies (a double click) resolves with it instead of sending a
   // second turn that would supersede it (#1106).
-  const answering = useRef<{ results: ClientToolResult[]; flushed: Promise<void> } | null>(null);
+  // One per turn being answered: answers for two turns' questions fly side
+  // by side (#1355).
+  const answering = useRef<AnswerBatch[]>([]);
+  /** Bumped by `stop()`, so an answer held behind another (#1380) is not sent after it. */
+  const stops = useRef(0);
 
   const queueResult = useCallback(
     (result: ClientToolResult) => {
@@ -1447,6 +1797,17 @@ export function useChat<P extends keyof AgentRoutes>(
         // The same call answered twice in one tick is one answer: the first.
         if (!batch.results.some((queuedResult) => queuedResult.toolCallId === result.toolCallId)) {
           batch.results.push(result);
+          // Another card answered in the same tick joins the batch, and is
+          // marked too.
+          const current = stateRef.current!;
+          commit({
+            ...current,
+            pending: withAnswering(
+              current.pending,
+              settledBy(current.pending, new Set([result.toolCallId])),
+              true,
+            ),
+          });
         }
         return batch.flushed;
       }
@@ -1454,11 +1815,35 @@ export function useChat<P extends keyof AgentRoutes>(
       const flushed: Promise<void> = Promise.resolve().then(async () => {
         const batch = queued.current!;
         queued.current = null;
-        answering.current = batch;
+        batch.turns = turnsOf(stateRef.current!.pending as PendingToolCall[], results);
+        // Another card of a reply whose earlier answer is still going out or
+        // streaming (#1380) waits for it here, then goes out with the history
+        // that answer left: nothing on the server overlaps, a stateless chat
+        // posts the first answer's result, and no run is cut. An answer to
+        // another turn's questions does not wait (it runs beside, #1355).
+        const ahead = answering.current.filter(
+          (other) => !besideEachOther(other.turns, batch.turns),
+        );
+        answering.current = [...answering.current, batch];
         try {
-          await send({ toolResults: results });
+          let sending = results;
+          if (ahead.length > 0) {
+            const stopped = stops.current;
+            await Promise.allSettled(ahead.map((other) => other.flushed));
+            // `stop()` put the card back to plain pending; it is not sent.
+            if (stops.current !== stopped || !mountedRef.current) return;
+            // Only the cards still held and still marked: a new message sent
+            // meanwhile settled the others, and an answer to them now would
+            // cut that message's reply only to be refused as stale.
+            const held = stateRef.current!.pending as ChatPendingToolCall[];
+            sending = results.filter((result) =>
+              held.some((call) => call.toolCallId === result.toolCallId && call.answering),
+            );
+            if (sending.length === 0) return;
+          }
+          await send({ toolResults: sending });
         } finally {
-          if (answering.current === batch) answering.current = null;
+          answering.current = answering.current.filter((other) => other !== batch);
         }
       });
       queued.current = { results, flushed };
@@ -1469,7 +1854,7 @@ export function useChat<P extends keyof AgentRoutes>(
         ...current,
         pending: withAnswering(
           current.pending,
-          new Set(current.pending.map((call: PendingToolCall) => call.toolCallId)),
+          settledBy(current.pending, new Set([result.toolCallId])),
           true,
         ),
       });
@@ -1544,9 +1929,9 @@ export function useChat<P extends keyof AgentRoutes>(
    *
    * A call marked `answering` with no batch still collecting is in flight.
    * Answering it again the same way (a double click) gets the request already
-   * going out, not another. Anything else while that turn flies (a different
-   * answer, or a different held call) cannot be honoured: the turn in flight
-   * settles every held call, and the server refuses the ones it leaves out. So
+   * going out, not another. A different answer to it, or another question of
+   * the same sub-agent run (which the answer in flight settles), cannot be
+   * honoured. So
    * it is reported as `invalid_tool_result`, the way answering a call this
    * client no longer holds is, rather than resolving as if it had been sent.
    *
@@ -1558,16 +1943,19 @@ export function useChat<P extends keyof AgentRoutes>(
       toolCallId: string,
       build: (base: { toolCallId: string; signature: string; path?: string[] }) => ClientToolResult,
     ): Promise<void> => {
-      const inFlight = answering.current;
-      if (!queued.current && inFlight) {
+      const flying = answering.current;
+      if (!queued.current && flying.length > 0) {
         const call = (stateRef.current!.pending as ChatPendingToolCall[]).find(
           (candidate) => candidate.toolCallId === toolCallId,
         );
         if (call?.answering) {
           const result = resultFor(toolCallId, build);
           if (!result) return Promise.resolve();
-          const sent = inFlight.results.find((sentResult) => sentResult.toolCallId === toolCallId);
-          if (sent && JSON.stringify(sent) === JSON.stringify(result)) return inFlight.flushed;
+          const inFlight = flying.find((batch) =>
+            batch.results.some((sentResult) => sentResult.toolCallId === toolCallId),
+          );
+          const sent = inFlight?.results.find((sentResult) => sentResult.toolCallId === toolCallId);
+          if (inFlight && sent && JSON.stringify(sent) === JSON.stringify(result)) return inFlight.flushed;
           fail({
             code: "invalid_tool_result",
             message: sent
@@ -1605,13 +1993,18 @@ export function useChat<P extends keyof AgentRoutes>(
 
   const stop = useCallback(async () => {
     const { runId, threadId } = stateRef.current!;
+    // Every run this chat is following, before they are marked: more than one
+    // when replies stream at once.
+    const live = liveRunIds(stateRef.current!);
     // The UI stops now. The POST below is what actually ends the generation and
     // any tool mid-flight, and it may take a moment; a user who clicked stop
     // must not keep watching tokens arrive while it flies.
-    const inFlight = abortRef.current;
-    inFlight?.controller.abort();
-    abortRef.current = null;
-    const stopped = markAborted(stateRef.current!);
+    const flights = [...flightsRef.current];
+    for (const flight of flights) flight.controller.abort();
+    flightsRef.current.clear();
+    stops.current++;
+    syncRuns();
+    const stopped = markAllAborted(stateRef.current!);
     commit({
       ...stopped,
       // An answer cut off before the server said it took it may never have
@@ -1637,17 +2030,29 @@ export function useChat<P extends keyof AgentRoutes>(
     // that run as busy, and its stop button has to reach it. The route stops
     // whatever is live on the thread, and answers `{ stopped: false }` when
     // nothing is.
-    if (!inFlight && !runId && !threadId) return;
+    if (flights.length === 0 && !runId && !threadId) return;
     // Three handles, any of which the route can resolve by; which ones exist
     // depends on how far the run got. `clientRunId` is the one that is always
     // there for a turn this client started, which is what closes the window.
-    const body: AgentStopBody = {
-      ...(runId ? { runId } : {}),
-      ...(threadId ? { threadId } : {}),
-      ...(inFlight?.clientRunId ? { clientRunId: inFlight.clientRunId } : {}),
-    };
-    await postStop(body, fail);
-  }, [commit, fail, postStop, setPhaseSafe]);
+    // One stop per request in flight, and one for each run followed without
+    // one; with none of either, the thread (whose every run the route stops).
+    const bodies: AgentStopBody[] = [];
+    const named = new Set<string>();
+    for (const flight of flights) {
+      const id = flight.runId ?? (flights.length === 1 ? runId : undefined);
+      if (id) named.add(id);
+      bodies.push({
+        ...(id ? { runId: id } : {}),
+        ...(threadId ? { threadId } : {}),
+        ...(flight.clientRunId ? { clientRunId: flight.clientRunId } : {}),
+      });
+    }
+    for (const id of live) {
+      if (!named.has(id)) bodies.push({ runId: id, ...(threadId ? { threadId } : {}) });
+    }
+    if (bodies.length === 0) bodies.push(threadId ? { threadId } : {});
+    await Promise.all(bodies.map((body) => postStop(body, fail)));
+  }, [commit, fail, postStop, setPhaseSafe, syncRuns]);
 
   const regenerate = useCallback(async () => {
     const messages = stateRef.current!.messages as AgentMessage[];
@@ -1781,6 +2186,13 @@ export function useChat<P extends keyof AgentRoutes>(
     };
   }, []);
 
+  /** Whether a request in flight is streaming this run. */
+  const following = useCallback(
+    (runId: string) =>
+      [...flightsRef.current].some((flight) => (flight.runId ?? flight.asked) === runId),
+    [],
+  );
+
   /**
    * Ask `/attach` whether the thread has a run going, and stream it if it does.
    *
@@ -1792,13 +2204,24 @@ export function useChat<P extends keyof AgentRoutes>(
    * arrives, so a probe that finds nothing never shows as busy.
    */
   const probe = useCallback(
-    async (missed: boolean): Promise<boolean> => {
-      const { threadId, seq, cursorRunId } = stateRef.current!;
-      if (!threadId || abortRef.current) return false;
+    async (missed: boolean, target?: string): Promise<boolean> => {
+      const state = stateRef.current!;
+      const { threadId } = state;
+      if (!threadId) return false;
+      // A probe of the thread waits for a quiet chat; one for a named run
+      // (`watch`, with runs going in parallel) only for that run not being
+      // followed already.
+      if (target === undefined ? flightsRef.current.size > 0 : following(target)) return false;
+      const cursorRunId = target ?? state.cursorRunId;
+      const seq = target === undefined ? state.seq : (runCursor(state, target) ?? -1);
       const controller = new AbortController();
       // No `clientRunId`: this client did not start the run, so the thread is
-      // the only handle it has on it — and `/attach` needs one anyway.
-      abortRef.current = { controller };
+      // the only handle it has on it — and `/attach` needs one anyway. The run
+      // asked for is the one its frames are of until a `run-start` says
+      // otherwise.
+      const flight: Flight = { controller, id: localId(), ...(cursorRunId ? { asked: cursorRunId } : {}) };
+      flightsRef.current.add(flight);
+      syncRuns();
       try {
         const body: AgentAttachBody = {
           threadId,
@@ -1826,20 +2249,17 @@ export function useChat<P extends keyof AgentRoutes>(
           if (missed) handlers.current.onAttachMiss?.({ threadId });
           return false;
         }
-        await consume(response, controller.signal);
+        await consume(response, flight);
         return true;
       } catch {
         // A probe that could not be made leaves the client exactly where a
         // client without `attach` would be — with its own history and no run.
         return false;
       } finally {
-        if (abortRef.current?.controller === controller) {
-          abortRef.current = null;
-          setPhaseSafe("idle");
-        }
+        land(flight);
       }
     },
-    [consume, post, setPhaseSafe],
+    [consume, following, land, post, syncRuns],
   );
 
   const reattach = useCallback(() => probe(false), [probe]);
@@ -1876,31 +2296,42 @@ export function useChat<P extends keyof AgentRoutes>(
   useEffect(() => {
     if (!watch || !watchedThreadId || typeof fetch === "undefined") return;
     const controller = new AbortController();
-    // A run announced while this chat is busy, attached once it is not.
-    let waiting: string | null = null;
+    // Runs announced while a request had not named its run, attached once
+    // every one has.
+    const waiting = new Set<string>();
     let waitTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // Whether a request in flight has not said yet which run it carries: a
+    // send before its `run-start`. The run announced may be that one.
+    const unnamed = () =>
+      [...flightsRef.current].some(
+        (flight) => flight.runId === undefined && flight.asked === undefined,
+      );
     const attachTo = (runId: string) => {
-      // This chat's own run, or one it has already followed to its end.
-      if (runId === stateRef.current!.cursorRunId) return;
-      if (abortRef.current) {
-        waiting = runId;
-        // Rechecked rather than hooked into every path that ends a request:
-        // a send, a probe, an answer, a regenerate all clear `abortRef`.
+      const state = stateRef.current!;
+      // This chat's own run, one it is streaming, or one it has already
+      // followed to its end.
+      if (following(runId)) return;
+      if (runCursor(state, runId) !== undefined && !liveRunIds(state).includes(runId)) return;
+      if (unnamed()) {
+        waiting.add(runId);
+        // Rechecked rather than hooked into every path that names a run.
         waitTimer ??= setTimeout(function recheck() {
           waitTimer = null;
-          if (controller.signal.aborted || waiting === null) return;
-          if (abortRef.current) {
+          if (controller.signal.aborted || waiting.size === 0) return;
+          if (unnamed()) {
             waitTimer = setTimeout(recheck, WATCH_RECHECK_MS);
             return;
           }
-          const next = waiting;
-          waiting = null;
-          attachTo(next);
+          const next = [...waiting];
+          waiting.clear();
+          for (const id of next) attachTo(id);
         }, WATCH_RECHECK_MS);
         return;
       }
-      void probe(false);
+      // Beside whatever else this chat is streaming: runs on one thread can
+      // go at once (parallel turns), each into its own message.
+      void probe(false, runId);
     };
 
     void (async () => {
@@ -1934,7 +2365,7 @@ export function useChat<P extends keyof AgentRoutes>(
       controller.abort();
       if (waitTimer !== null) clearTimeout(waitTimer);
     };
-  }, [watch, watchedThreadId, post, probe]);
+  }, [watch, watchedThreadId, post, probe, following]);
 
   const status: ChatStatus =
     // Ordered so the declared invariant — `pending` non-empty exactly when the
@@ -1948,9 +2379,30 @@ export function useChat<P extends keyof AgentRoutes>(
           ? "error"
           : "idle";
 
+  // The turns waiting on their questions, after the requests in flight: a
+  // turn that has one (an answer going out) is shown by it.
+  // A call without a turn (an older server) is one waiting reply, shown only
+  // when nothing is in flight.
+  const pendingNow = state.pending;
+  const runs = useMemo(() => {
+    const flying = new Set(flightRuns.map((run) => run.turn).filter(Boolean));
+    const waiting: ChatRun[] = [];
+    for (const call of pendingNow) {
+      // A call being answered is carried by a request in flight, which is
+      // the reply shown, whichever turns it answers.
+      if ((call as { answering?: boolean }).answering) continue;
+      const turn = call.turn;
+      if (turn ? flying.has(turn) : flightRuns.length > 0) continue;
+      if (waiting.some((run) => run.turn === turn)) continue;
+      waiting.push({ id: turn ? `turn:${turn}` : "turn", ...(turn ? { turn } : {}), status: "awaiting-input" });
+    }
+    return waiting.length === 0 ? flightRuns : [...flightRuns, ...waiting];
+  }, [flightRuns, pendingNow]);
+
   return {
     messages: state.messages as AgentMessage<ToolsOf<P>, OutputOf<P>>[],
     status,
+    runs,
     error: state.error,
     threadId: state.threadId,
     runId: state.runId,

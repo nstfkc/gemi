@@ -21,6 +21,7 @@ import {
   toClaudeSchema,
   toMessages,
 } from "./anthropicRequest";
+import { WAITING_ON_USER } from "./request";
 import { parseMessagesStream, toAnthropicUsage } from "./anthropicStream";
 import { capabilitiesForClaude, supportsForcedToolChoice } from "./capabilities";
 import { ANTHROPIC_VERSION } from "./endpoints";
@@ -39,10 +40,11 @@ import type { FetchLike } from "./http";
 const DIR = join(import.meta.dirname, "__fixtures__");
 const fixture = (name: string) => readFileSync(join(DIR, name), "utf8");
 
+/** The parsed events, without the progressive `usage` ones (#1353; tested in `partialUsage.test.ts`). */
 async function parse(raw: string | string[], options?: { structuredOutput?: boolean }) {
   const out: ProviderEvent[] = [];
   const chunks = typeof raw === "string" ? [raw] : raw;
-  for await (const event of parseMessagesStream(chunks, options)) out.push(event);
+  for await (const event of parseMessagesStream(chunks, options)) if (event.type !== "usage") out.push(event);
   return out;
 }
 
@@ -477,6 +479,29 @@ describe("toMessages()", () => {
         ],
       },
     ]);
+  });
+
+  test("a call still waiting on the user's answer is told so, not as lost (#1380)", () => {
+    const out = toMessages(
+      [
+        message({ role: "user", content: [{ type: "text", text: "publish both" }] }),
+        message({
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: "t1", name: "w", input: {} },
+            { type: "tool-call", toolCallId: "t2", name: "w", input: {} },
+            { type: "tool-result", toolCallId: "t1", name: "w", status: "ok", output: "a" },
+          ],
+          pending: [{ toolCallId: "t2", name: "w", input: {}, kind: "approval", signature: "s" }],
+        }),
+      ],
+      CLAUDE,
+    );
+    expect(out[2]!.content).toContainEqual({
+      type: "tool_result",
+      tool_use_id: "t2",
+      content: WAITING_ON_USER,
+    });
   });
 
   test("another provider's reasoning is left out; the assistant's whitespace text is kept, empty text is not", () => {
@@ -1344,7 +1369,11 @@ describe("AzureAnthropicProvider", () => {
 
   test("capabilities are Claude's, without file input; upload refuses", async () => {
     const provider = AzureAnthropicProvider.model("claude-opus-5-5", { resourceName: "r" });
-    expect(provider.capabilities).toEqual({ ...capabilitiesForClaude("claude-opus-5-5"), fileInput: false });
+    expect(provider.capabilities).toEqual({
+      ...capabilitiesForClaude("claude-opus-5-5"),
+      trailingContext: true,
+      fileInput: false,
+    });
     await expect(provider.upload(new File(["x"], "a.pdf"))).rejects.toThrow(/Files API/);
     // A file in the history is named by its attachment id, not sent.
     const blocks = toMessages(
