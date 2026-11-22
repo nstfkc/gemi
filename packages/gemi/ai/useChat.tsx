@@ -1330,10 +1330,15 @@ export function useChat<P extends keyof AgentRoutes>(
         stateRef.current!.threadId !== undefined &&
         answerTurns !== undefined &&
         flightsRef.current.size > 0 &&
+        // A flight whose turns are unknown (an attach, `reattach`, a run
+        // `watch` announced) counts as beside it too: the answer's own turns
+        // are known, so it is not the stream's to cut, and the server still
+        // decides through `busyPolicy`.
         [...flightsRef.current].every(
           (flight) =>
+            flight.turns === undefined ||
             flight.turns === "new" ||
-            (flight.turns !== undefined && ![...flight.turns].some((id) => answerTurns.has(id))),
+            ![...flight.turns].some((id) => answerTurns.has(id)),
         );
       const ifBusy = beside ? "parallel" : asked;
       // Whether this send cuts off what this chat is streaming itself. Asked
@@ -1441,6 +1446,15 @@ export function useChat<P extends keyof AgentRoutes>(
       // it leaves out), so a second card of it answered while this one flies
       // would only race it. Another turn's questions stay open on the server
       // (#1355), and here.
+      // A plain new message's held calls that name their turn: put back
+      // once the run ends if the server refused none of them (no result in
+      // the transcript), which is what a `busyPolicy` answering "parallel"
+      // does (#1355). A single-turn chat sees the refusals, and nothing
+      // comes back.
+      const setAside =
+        authored.length > 0 && !turn.toolResults?.length && ifBusy !== "parallel" && previous.threadId
+          ? (previous.pending as ChatPendingToolCall[]).filter((call) => call.turn !== undefined)
+          : [];
       const answered = turn.toolResults?.length
         ? settledBy(
             previous.messages,
@@ -1479,18 +1493,14 @@ export function useChat<P extends keyof AgentRoutes>(
         // server takes it (`settle`), so a failed answer can be sent again.
         // A new message beside other turns (`ifBusy: "parallel"`) leaves
         // their questions open on the server (#1355), so they stay here too.
-        // Asked otherwise, calls that name their turn stay until the server
-        // says what it did with them: refused (a `tool-result` frame each,
-        // which takes the card away), or left open because the app's
-        // `busyPolicy` ran the message beside them. Calls without a turn
-        // (an older server) go now, as before.
+        // Asked otherwise they go now, as before; the ones the server left
+        // open (the app's `busyPolicy` ran the message beside them) come
+        // back when the run ends (`setAside`).
         pending: answered
           ? withAnswering(previous.pending, answered, true)
           : ifBusy === "parallel" && authored.length > 0
             ? previous.pending
-            : authored.length > 0 && stateRef.current!.threadId
-              ? previous.pending.filter((call: ChatPendingToolCall) => call.turn !== undefined)
-              : [],
+            : [],
       });
       // A reply still streaming beside this send keeps the chat `streaming`.
       if (!wasBusy || phaseRef.current !== "streaming") setPhaseSafe("submitted");
@@ -1546,6 +1556,19 @@ export function useChat<P extends keyof AgentRoutes>(
         // and the stream reports what became of them.
         settle(true);
         await consume(response, flight);
+        if (setAside.length > 0) {
+          const current = stateRef.current!;
+          const resolved = new Set(
+            current.messages.flatMap((message: AgentMessage) =>
+              message.content.flatMap((part) => (part.type === "tool-result" ? [part.toolCallId] : [])),
+            ),
+          );
+          const held = new Set(current.pending.map((call: PendingToolCall) => call.toolCallId));
+          const open = setAside.filter(
+            (call) => !resolved.has(call.path?.[0] ?? call.toolCallId) && !held.has(call.toolCallId),
+          );
+          if (open.length > 0) commit({ ...current, pending: [...current.pending, ...open] });
+        }
       } catch (error) {
         // An abort is `stop()` or unmount; both already put the UI where it
         // belongs, and reporting it as a failure would be wrong twice.

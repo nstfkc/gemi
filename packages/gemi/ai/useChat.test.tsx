@@ -606,6 +606,71 @@ describe("questions of parallel turns (#1355)", () => {
     expect(box.api.pending.map((call) => call.toolCallId)).toEqual(left);
   });
 
+  test("a single-turn chat: a new message drops the card at once and says submitted, as before", async () => {
+    const { box } = mount({ threadId: "th_9", attach: false });
+    fetchMock.mockResolvedValueOnce(streamed(parks("run_a", "ma", "turn_a", "tc_a")));
+    await act(async () => {
+      await box.api.sendMessage("publish home");
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a"]);
+    const run = controlled();
+    fetchMock.mockResolvedValueOnce(run.response);
+    let sent!: Promise<void>;
+    await act(async () => {
+      sent = box.api.sendMessage("something else");
+      await Promise.resolve();
+    });
+    expect(box.api.pending).toEqual([]);
+    expect(box.api.status).toBe("submitted");
+    await act(async () => {
+      run.push(
+        { seq: 0, event: { type: "run-start", runId: "run_c", threadId: "th_9" } },
+        {
+          seq: 1,
+          event: {
+            type: "tool-result",
+            messageId: "ma",
+            part: { type: "tool-result", toolCallId: "tc_a", name: "publish", status: "denied", cause: "refused" },
+          },
+        },
+        { seq: 2, event: { type: "run-end", runId: "run_c", finishReason: "stop" } },
+      );
+      run.close();
+      await sent;
+    });
+    expect(box.api.pending).toEqual([]);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("answering A while the chat is attached to B's run cuts nothing and stops nothing", async () => {
+    const { box } = await twoParked({});
+    // B answered elsewhere (another tab): this chat attaches to its run.
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => run.abort());
+      return run.response;
+    });
+    let attached!: Promise<boolean>;
+    await act(async () => {
+      attached = box.api.reattach();
+    });
+    await act(async () => {
+      run.push({ seq: 0, event: { type: "run-start", runId: "run_b2", threadId: "th_9" } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const before = calls().length;
+    await act(async () => {
+      await box.api.approve("tc_a", true);
+    });
+    expect(calls().slice(before).some(([url]) => String(url).includes("stop"))).toBe(false);
+    expect(rawBodyOf(before).ifBusy).toBe("parallel");
+    await act(async () => {
+      run.push({ seq: 1, event: { type: "run-end", runId: "run_b2", finishReason: "stop" } });
+      run.close();
+      expect(await attached).toBe(true);
+    });
+  });
+
   test("an error frame keeps other turns' cards", async () => {
     const { box } = await twoParked();
     fetchMock.mockResolvedValueOnce(

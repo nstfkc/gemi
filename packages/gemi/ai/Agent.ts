@@ -6796,7 +6796,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       })
       .find((entry) => entry !== undefined);
     this.answeredOpen = answered !== undefined;
-    const id = opening?.id ?? this.continuedTurn((answered ?? open[0])?.message);
+    // Answers alone that matched no open call carry on no turn: the run ends
+    // as stale, and borrowing one would name a turn nobody answered.
+    const id =
+      opening?.id ??
+      (this.answersOnly() && !this.answeredOpen ? undefined : this.continuedTurn((answered ?? open[0])?.message));
     // An empty thread continued with nothing has no turn to name.
     this.turn = id
       ? {
