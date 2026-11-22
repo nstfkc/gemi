@@ -178,6 +178,39 @@ type AfterCommitCallback = () => void | Promise<void>;
 export const ormContext = new AsyncLocalStorage<OrmScope>();
 
 /**
+ * The ambient scope, without its transaction once that transaction has
+ * finished (#1376).
+ *
+ * Work a transaction starts and doesn't wait for (a `setTimeout`, an
+ * un-awaited call, an emitter callback) inherits its scope, handle included.
+ * Run after the commit or rollback, that work would otherwise take a
+ * savepoint on a finished transaction, or write on its handle. Without the
+ * transaction it is outside one, as it is: its `transaction()` opens one of
+ * its own, and its statements run on the pool. While the transaction is
+ * still open it stays inside it (nested calls the transaction awaits look
+ * the same). `deferUntilCommit` reads the raw scope: it goes by how the
+ * transaction ended.
+ *
+ * "Finished" starts when the transaction's callback is done with it, before
+ * `COMMIT` or `ROLLBACK` is sent: during that round-trip the handle takes
+ * statements outside any transaction.
+ */
+function liveScope(): OrmScope | undefined {
+  const store = ormContext.getStore();
+  if (store?.tx === undefined || store.afterCommit === undefined) return store;
+  if (!finishedLists.has(store.afterCommit)) return store;
+  return {
+    ...store,
+    tx: undefined,
+    depth: 0,
+    afterCommit: undefined,
+    commitDependsOn: undefined,
+    statementFailed: undefined,
+    appliedSettings: undefined,
+  };
+}
+
+/**
  * The open transaction, or `undefined` outside one. This is what `Model.$exec`
  * consults to decide which connection a statement runs on.
  *
@@ -189,7 +222,7 @@ export const ormContext = new AsyncLocalStorage<OrmScope>();
  * callback takes no argument.
  */
 export function currentTransaction(): TransactionSQL | undefined {
-  return ormContext.getStore()?.tx;
+  return liveScope()?.tx;
 }
 
 /**
@@ -200,7 +233,7 @@ export function currentTransaction(): TransactionSQL | undefined {
  * which is not the same distinction and is nobody else's business.
  */
 export function currentConnectionName(): string {
-  return ormContext.getStore()?.connection ?? DEFAULT_CONNECTION;
+  return liveScope()?.connection ?? DEFAULT_CONNECTION;
 }
 
 /**
@@ -220,7 +253,7 @@ export function runOnConnection<T>(
   name: string,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const current = ormContext.getStore();
+  const current = liveScope();
   if (currentConnectionName() === name) return fn();
 
   // ENTERING A CONNECTION IS WHERE THE CROSS-CONNECTION CHECK BELONGS, not at
@@ -261,7 +294,7 @@ export function runOnConnection<T>(
  * resolves to the ambient name, which is the transaction's own.
  */
 export function assertConnectionUsable(name: string): void {
-  const store = ormContext.getStore();
+  const store = liveScope();
   if (store?.tx === undefined) return;
 
   const open = store.connection ?? DEFAULT_CONNECTION;
@@ -290,6 +323,7 @@ export function assertConnectionUsable(name: string): void {
  * they run in registration order, one at a time, after the commit round-trip.
  */
 export function deferUntilCommit(callback: AfterCommitCallback): boolean {
+  // The raw scope: a settled transaction's list says what to do with it.
   const store = ormContext.getStore();
   if (store?.tx === undefined || store.afterCommit === undefined) return false;
 
@@ -298,7 +332,11 @@ export function deferUntilCommit(callback: AfterCommitCallback): boolean {
   // transaction settled, through a scope that still carries its handle and its
   // list. Pushing then would queue onto a list already drained (or discarded),
   // and the work would silently never run. A committed list answers "run it
-  // now"; a rolled-back one keeps the promise that nothing runs.
+  // now"; a rolled-back one keeps the promise that nothing runs: the callback
+  // may announce the transaction's own writes (#875). During COMMIT the
+  // outcome isn't known yet, so it is queued and runs if the commit does.
+  // Detached work that opened a transaction of its own (#1376) is on that
+  // one's list instead.
   const settled = settledLists.get(store.afterCommit);
   if (settled === "committed") return false;
   if (settled === "rolled_back") return true;
@@ -306,6 +344,12 @@ export function deferUntilCommit(callback: AfterCommitCallback): boolean {
   store.afterCommit.push(callback);
   return true;
 }
+
+/**
+ * The after-commit lists of outermost transactions whose callback is done
+ * (committing, rolled back or settled): what `liveScope` drops.
+ */
+const finishedLists = new WeakSet<AfterCommitCallback[]>();
 
 /**
  * How each outermost transaction's after-commit list ended, once it has. Keyed
@@ -362,7 +406,7 @@ export function afterCommit(
  * transaction's. See `OrmScope.statementFailed`. @internal
  */
 export function noteFailedStatement(handle: unknown): void {
-  const store = ormContext.getStore();
+  const store = liveScope();
   if (store?.tx !== undefined && store.tx === handle && store.statementFailed) {
     store.statementFailed.value = true;
   }
@@ -386,7 +430,7 @@ export function noteFailedStatement(handle: unknown): void {
  * `deferUntilCommit`.
  */
 export function commitDependsOn(write: Promise<unknown>): boolean {
-  const store = ormContext.getStore();
+  const store = liveScope();
   if (store?.tx === undefined || store.commitDependsOn === undefined) {
     return false;
   }
@@ -434,13 +478,13 @@ async function awaitDependencies(
 
 /** How deeply nested the current transaction is; `null` outside one. */
 export function transactionDepth(): number | null {
-  const store = ormContext.getStore();
+  const store = liveScope();
   return store?.tx === undefined ? null : store.depth;
 }
 
 /** Whether policies are suspended for the current async scope. */
 export function isSystemScope(): boolean {
-  return ormContext.getStore()?.system === true;
+  return liveScope()?.system === true;
 }
 
 /**
@@ -457,7 +501,7 @@ export function isSystemScope(): boolean {
  * handle.
  */
 export function runAsSystem<T>(fn: () => Promise<T>): Promise<T> {
-  const current = ormContext.getStore();
+  const current = liveScope();
   return ormContext.run({ ...current, depth: current?.depth ?? 0, system: true }, fn);
 }
 
@@ -466,7 +510,7 @@ export function runAsSystem<T>(fn: () => Promise<T>): Promise<T> {
  * for the default (hidden). See `OrmScope.trashed`.
  */
 export function trashedMode(model: string): TrashedMode | undefined {
-  return ormContext.getStore()?.trashed?.get(model);
+  return liveScope()?.trashed?.get(model);
 }
 
 /**
@@ -479,7 +523,7 @@ export function runWithTrashed<T>(
   mode: TrashedMode,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const current = ormContext.getStore();
+  const current = liveScope();
   const trashed = new Map(current?.trashed);
   trashed.set(model, mode);
   return ormContext.run(
@@ -490,7 +534,7 @@ export function runWithTrashed<T>(
 
 /** The explicitly-set actor, or `undefined` when none was. */
 export function currentActor(): { user: unknown } | undefined {
-  return ormContext.getStore()?.actor;
+  return liveScope()?.actor;
 }
 
 /**
@@ -520,7 +564,7 @@ export function currentActor(): { user: unknown } | undefined {
  * `asSystem` inside `asUser` — suspends policies, which is what it should do.
  */
 export function runAsUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
-  const current = ormContext.getStore();
+  const current = liveScope();
   return ormContext.run(
     {
       ...current,
@@ -752,7 +796,7 @@ export function withTransaction<T>(
     dialect?: string;
   },
 ): Promise<T> {
-  const current = ormContext.getStore();
+  const current = liveScope();
 
   // THE SINGLE-CONNECTION ASSUMPTION, WHICH IS NOW CHECKED RATHER THAN PINNED.
   //
@@ -1039,13 +1083,19 @@ function openTransaction<T>(
               if (!options?.deferSettings) {
                 await applySettings(tx, current?.settings, applied);
               }
-              const result = await fn(tx);
-              await awaitDependencies(dependencies, 0);
-              // Throws "current transaction is aborted" when a failed statement
-              // was swallowed on Postgres, so `begin` rolls back and rejects
-              // instead of resolving over a `COMMIT` that rolled back.
-              if (statementFailed.value) await tx.unsafe("select 1");
-              return result;
+              try {
+                const result = await fn(tx);
+                await awaitDependencies(dependencies, 0);
+                // Throws "current transaction is aborted" when a failed statement
+                // was swallowed on Postgres, so `begin` rolls back and rejects
+                // instead of resolving over a `COMMIT` that rolled back.
+                if (statementFailed.value) await tx.unsafe("select 1");
+                return result;
+              } finally {
+                // Done with it, before Bun sends COMMIT or ROLLBACK: work
+                // that runs from now on is outside it (#1376).
+                finishedLists.add(deferred);
+              }
             },
           ),
         )
@@ -1109,7 +1159,7 @@ export class SessionSettingConflictError extends Error {
 
 /** The settings of the ambient scope, or `undefined` when there are none. */
 export function currentSettings(): Readonly<Record<string, string>> | undefined {
-  const settings = ormContext.getStore()?.settings;
+  const settings = liveScope()?.settings;
   return settings && Object.keys(settings).length > 0 ? settings : undefined;
 }
 
@@ -1139,7 +1189,7 @@ async function applySettings(
  * that opened it with `deferSettings` (`DB.readOnly`). @internal
  */
 export async function applyTransactionSettings(): Promise<void> {
-  const store = ormContext.getStore();
+  const store = liveScope();
   if (store?.tx && store.appliedSettings) {
     await applySettings(store.tx, store.settings, store.appliedSettings);
   }
@@ -1159,7 +1209,7 @@ export async function runWithSettings<T>(
   settings: Record<string, SessionSettingValue>,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const current = ormContext.getStore();
+  const current = liveScope();
   const outer = current?.settings ?? {};
   const merged: Record<string, string> = { ...outer };
   for (const [name, raw] of Object.entries(settings)) {

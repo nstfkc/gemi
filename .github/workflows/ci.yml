@@ -587,6 +587,14 @@ jobs:
         env:
           VITEST_MIN_PASSED: "3"
 
+      # Work a transaction doesn't wait for, run after it finished or during
+      # its COMMIT, is outside it (#1376). The COMMIT window needs Postgres.
+      - name: Detached transactions on Postgres
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" orm/detachedTransaction.test.ts -t "postgres"
+        working-directory: packages/gemi
+        env:
+          VITEST_MIN_PASSED: "7"
+
       # Two OAuth or password sign-ups at once for a new person (#1361).
       - name: Sign-up race on Postgres
         run: bash "$GITHUB_WORKSPACE/.github/scripts/vitest.sh" auth/AuthController.signUpRace.test.ts -t "postgres"

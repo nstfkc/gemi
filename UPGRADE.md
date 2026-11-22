@@ -1,3 +1,18 @@
+# 0.237.3
+
+## Detached work after a transaction settles runs outside it (#1376)
+
+**Fix (patch version).** Work a transaction starts but doesn't wait for (a `setTimeout`, `void service.record()`, an emitter callback) inherits the transaction's scope. When that work ran after the transaction had finished, its `Model.transaction` / `DB.transaction` still became a savepoint of the finished transaction, and its queries still used the finished transaction's handle. Now, once the transaction's callback has returned or thrown (before `COMMIT` or `ROLLBACK` is sent), that work is outside it:
+- a nested `transaction()` opens a transaction of its own (on SQLite it queues like any other);
+- plain queries run on the pool;
+- `afterCommit(...)` inside that new transaction waits for its commit. Outside any transaction, `afterCommit(...)` and `static afterCommit` dispatches still go by the transaction the work started in: they run once it has committed, and are dropped if it rolled back, since they may announce its writes.
+
+While the transaction is still open, nothing changes: a nested call is a savepoint and queries join it.
+
+What to check:
+- Detached work that used to fail with an error from the finished transaction (a savepoint or a statement on a closed transaction) now succeeds, and its writes are kept even when the transaction that started it rolled back. If that work should only happen when the transaction commits, run it from `afterCommit` inside the transaction, before its callback returns.
+- Detached work that writes after a rollback and announces it with `afterCommit` should open its own `transaction()` around both, or the announcement is dropped.
+
 # 0.237.2
 
 ## `costUsd` follow-ups: image tokens need an image price; warnings go to the run's log (#1146)
