@@ -1,3 +1,26 @@
+# 0.233.0
+
+## Text after the conversation, and a prompt cache that holds across turns (#1345)
+
+**New API and behaviour changes (minor version).** See [Text after the conversation](docs/ai-agent-context.md#text-after-the-conversation) and [Prompt cache key](docs/ai-providers.md#prompt-cache-key).
+
+- New `AgentController.trailingContext(req, { body, context })` (and the `trailingContext` hook, `agent.stream({ trailingContext })`, `PrepareStepResult.trailingContext`): text sent after the last message on every model call of the turn, never stored, outside the cached prefix.
+- The default `promptCacheKey` hashes the agent's own `instructions` and the run's tools, no longer each call's. A turn's `instructions()`, a memory block or a step's `activeTools` no longer change it.
+- On the OpenAI and Azure OpenAI providers with gpt-5 models (and ids gemi doesn't know), a step that narrows its tools (`prepareStep` answering `activeTools`) is sent the full tool list with `tool_choice: allowed_tools`, so the cached prefix holds. Lists with namespaces or tool search, older models and the Anthropic providers still get the narrowed list.
+- New optional `ProviderCapabilities.trailingContext` and `.allowedTools`, and `ProviderStreamParams.trailingContext` and `.allowedTools`.
+- On a provider that can't force a tool (`supportsForcedToolChoice: false`, #1261), the line asking for the tool now goes after the conversation, with the trailing context, instead of at the end of the system prompt.
+- `scriptedProvider` declares `capabilities.trailingContext`, and its calls carry `trailingContext`.
+
+What to check:
+
+- **The first calls after the upgrade** get a new cache key, so the prompt cache starts cold once.
+- **A note you add as a fake message after the conversation** (a system or user message spliced in by `prepareStep`): move it to `trailingContext()`. On Anthropic it took the cache breakpoint, so every call wrote the cache again.
+- **A custom provider** is sent the trailing context as a last user message (carrying the turn's id as `turn`, so it isn't a turn start) unless it declares `capabilities.trailingContext: true` and places `params.trailingContext` itself. It never gets `allowedTools` unless it declares `capabilities.allowedTools: true`.
+- **Tests that compare `capabilities` with `toEqual`**: the built-in providers now include `trailingContext` (and `allowedTools` on OpenAI/Azure), and `FallbackProvider` both fields.
+- **Tests that assert the forced-tool line in `systemPrompt`**: read it from `trailingContext`, or the last message on a provider without the capability.
+- **Recordings of forced steps on Claude Opus 5.5, Sonnet 5.5 or Fable 5.1** made before the upgrade had the line in `systemPrompt`, and now replay as changed. Record them again.
+- **Tests that pin the default `promptCacheKey`** of a call with extra instructions now see the agent-level key.
+
 # 0.232.0
 
 ## Answering one turn's question keeps the others open (#1355)
