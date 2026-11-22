@@ -4682,6 +4682,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // While a cut call can go back to the model, asking the provider the
       // same again only cuts it again (#1291).
       ...(this.cutCalls < this.config.cutCallsToModel ? { retryToolArgumentsTooLong: false } : {}),
+      agent: { name: this.config.name, depth: this.depth },
       signal,
     });
 
