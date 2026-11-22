@@ -300,39 +300,86 @@ describe("transactions on one SQLite connection (#1362)", () => {
     }
   });
 
-  test("a store's own begin inside an open ORM transaction on its connection fails loudly, not hangs", async () => {
+  /**
+   * Runs `body` with fake timers, waits for `pending` to reach the queue,
+   * then moves the clock past the 5s the queue gives a suspected deadlock.
+   */
+  async function after5s<T>(pending: () => Promise<T>): Promise<PromiseSettledResult<T>> {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const settled = pending().then(
+        (value) => ({ status: "fulfilled" as const, value }),
+        (reason: unknown) => ({ status: "rejected" as const, reason }),
+      );
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      vi.advanceTimersByTime(5_000);
+      return await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  test("a store's own begin inside an open ORM transaction on its connection fails loudly after 5s, not hangs", async () => {
     const connection = database.connection();
     const raw = new DatabaseLockStore({ sql: connection.sql, dialect: connection.dialect }, { table: `${table}_locks` });
     await raw.createTable();
     const token = (await raw.acquire("inside", "me", 60_000))!;
-    await expect(
-      within(
-        Note.transaction(async () => {
-          await raw.fence("inside", "me", token, async () => "never");
-        }),
-      ),
-    ).rejects.toBeInstanceOf(TransactionQueueDeadlockError);
+    const outcome = await after5s(() =>
+      Note.transaction(async () => {
+        await raw.fence("inside", "me", token, async () => "never");
+      }),
+    );
+    expect(outcome.status).toBe("rejected");
+    expect((outcome as PromiseRejectedResult).reason).toBeInstanceOf(TransactionQueueDeadlockError);
     await raw.release("inside", "me", token);
     // The queue goes on.
     await within(Note.transaction(async () => void (await Note.create({ data: { body: "after" } }))));
     expect(await bodies()).toEqual(["after"]);
   });
 
-  test("a transaction from a scope that left its caller's transaction fails loudly, not hangs", async () => {
+  test("a transaction from a scope that left its caller's transaction fails loudly after 5s, not hangs", async () => {
     // What an in-process API call or channel message does: leave the ORM scope
     // on purpose while the caller's transaction awaits it.
-    await expect(
-      within(
-        Note.transaction(async () => {
-          await ormContext.exit(() =>
-            Note.transaction(async () => {
-              await Note.create({ data: { body: "inner" } });
+    const outcome = await after5s(() =>
+      Note.transaction(async () => {
+        await ormContext.exit(() =>
+          Note.transaction(async () => {
+            await Note.create({ data: { body: "inner" } });
+          }),
+        );
+      }),
+    );
+    expect(outcome.status).toBe("rejected");
+    expect((outcome as PromiseRejectedResult).reason).toBeInstanceOf(TransactionQueueDeadlockError);
+    expect(await bodies()).toEqual([]);
+    await within(Note.transaction(async () => void (await Note.create({ data: { body: "after" } }))));
+    expect(await bodies()).toEqual(["after"]);
+  });
+
+  test("work a transaction starts and doesn't wait for just waits its turn", async () => {
+    // Inherits the transaction's async context, but the transaction never
+    // awaits it: not a deadlock (a store's fire-and-forget write, say). An
+    // ORM transaction there would join the open one as a savepoint; a
+    // store's own `begin` queues.
+    const pool = database.connection().sql;
+    let detached!: Promise<unknown>;
+    await within(
+      Note.transaction(async () => {
+        await Note.create({ data: { body: "outer" } });
+        setTimeout(() => {
+          detached = queuedOnSqlite(pool, () =>
+            pool.begin(async (tx) => {
+              await tx.unsafe(`INSERT INTO "${table}" (body) VALUES ('detached')`);
             }),
           );
-        }),
-      ),
-    ).rejects.toBeInstanceOf(TransactionQueueDeadlockError);
-    expect(await bodies()).toEqual([]);
+        }, 0);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await Note.create({ data: { body: "outer again" } });
+      }),
+    );
+    await within(detached);
+    expect(await bodies()).toEqual(["outer", "outer again", "detached"]);
   });
 
   test("development warns about a transaction waiting in the queue for long", async () => {

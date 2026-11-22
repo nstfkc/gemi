@@ -10,7 +10,7 @@
 
 Postgres and MySQL are unchanged.
 
-A transaction started from inside an open one on the same connection, but outside its scope, now throws `TransactionQueueDeadlockError` instead of failing at `BEGIN`. That's a store's own `begin`, or an in-process API call or channel message made inside a transaction. In development, a transaction that waits in the queue for 5 seconds logs a warning.
+A transaction started from inside an open one on the same connection, but outside its scope, waits its turn too, in case the open one doesn't wait for it. If it's still waiting on that transaction 5 seconds later, it fails with `TransactionQueueDeadlockError` instead of hanging. That's a store's own `begin`, or an in-process API call or channel message, awaited inside a transaction. Before, it failed at `BEGIN` at once. In development, any transaction that waits in the queue for 5 seconds logs a warning.
 
 What to check:
 - On SQLite, a transaction that awaits work which queued its own top-level transaction elsewhere (a shared promise started outside any transaction) waits for it. Look for the development warning.
