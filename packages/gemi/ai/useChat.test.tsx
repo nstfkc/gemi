@@ -471,6 +471,213 @@ describe("awaiting input", () => {
   });
 });
 
+describe("runs (#1344)", () => {
+  const start = (runId: string): AgentStreamFrame => ({ seq: 0, event: { type: "run-start", runId, threadId: "th_r" } });
+  const message = (messageId: string, turn: string): AgentStreamFrame => ({
+    seq: 1,
+    event: { type: "message-start", messageId, role: "assistant", turn },
+  });
+  const finish = (runId: string, messageId: string): AgentStreamFrame[] => [
+    { seq: 2, event: { type: "message-end", messageId, finishReason: "stop" } },
+    { seq: 3, event: { type: "run-end", runId, finishReason: "stop" } },
+  ];
+  const settle = () => act(async () => void (await new Promise((resolve) => setTimeout(resolve, 0))));
+  // Without the client ids, checked on their own below.
+  const shape = (runs: { id: string }[]) => runs.map(({ id: _id, ...run }) => run);
+
+  test("one reply: submitted, then streaming under its run and turn, then gone", async () => {
+    const { box } = mount({ threadId: "th_r", attach: false });
+    expect(shape(box.api.runs)).toEqual([]);
+    const a = controlled();
+    fetchMock.mockResolvedValueOnce(a.response);
+    let done!: Promise<void>;
+    await act(async () => {
+      done = box.api.sendMessage("hi");
+      await Promise.resolve();
+    });
+    expect(shape(box.api.runs)).toEqual([{ status: "submitted" }]);
+    const id = box.api.runs[0]!.id;
+    await act(async () => {
+      a.push(start("run_a"), message("ma", "turn_a"));
+    });
+    await settle();
+    expect(shape(box.api.runs)).toEqual([{ runId: "run_a", turn: "turn_a", status: "streaming" }]);
+    // One reply all along: a key that holds.
+    expect(box.api.runs[0]!.id).toBe(id);
+    // The streamed message carries its turn too.
+    expect(box.api.messages.find((m) => m.id === "ma")?.turn).toBe("turn_a");
+    await act(async () => {
+      a.push(...finish("run_a", "ma"));
+      a.close();
+      await done;
+    });
+    expect(shape(box.api.runs)).toEqual([]);
+  });
+
+  test("two replies side by side, each with its own run and turn", async () => {
+    const { box } = mount({ threadId: "th_r", attach: false, ifBusy: "parallel" });
+    const a = controlled();
+    const b = controlled();
+    fetchMock.mockResolvedValueOnce(a.response).mockResolvedValueOnce(b.response);
+    let aDone!: Promise<void>;
+    let bDone!: Promise<void>;
+    await act(async () => {
+      aDone = box.api.sendMessage("one");
+      bDone = box.api.sendMessage("two");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      a.push(start("run_a"), message("ma", "turn_a"));
+      b.push(start("run_b"), message("mb", "turn_b"));
+    });
+    await settle();
+    expect(shape(box.api.runs)).toEqual([
+      { runId: "run_a", turn: "turn_a", status: "streaming" },
+      { runId: "run_b", turn: "turn_b", status: "streaming" },
+    ]);
+    await act(async () => {
+      a.push(...finish("run_a", "ma"));
+      a.close();
+      await aDone;
+    });
+    expect(shape(box.api.runs)).toEqual([{ runId: "run_b", turn: "turn_b", status: "streaming" }]);
+    await act(async () => {
+      b.push(...finish("run_b", "mb"));
+      b.close();
+      await bDone;
+    });
+    expect(shape(box.api.runs)).toEqual([]);
+  });
+
+  test("a turn that ended asking waits under its turn; its answer streams as it", async () => {
+    const { box } = mount({ threadId: "th_r", attach: false });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        start("run_a"),
+        message("ma", "turn_a"),
+        {
+          seq: 2,
+          event: {
+            type: "awaiting-input",
+            runId: "run_a",
+            pending: [{ toolCallId: "tc_a", name: "publish", input: {}, kind: "approval", signature: "sig", turn: "turn_a" }],
+          },
+        },
+        { seq: 3, event: { type: "message-end", messageId: "ma", finishReason: "awaiting-input" } },
+        { seq: 4, event: { type: "run-end", runId: "run_a", finishReason: "awaiting-input" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("publish");
+    });
+    expect(shape(box.api.runs)).toEqual([{ turn: "turn_a", status: "awaiting-input" }]);
+    const waitingId = box.api.runs[0]!.id;
+
+    const answer = controlled();
+    fetchMock.mockResolvedValueOnce(answer.response);
+    let done!: Promise<void>;
+    await act(async () => {
+      done = box.api.approve("tc_a", true);
+      await Promise.resolve();
+    });
+    // One reply, not two: the answer going out is that turn's, under the
+    // same id, so a row keyed by it stays mounted.
+    expect(shape(box.api.runs)).toEqual([{ turn: "turn_a", status: "submitted" }]);
+    expect(box.api.runs[0]!.id).toBe(waitingId);
+    await act(async () => {
+      answer.push(start("run_a2"), message("ma2", "turn_a"), ...finish("run_a2", "ma2"));
+      answer.close();
+      await done;
+    });
+    expect(shape(box.api.runs)).toEqual([]);
+  });
+  test("a mount probe that finds nothing lists no reply", async () => {
+    let answer!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (answer = resolve)));
+    const { box } = mount({ threadId: "th_r" });
+    await settle();
+    expect(box.api.runs).toEqual([]);
+    await act(async () => {
+      answer(new Response(null, { status: 204 }));
+    });
+    await settle();
+    expect(box.api.runs).toEqual([]);
+  });
+
+  test("a reload mid-run: the tail has no run-start or message-start, and the reply still streams under its run and turn", async () => {
+    const tail = controlled();
+    fetchMock.mockResolvedValueOnce(tail.response);
+    const { box } = mount({
+      threadId: "th_r",
+      initialMessages: [
+        { id: "u1", role: "user", content: [{ type: "text", text: "hi" }], createdAt: "", turn: "u1" },
+        { id: "ma", role: "assistant", content: [{ type: "text", text: "Hel" }], createdAt: "", turn: "u1" },
+      ],
+      cursor: { runId: "run_a", seq: 2 },
+    });
+    await settle();
+    expect(box.api.runs).toEqual([]);
+    await act(async () => {
+      tail.push({ seq: 3, event: { type: "text-delta", messageId: "ma", delta: "lo" } });
+    });
+    await settle();
+    expect(shape(box.api.runs)).toEqual([{ runId: "run_a", turn: "u1", status: "streaming" }]);
+    await act(async () => {
+      tail.push(
+        { seq: 4, event: { type: "message-end", messageId: "ma", finishReason: "stop" } },
+        { seq: 5, event: { type: "run-end", runId: "run_a", finishReason: "stop" } },
+      );
+      tail.close();
+    });
+    await settle();
+    expect(box.api.runs).toEqual([]);
+  });
+
+  test("answering two turns' cards in one go shows one reply", async () => {
+    const { box } = mount({ threadId: "th_r", attach: false });
+    const ask = (toolCallId: string, turn: string) => ({
+      toolCallId,
+      name: "publish",
+      input: {},
+      kind: "approval" as const,
+      signature: `sig_${toolCallId}`,
+      turn,
+    });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        start("run_a"),
+        { seq: 1, event: { type: "awaiting-input", runId: "run_a", pending: [ask("tc_a", "turn_a"), ask("tc_b", "turn_b")] } },
+        { seq: 2, event: { type: "run-end", runId: "run_a", finishReason: "awaiting-input" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("publish");
+    });
+    expect(shape(box.api.runs)).toEqual([
+      { turn: "turn_a", status: "awaiting-input" },
+      { turn: "turn_b", status: "awaiting-input" },
+    ]);
+    const answer = controlled();
+    // Held open: the cards being answered are still in `pending` until the
+    // server answers, which is when they would show as waiting turns too.
+    let release!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (release = resolve)));
+    let done!: Promise<void>;
+    await act(async () => {
+      done = Promise.all(box.api.pending.map((call) => box.api.approve(call.toolCallId, true))).then(() => {});
+      await Promise.resolve();
+    });
+    await settle();
+    expect(shape(box.api.runs)).toEqual([{ status: "submitted" }]);
+    await act(async () => {
+      release(answer.response);
+      answer.push(start("run_a2"), ...finish("run_a2", "ma2"));
+      answer.close();
+      await done;
+    });
+  });
+});
+
 describe("questions of parallel turns (#1355)", () => {
   /** A run of turn `turn` that ends asking one approval, `toolCallId`. */
   const parks = (runId: string, messageId: string, turn: string, toolCallId: string): AgentStreamFrame[] => [

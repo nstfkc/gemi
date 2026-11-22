@@ -95,7 +95,12 @@ describe("endsRun", () => {
     expect(result.usage).toMatchObject({ inputTokens: 10, outputTokens: 5, totalTokens: 15 });
 
     // Streamed like a model's reply, and persisted like one.
-    expect(events).toContainEqual({ type: "message-start", messageId: closing.id, role: "assistant" });
+    expect(events).toContainEqual({
+      type: "message-start",
+      messageId: closing.id,
+      role: "assistant",
+      ...(closing.turn ? { turn: closing.turn } : {}),
+    });
     expect(events).toContainEqual({
       type: "text-delta",
       messageId: closing.id,

@@ -233,6 +233,31 @@ class ChatSessionTest {
   }
 
   @Test
+  fun answeringOneTurnsQuestionLeavesAnotherTurnsOpen() = runTest {
+    val transport = FakeTransport { request ->
+      if (jsonOf(request.body.decodeToString()).body["turn"].body["toolResults"] != null) sse(*answer("Published.", "run_2", "m2"))
+      else
+        sse(
+          """{"type":"run-start","runId":"run_1"}""",
+          """{"type":"awaiting-input","runId":"run_1","pending":[
+            {"toolCallId":"tc_a","name":"publish","input":{},"kind":"approval","signature":"sa","turn":"turn_a"},
+            {"toolCallId":"tc_b","name":"publish","input":{},"kind":"approval","signature":"sb","turn":"turn_b"}]}"""
+            .replace("\n", ""),
+          """{"type":"run-end","runId":"run_1","finishReason":"awaiting-input"}""",
+        )
+    }
+    val chat = session(transport)
+    chat.send("Publish both")
+    assertEquals(listOf("turn_a", "turn_b"), chat.state.value.pending.map { it.turn })
+
+    chat.approve("tc_b", true).join()
+
+    // Only B was answered; A's question is still that turn's to answer.
+    assertEquals(listOf("tc_a"), chat.state.value.pending.map { it.toolCallId })
+    assertEquals(ChatStatus.AwaitingInput, chat.state.value.status)
+  }
+
+  @Test
   fun aTypedAnswerIsEncodedByTheToolsOwnType() = runTest {
     val transport = FakeTransport { request ->
       if (jsonOf(request.body.decodeToString()).body["turn"].body["toolResults"] != null) sse(*answer("Thanks.", "run_2", "m2"))

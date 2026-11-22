@@ -95,6 +95,12 @@ public enum ClientToolResult: Sendable, Hashable {
   /// tool's output schema on the server before the model sees it.
   case output(toolCallId: String, signature: String, path: [String]?, output: JSONValue)
 
+  var toolCallId: String {
+    switch self {
+    case .approval(let toolCallId, _, _, _, _), .output(let toolCallId, _, _, _): toolCallId
+    }
+  }
+
   var json: JSONValue {
     var json: JSONObject
     switch self {
