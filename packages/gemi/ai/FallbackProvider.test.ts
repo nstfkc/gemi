@@ -583,6 +583,8 @@ describe("FallbackProvider", () => {
       parallelToolCalls: true,
       toolSearch: false,
       supportsForcedToolChoice: true,
+      trailingContext: false,
+      allowedTools: false,
     });
     expect(chain.model).toBe("a");
   });

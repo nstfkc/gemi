@@ -14,7 +14,12 @@ import {
   type MessagesRequest,
 } from "./providers/anthropicRequest";
 import { parseMessagesStream } from "./providers/anthropicStream";
-import { capabilitiesForClaude, capabilitiesForModel } from "./providers/capabilities";
+import {
+  capabilitiesForClaude,
+  capabilitiesForModel,
+  claudeRequestFeatures,
+  responsesRequestFeatures,
+} from "./providers/capabilities";
 import {
   anthropicTarget,
   azureRealtimeTarget,
@@ -75,11 +80,26 @@ export type ProviderCapabilities = {
   /**
    * Whether the model takes a forced `toolChoice` (`"required"` or
    * `{ name }`) (#1261). A provider that answers `false` sends one as `auto`,
-   * and `Agent` emulates it: a system line naming the call the step must
-   * make, and one more ask when the step ends without it. Absent means
+   * and `Agent` emulates it: a line after the conversation (with the
+   * trailing context) naming the call the step must make, and one more ask when the step ends without it. Absent means
    * `true`, so a custom provider written before this flag is unchanged.
    */
   supportsForcedToolChoice?: boolean;
+  /**
+   * Whether the provider sends `ProviderStreamParams.trailingContext` itself,
+   * after the conversation and outside the cached prefix (#1345). Absent
+   * means `false`: `Agent` then adds it as a last user message, so a custom
+   * provider still sends it, only with the cache breakpoint wherever it puts
+   * one.
+   */
+  trailingContext?: boolean;
+  /**
+   * Whether the provider takes `ProviderStreamParams.allowedTools` (#1345):
+   * the full tool list is sent and the call is held to the names given, so
+   * a step that narrows its tools keeps the cached prefix. Absent means
+   * `false`: `Agent` sends only the narrowed list.
+   */
+  allowedTools?: boolean;
 };
 
 /** A tool as the model is shown it: schema only, no implementation. */
@@ -141,6 +161,21 @@ export interface ProviderStreamParams {
    * a cut is retried like any other retryable failure.
    */
   retryToolArgumentsTooLong?: boolean;
+  /**
+   * Text for the model sent after the conversation on this call (#1345): the
+   * current screen, the time, a small state note. Never stored. A provider
+   * that declares `capabilities.trailingContext` sends it after the last
+   * message and keeps its cache breakpoint before it, so it can change on
+   * every call without a cache miss.
+   */
+  trailingContext?: string;
+  /**
+   * The tool names this call may use, when a step narrowed them (#1345).
+   * Only sent to a provider that declares `capabilities.allowedTools`; `tools`
+   * is then the run's full list. A call to a tool not named is refused by
+   * `Agent` either way.
+   */
+  allowedTools?: string[];
   /**
    * The agent making the call (#1343): its `name`, and `depth` (0 for the
    * run, 1 for a sub-agent it called, and so on). For a provider shared by
@@ -414,7 +449,7 @@ export class OpenAIProvider extends AgentProvider {
   constructor(model: string, config: ProviderConfig = {}) {
     super();
     this.model = model;
-    this.capabilities = capabilitiesForModel(model);
+    this.capabilities = { ...capabilitiesForModel(model), ...responsesRequestFeatures(model) };
     this.config = config;
   }
 
@@ -511,7 +546,7 @@ export class AnthropicProvider extends AgentProvider {
   constructor(model: string, config: AnthropicConfig = {}) {
     super();
     this.model = model;
-    this.capabilities = capabilitiesForClaude(model);
+    this.capabilities = { ...capabilitiesForClaude(model), ...claudeRequestFeatures() };
     this.config = config;
   }
 
@@ -646,7 +681,7 @@ export class AzureAnthropicProvider extends AnthropicProvider {
 
   constructor(model: string, config: FoundryConfig = {}) {
     super(model, config);
-    this.capabilities = { ...capabilitiesForClaude(model), fileInput: false };
+    this.capabilities = { ...capabilitiesForClaude(model), ...claudeRequestFeatures(), fileInput: false };
   }
 
   /** `ANTHROPIC_FOUNDRY_*` from the environment for what `config` leaves out. */
@@ -712,7 +747,7 @@ export class AzureOpenAIProvider extends AgentProvider {
     // Read off the model, not the deployment: a deployment called `prod` says
     // nothing, and an unrecognized name lands on the all-capabilities default
     // anyway. See `capabilitiesForModel`.
-    this.capabilities = capabilitiesForModel(model);
+    this.capabilities = { ...capabilitiesForModel(model), ...responsesRequestFeatures(model) };
     this.config = config;
   }
 

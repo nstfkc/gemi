@@ -1344,7 +1344,11 @@ describe("AzureAnthropicProvider", () => {
 
   test("capabilities are Claude's, without file input; upload refuses", async () => {
     const provider = AzureAnthropicProvider.model("claude-opus-5-5", { resourceName: "r" });
-    expect(provider.capabilities).toEqual({ ...capabilitiesForClaude("claude-opus-5-5"), fileInput: false });
+    expect(provider.capabilities).toEqual({
+      ...capabilitiesForClaude("claude-opus-5-5"),
+      trailingContext: true,
+      fileInput: false,
+    });
     await expect(provider.upload(new File(["x"], "a.pdf"))).rejects.toThrow(/Files API/);
     // A file in the history is named by its attachment id, not sent.
     const blocks = toMessages(
