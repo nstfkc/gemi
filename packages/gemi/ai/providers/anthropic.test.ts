@@ -39,10 +39,11 @@ import type { FetchLike } from "./http";
 const DIR = join(import.meta.dirname, "__fixtures__");
 const fixture = (name: string) => readFileSync(join(DIR, name), "utf8");
 
+/** The parsed events, without the progressive `usage` ones (#1353; tested in `partialUsage.test.ts`). */
 async function parse(raw: string | string[], options?: { structuredOutput?: boolean }) {
   const out: ProviderEvent[] = [];
   const chunks = typeof raw === "string" ? [raw] : raw;
-  for await (const event of parseMessagesStream(chunks, options)) out.push(event);
+  for await (const event of parseMessagesStream(chunks, options)) if (event.type !== "usage") out.push(event);
   return out;
 }
 

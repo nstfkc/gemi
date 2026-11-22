@@ -147,6 +147,14 @@ result.metered?.byModel; // the chat model, the image model, a sub-agent's model
 
 Unlike `result.usage`, which is one sum across every model the run used, `result.metered` prices each call at its own model's prices. Price a run from `metered`, not from `usage`. `metered` is optional in the type so that results built by hand (stubs, replays) still typecheck, but every agent run sets it.
 
+## Calls that don't end normally
+
+A call is billed when it doesn't finish cleanly too, and its usage is counted (#1353):
+
+- **Cut or broken halfway.** A call cut at the output limit, or a stream that breaks after some output, ends with an `error` and a `finish` that both carry what the provider reported so far. OpenAI reports a cut response's usage (`response.incomplete`, `response.failed`); a stream that just breaks has no count from OpenAI, which reports usage only on its last frame. Anthropic reports usage as the answer streams, so its broken calls are counted.
+- **Retried.** An attempt dropped before its first content and asked again is on the `retry` event's `usage`, and added to the `finish` that closes the call, so summing `finish` usage counts it once.
+- **Stopped.** A run stopped mid-call is billed what the call had used: the run's `usage`, the message's `usage` and the meter include it. The provider events say it as `{ type: "usage", usage }` while the call streams: the whole call's count so far, which the closing `finish` replaces.
+
 ## What a meter doesn't see
 
 - **Work `fn` started and didn't wait for** counts only if it finishes before `fn` returns (or before the run ends, for a run's meter). Once a meter's scope has settled, `add` on it does nothing.

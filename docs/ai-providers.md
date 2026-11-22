@@ -94,7 +94,8 @@ const run = agent.stream({
 - `AgentController` has the same hook: `onProviderRetry(info, ctx)`, as a method or in `defineAgentHooks`.
 - The client gets `{ type: "retry", messageId, attempt, maxRetries, code, delayMs, remainingMs? }`: the error's `code` only, never its message, status or request id. A sub-run's retries arrive as `nested-event` frames. The reducer leaves the transcript as it is, and nothing is stored in the thread. `useChat({ onRetry })` is called with the frame's fields for this agent's own retries; a reattach that replays the run's frames calls it again.
 - `generate({ onProviderRetry })` takes the same hook, without the run's fields.
-- `FallbackProvider` passes a leg's `retry` events on as they happen. A custom `AgentProvider` that retries can yield `{ type: "retry", ...ProviderRetryInfo }` itself.
+- `FallbackProvider` passes a leg's `retry` events on as they happen. A custom `AgentProvider` that retries can yield `{ type: "retry", ...ProviderRetryInfo }` itself. The event's `usage` is what the dropped attempt used, when the provider said ([Calls that don't end normally](./ai-usage.md#calls-that-dont-end-normally)).
+- A custom provider can yield `{ type: "usage", usage }` while a call streams, the call's count so far, so a stopped run is billed for it. It is optional.
 
 ### Timeouts
 
