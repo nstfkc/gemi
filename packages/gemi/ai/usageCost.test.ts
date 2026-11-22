@@ -9,7 +9,7 @@ import { addUsage } from "./runtime";
 import { s } from "./Schema";
 import { MemoryAttachmentStore, ScopedAttachments } from "./store/Attachments";
 import type { UsageReport } from "./usageLimits";
-import { priceUsage, resetUnpricedWarnings, Usage, withCost } from "./usageMeter";
+import { openMeter, priceUsage, resetUnpricedWarnings, Usage, withCost } from "./usageMeter";
 
 /**
  * `Usage.costUsd` (#1146): each model call priced at the `ModelPrices` table
@@ -275,7 +275,7 @@ describe("a run's costUsd", () => {
   });
 
   test("an image a tool generates is priced on the run, and its record on the call carries no cost", async () => {
-    Usage.configure({ pricing: { ...prices, "fake-image": { input: 5, output: 10 } } });
+    Usage.configure({ pricing: { ...prices, "fake-image": { input: 5, output: 10, imageOutput: 10 } } });
     const banner = ImageModel.create({ name: "banner", provider: fakeImageProvider(), size: "1024x1024" });
     const draw = AgentTool.create({
       name: "draw",
@@ -329,6 +329,16 @@ describe("images", () => {
     expect(image.usage.costUsd).toBeCloseTo((15 * 5 + 196 * 30) / 1_000_000);
   });
 
+  test("image tokens without an image price are null, warned once; a meter prices them as text", async () => {
+    Usage.configure({ pricing: { "fake-image": { input: 5, output: 10 } } });
+    const model = ImageModel.create({ name: "banner", provider: fakeImageProvider() });
+    const metered = await Usage.meter(() => model.generate({ prompt: "a street" }));
+    expect(metered.value.usage.costUsd).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain("imageOutput");
+    expect(metered.cost).toBeCloseTo((15 * 5 + 196 * 10) / 1_000_000);
+  });
+
   test("an unpriced image model is null", async () => {
     Usage.configure({ pricing: { "gpt-test": { input: 1, output: 1 } } });
     const model = ImageModel.create({ name: "banner", provider: fakeImageProvider() });
@@ -336,7 +346,45 @@ describe("images", () => {
   });
 });
 
+describe("warnings", () => {
+  test("a call inside a run's meter warns to that run's log, not the console", async () => {
+    Usage.configure({ pricing: prices });
+    const log = vi.fn();
+    const scope = openMeter({ warn: log });
+    const image = ImageModel.create({ name: "banner", provider: fakeImageProvider() });
+    await scope.run(async () => {
+      // Deeper in: a nested meter without a log of its own still finds the run's.
+      await Usage.meter(() => image.generate({ prompt: "x" }));
+    });
+    scope.close();
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(String(log.mock.calls[0]![0])).toContain('"fake-image"');
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
 describe("generate", () => {
+  test("on a fallback chain, each leg is priced at its own model", async () => {
+    Usage.configure({ pricing: { a: { input: 1, output: 0 }, b: { input: 100, output: 0 } } });
+    const leg = (model: string, events: any[]) =>
+      Object.assign(fakeProvider(events), { model }) as unknown as ReturnType<typeof fakeProvider>;
+    const chain = FallbackProvider.chain([
+      {
+        provider: leg("a", [
+          { type: "error", error: { code: "rate_limited", message: "busy", retryable: true } },
+          { type: "finish", reason: "error", usage: usage(1_000_000, 0) },
+        ]),
+      },
+      { provider: leg("b", [{ type: "output-delta", delta: '{"ok":true}' }, finish(10_000, 0)]) },
+    ]);
+    const metered = await Usage.meter(() =>
+      generate({ provider: chain, prompt: "x", output: s.object({ ok: s.boolean() }) }),
+    );
+    // a's leg at $1, b's answer at $1: not $101 at b's price.
+    expect(metered.value.usage.costUsd).toBeCloseTo(2);
+    expect(metered.byModel.a!.cost).toBeCloseTo(1);
+  });
+
   test("its usage carries the call's cost", async () => {
     Usage.configure({ pricing: prices });
     const result = await generate({
