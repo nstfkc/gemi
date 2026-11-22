@@ -447,7 +447,7 @@ export async function voiceToken(req: HttpRequest) {
       type: "transcription",
       languages: ["en", "tr"],
       prompt: "Voice commands for a website builder.",
-      keywords: ["hero", "navbar", "fager"],
+      keywords: ["hero", "navbar", "footer"],
       delay: "low",
     },
   });

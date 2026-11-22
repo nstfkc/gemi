@@ -16,6 +16,16 @@ What to check:
 - **Usage totals** go up a little for runs that were stopped or failed halfway: those calls are now counted.
 - **Tests that compare a provider's events with `toEqual`** see the new `usage` events (Anthropic), and `usage` on `error` and `retry`.
 
+# 0.233.1
+
+## Two email-code verifies at once for a new address no longer answer 500 (#1356)
+
+**Fix (patch version).** Both requests found no user, and the second insert broke the unique email: `UniqueConstraintError` escaped `POST /auth/email-code/verify` as a 500. Now, when creating the user fails and the user exists after all, the request goes on as a sign-in for that user (`isNewUser: false`), and `onUserCreated` runs once. With an issued code the second request is `invalid_code`, as before, since the first one spent it. Only a failed insert is recovered this way: an `onUserCreated` that throws still fails the request.
+
+On SQLite, `UserProvider.transaction` now queues in the process, one transaction after another per connection, as the legacy-session lock already did: the second sign-up's `BEGIN` failed with "cannot start a transaction within a transaction" while the first one's was open. The next one begins at the commit, before the after-commit callbacks, so a listener that signs someone up again doesn't wait on itself. The queue doesn't cover an app's own `Model.transaction` calls in other requests, or several processes on one SQLite file ([#1362](https://github.com/nstfkc/gemi/issues/1362)).
+
+What to check: nothing. An `onUserCreated` that wrote rows outside the user provider's transaction already ran only for the winning request.
+
 # 0.233.0
 
 ## Text after the conversation, and a prompt cache that holds across turns (#1345)
@@ -1570,7 +1580,7 @@ What can stop compiling:
 
 # Upgrading from 0.166.0 to 0.166.1
 
-## Client: a cancelled build-mismatch reload no longer stalls later navigations (folio#2750)
+## Client: a cancelled build-mismatch reload no longer stalls later navigations
 
 **Fix (patch). Nothing to change in apps.**
 
@@ -1778,7 +1788,7 @@ What can stop compiling:
 
 - New option `onRedisError: "memory" | "open" | "closed"`, **default `"memory"`**: a call that Redis fails, times out on, or that finds the client disconnected is counted by an in-process limiter (new option `fallback`, default a new `InMemoryRateLimiter`). During an outage each instance enforces the limit on its own (N instances, N budgets) instead of the limit being turned off. Before, the default was to admit every request (`failOpen: true`).
   - To keep the old behaviour, pass `onRedisError: "open"`. `failOpen` still works and is deprecated: `true` is `"open"`, `false` is `"closed"`; `onRedisError` wins when both are set.
-  - An app that wrapped `RedisRateLimiter` to fall back to `InMemoryRateLimiter` from `onError` (folio's `SharedRateLimiter`) can drop the wrapper and use the driver as is.
+  - An app that wrapped `RedisRateLimiter` to fall back to `InMemoryRateLimiter` from `onError` can drop the wrapper and use the driver as is.
 - **Behaviour change:** after a failure the limiter stops sending its script until Redis answers a `PING` (at most one a second, in the background), and answers every call in between as `onRedisError` says, at once. Before, every call went to Redis and waited out `timeout`; and Bun's offline queue (after a disconnect) or a stalled connection (a paused Redis) ran every increment of the outage once Redis was back, putting its callers over budget for up to two windows. Now at most the calls sent before the first failure was seen (`timeout` worth) can land late. Limits are shared again about a second after Redis recovers.
 - **Behaviour change:** a client that was seen connected and now says `connected === false` is not sent to; the call is answered as `onRedisError` says and `onError` gets a `RedisRateLimiterDisconnectedError` (new export of `gemi/services`). `RateLimiterRedisClient` gains an optional `connected`.
 - **Behaviour change:** the default `onError` writes one `console.error` line at most once a minute (with how many failures and calls without Redis it left out) and a `console.info` line when Redis answers again, instead of one line per failure. A custom `onError` still gets every failure: each failed call, then each failed `PING` while Redis stays down.
@@ -1844,7 +1854,7 @@ What can stop compiling:
 - `{{> name}}` includes another prompt (a partial), which shares the values.
 - Files are cached when `NODE_ENV` is `production` and re-read otherwise. `Prompt.configure({ dir, shared, cache })` changes the folders or the caching.
 - `Prompt.placeholders(name)` lists the placeholders a prompt uses.
-- An app with its own loader (fager's `renderPrompt`) can switch with no change to its files: the name rules and the `{{word}}` syntax are the same.
+- An app with its own loader can switch with no change to its files: the name rules and the `{{word}}` syntax are the same.
 
 ## `HttpResponse.redirect`, `.noContent`, `.text`; `HttpResponse` from stream and file routes (#990, #714)
 
@@ -2762,7 +2772,7 @@ New, and opt-in: nothing changes unless `contextWindow.compact` is set. See [AI 
 - **`AgentStreamParams.summaryStore`**: where a run keeps its thread's summaries, unless `compact.store` names one.
 - New exports from `gemi/ai`: `MemorySummaryStore`, `defaultSummaryStore`, `keepSummary`, `COMPACT_SUMMARY_HEADER`, `DEFAULT_COMPACT_INSTRUCTIONS`, `DEFAULT_COMPACT_TRIGGER_TOKENS`, `DEFAULT_MAX_SUMMARY_TOKENS`, `settleSummaries`, and the types `ContextCompactOptions`, `SummaryStore` and `ThreadSummary`.
 
-kyte, which windows inside `AgentStore.loadThread` today, can move to `contextWindow` with `compact` and add `loadSummaries`/`saveSummary` to its store (one table, see the docs).
+An app that windows inside `AgentStore.loadThread` today can move to `contextWindow` with `compact` and add `loadSummaries`/`saveSummary` to its store (one table, see the docs).
 
 ## Change feeds: `ChangeFeed`, `useSubscription` (#761)
 
@@ -2862,7 +2872,7 @@ New, and opt-in: `gemi build` without `--stats` is unchanged. See [Bundle Stats]
 - To report per route without booting the app in the build, the route table is read in a child process (`gemi/stats/route-table`, a new export) that imports the Kernel and runs only its synchronous `boot()`: providers register, nothing boots. If it fails, the stats are reported per view instead, with a message.
 - New: `DomainRouter.viewGroups()`, and the `StatsConfig`/`StatsBudgets` types from `gemi/config`.
 
-An app with its own bundle-stats script (kyte's `scripts/bundle-stats.ts`) can move its budgets into `gemi.config.ts` and run `gemi build --stats --json … --base … --markdown …` instead.
+An app with its own bundle-stats script can move its budgets into `gemi.config.ts` and run `gemi build --stats --json … --base … --markdown …` instead.
 
 ## Static views set no cookies of their own, and take `cacheControl`
 
@@ -2888,7 +2898,7 @@ Behaviour change: a `CorsMiddleware` (or a subclass from `CorsMiddleware.configu
 
 New, nothing to change. `afterCommit(fn)` runs `fn` after the surrounding transaction commits, or immediately when no transaction is open, and never on rollback (including when the savepoint it was registered in rolls back). It is the commit hook `static afterCommit` events already use, so an app no longer needs to push onto `ormContext.getStore()?.afterCommit` itself. See [Running something after the commit](docs/orm.md#running-something-after-the-commit).
 
-An app doing that today (kyte's `SiteChangeSignals.signalAfterCommit`) can replace the `ormContext` branch with `afterCommit(() => this.signal(siteId))`.
+An app doing that today can replace the `ormContext` branch with `afterCommit(() => this.signal(siteId))`.
 
 ## `gemi dev` honours `SERVER_IDLE_TIMEOUT` (#787)
 
@@ -2900,7 +2910,7 @@ Behaviour changes to know:
 - **A blank `SERVER_IDLE_TIMEOUT=` means the default (10)** in both servers. `gemi start` used to read it as `0`, which disables the timeout; write `0` for that.
 - **A value that isn't a whole number from 0 to 255 fails the boot** with a message naming the variable. Before, Bun refused non-integers and values above 255 with its own message, and accepted negatives.
 
-An app that worked around the dev limit (kyte's site change feed falls back to a 10-second wait in development) can use the same wait in both.
+An app that worked around the dev limit (falling back to a 10-second wait in development, say) can use the same wait in both.
 
 # Upgrading from 0.108.0 to 0.109.0
 
@@ -2921,7 +2931,7 @@ Behaviour changes to know:
 - **The document payload carries `staticRoutes`** when an app has static routes, and the client router turns a navigation to one into a full page load (`location.replace`), since nothing on the client can render it. `Link` prefetching skips them.
 - **`getStyles(views, { layout })`**, the render callback the servers pass to the view router, takes an optional second argument. This only matters to code that calls the dispatcher's render function itself (tests that stub `getStyles` keep working).
 
-An app that serves public, mostly-static pages (kyte's published sites and previews) can declare those routes `.static({ layout })` with a site-only stylesheet, and turn its few interactive components into islands.
+An app that serves public, mostly-static pages (published sites and previews, say) can declare those routes `.static({ layout })` with a site-only stylesheet, and turn its few interactive components into islands.
 
 # Upgrading from 0.107.0 to 0.108.0
 
@@ -2931,7 +2941,7 @@ Bug fix, nothing to change. When two routes used the same view (a legacy path an
 
 ## `gemi build` precompresses the client bundle; `/assets/*` is served compressed and `immutable` (#789)
 
-`gemi start` compressed SSR HTML but sent `/assets/*.js` and `*.css` at their raw size, so a page's JavaScript went over the wire about three times larger than it needed to (a kyte page: 917 kB instead of ~231 kB brotli).
+`gemi start` compressed SSR HTML but sent `/assets/*.js` and `*.css` at their raw size, so a page's JavaScript went over the wire about three times larger than it needed to (one app's page: 917 kB instead of ~231 kB brotli).
 
 What changes:
 
@@ -2971,7 +2981,7 @@ Behaviour changes to know:
 - **The `message-id` stream event carries the stored user message** as an optional `message` field. A client that sent the turn renames its copy as before and ignores the field. A client that never held the copy (one attached from elsewhere) appends it, unless a message with that id is already there, so the question shows above the answer without re-reading the thread. The reducers in `useChat`, the Swift `ChatSession` and the Kotlin `ChatSession` all do this; a custom client can ignore the field.
 - **`run-start` empties a stored in-progress copy of its run.** A thread read while a run is going holds the answer so far (`AgentMessage.runId` set, no `finishReason`). A client that showed that read and then attached got the run replayed from its first frame on top of it, and the text was printed twice. The reducers now clear the content of those messages (and their `runId`) when that run's `run-start` arrives, so the replay rebuilds them in place. This also covers the mount-time attach onto a server-rendered mid-run thread.
 
-An app that re-reads its thread on a change feed (kyte's `useSharedThread`) can drop its "running elsewhere" heuristic and its own `/stop` call: call `reattach()` where it refetched, and use the chat's own `status`, `messages` and `stop()`.
+An app that re-reads its thread on a change feed can drop its "running elsewhere" heuristic and its own `/stop` call: call `reattach()` where it refetched, and use the chat's own `status`, `messages` and `stop()`.
 
 ## `gemi/ai`: `contextWindow`, `prepareStep` and turn helpers (#473)
 
@@ -2981,7 +2991,7 @@ New, and nothing changes unless an app opts in: without `contextWindow` or `prep
 - **`prepareStep`** on `Agent.create`, `Agent.stream` and `AgentController` (a method, also given the hook context) is called before every model call and may answer `{ messages, instructions }` for that call alone.
 - **Exported helpers**: `turnStarts`, `splitTurns`, `windowMessages`, `messageSize` and `injectedMessageIds` (previously internal), with the types `ContextWindowOptions`, `ContextWindowResult`, `PrepareStep`, `PrepareStepContext` and `PrepareStepResult`.
 
-An app that windows its thread in `AgentStore.loadThread` (kyte) can move that to `contextWindow` and let `loadThread` answer the whole thread. Its own turn splitter can use `turnStarts`, which steps over the messages a tool injected to show a file.
+An app that windows its thread in `AgentStore.loadThread` can move that to `contextWindow` and let `loadThread` answer the whole thread. Its own turn splitter can use `turnStarts`, which steps over the messages a tool injected to show a file.
 
 ## `gemi/http`: per-route request body limits, `body-limit:SIZE` (#752)
 
@@ -3018,7 +3028,7 @@ Nothing changes for an app that does not opt in. See [Testing routes](https://ns
 
 It applies to every object of that schema at any depth (inside arrays, `anyOf` members, and when the schema is nested in an `s.object` or an `s.recursive` body), whether or not the object says `additionalProperties: false`. The emitted JSON Schema is unchanged. A key whose value is `undefined` counts as absent. `SchemaIssueCode` gains `"additionalProperties"`; code that switches over it exhaustively needs the new case.
 
-**Action:** none. An app that checks a body's keys itself before `validate` (kyte's form submissions) can pass `unknownKeys: "error"` instead.
+**Action:** none. An app that checks a body's keys itself before `validate` can pass `unknownKeys: "error"` instead.
 
 # Upgrading from 0.105.0 to 0.106.0
 
@@ -3366,7 +3376,7 @@ No change is needed to upgrade: everything is opt-in, and nothing touches `gemi_
 `Json` columns take `has_key`, `has_some_keys` and `has_every_key`, on the column and at a `path`, on Postgres and SQLite:
 
 ```ts
-await AsyncJob.findMany({ where: { payload: { has_some_keys: ["folioAiWorkspace", "folioAiReadiness"] } } });
+await AsyncJob.findMany({ where: { payload: { has_some_keys: ["aiWorkspace", "aiReadiness"] } } });
 ```
 
 No change is needed to upgrade: both are opt-in, and existing updates and filters behave as before.
@@ -4363,10 +4373,9 @@ What to delete in your app:
 - `app/broadcasting/` (your `BroadcastingChannel` subclasses)
 - any `Broadcast.channel(...).publish(...)` call, and any `useSubscription` /
   `useBroadcast` in components
-- test stubs of `BroadcastManager`. folio's
-  `apps/web/app/auth/legacySessionMigration.postgres.bun-check.ts` imports
-  `BroadcastManager` from `gemi/services` only to stub the broadcasting branch
-  of `Auth.user()`; delete that import and the stub. `Auth.user()` no longer
+- test stubs of `BroadcastManager`. A test that imports `BroadcastManager`
+  from `gemi/services` only to stub the broadcasting branch of `Auth.user()`
+  can delete that import and the stub. `Auth.user()` no longer
   resolves `BroadcastManager`, so nothing replaces it.
 
 The typechecker finds each of these: every removed name is now a missing
@@ -4922,8 +4931,8 @@ your proxy-secret header.
 
 ```ts
 trustProxy: {
-  hostHeader: "x-kyte-host",                       // default "x-forwarded-host"
-  secret: { header: "x-kyte-proxy-secret", value: process.env.PROXY_SECRET! },
+  hostHeader: "x-app-host",                       // default "x-forwarded-host"
+  secret: { header: "x-app-proxy-secret", value: process.env.PROXY_SECRET! },
 }
 ```
 

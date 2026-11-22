@@ -12940,7 +12940,7 @@ export async function voiceToken(req: HttpRequest) {
       type: "transcription",
       languages: ["en", "tr"],
       prompt: "Voice commands for a website builder.",
-      keywords: ["hero", "navbar", "fager"],
+      keywords: ["hero", "navbar", "footer"],
       delay: "low",
     },
   });
@@ -13968,9 +13968,9 @@ await User.findMany({ where: { metadata: [1, 2] } })                        // a
 ### JSON key filters
 
 ```ts
-await AsyncJob.findMany({ where: { payload: { has_key: "folioAiWorkspace" } } })
+await AsyncJob.findMany({ where: { payload: { has_key: "aiWorkspace" } } })
 await AsyncJob.findMany({
-  where: { payload: { has_some_keys: ["folioAiWorkspace", "folioAiReadiness"] } },
+  where: { payload: { has_some_keys: ["aiWorkspace", "aiReadiness"] } },
 })
 await AsyncJob.findMany({ where: { payload: { has_every_key: ["a", "b"] } } })
 await AsyncJob.findMany({ where: { payload: { path: ["meta"], has_key: "b" } } })   // postgres path
@@ -17179,6 +17179,13 @@ export default defineAuthConfig({
   `{ session, isNewUser }`, sets the `access_token` cookie, and fires `onSignIn` and
   `onAuthenticated`. A wrong, expired or missing code is a validation error on `code`
   (`"invalid_code"`); the guess past `maxAttempts` burns the code (`"too_many_attempts"`).
+  Two verifies at once for a new address (a double submit, a retry) create the user once:
+  with an issued code the second is `"invalid_code"` (the code is spent); with the fixed
+  development code it signs in to the same user, with `isNewUser: false`. `onUserCreated`
+  runs once. On SQLite, gemi's sign-in transactions queue one after another in the process,
+  each releasing the next at its commit. The queue doesn't cover the app's own
+  `Model.transaction` calls in other requests, or several processes on one database file
+  ([#1362](https://github.com/nstfkc/gemi/issues/1362)).
 
 Both answer 404 unless `enabled`. On the client:
 

@@ -901,9 +901,9 @@ await User.findMany({ where: { metadata: [1, 2] } })                        // a
 ### JSON key filters
 
 ```ts
-await AsyncJob.findMany({ where: { payload: { has_key: "folioAiWorkspace" } } })
+await AsyncJob.findMany({ where: { payload: { has_key: "aiWorkspace" } } })
 await AsyncJob.findMany({
-  where: { payload: { has_some_keys: ["folioAiWorkspace", "folioAiReadiness"] } },
+  where: { payload: { has_some_keys: ["aiWorkspace", "aiReadiness"] } },
 })
 await AsyncJob.findMany({ where: { payload: { has_every_key: ["a", "b"] } } })
 await AsyncJob.findMany({ where: { payload: { path: ["meta"], has_key: "b" } } })   // postgres path
