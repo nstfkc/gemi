@@ -671,6 +671,42 @@ describe("questions of parallel turns (#1355)", () => {
     });
   });
 
+  test("a card being answered when a new message goes out does not come back", async () => {
+    const { box } = await twoParked({});
+    let respond!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (respond = resolve)));
+    let answered!: Promise<void>;
+    await act(async () => {
+      answered = box.api.approve("tc_a", true);
+      await Promise.resolve();
+    });
+    // The message's run leaves the questions open (a busyPolicy ran it beside them).
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_c", threadId: "th_9" } },
+        { seq: 1, event: { type: "run-end", runId: "run_c", finishReason: "stop" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("and the footer");
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_b"]);
+    await act(async () => {
+      respond(streamed(ANSWER));
+      await answered.catch(() => {});
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).not.toContain("tc_a");
+  });
+
+  test("restored cards come back ahead of the ones the message's own run asked", async () => {
+    const { box } = await twoParked({});
+    fetchMock.mockResolvedValueOnce(streamed(parks("run_c", "mc", "turn_c", "tc_c")));
+    await act(async () => {
+      await box.api.sendMessage("publish the footer");
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a", "tc_b", "tc_c"]);
+  });
+
   test("an error frame keeps other turns' cards", async () => {
     const { box } = await twoParked();
     fetchMock.mockResolvedValueOnce(

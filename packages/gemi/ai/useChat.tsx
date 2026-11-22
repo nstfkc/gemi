@@ -1453,7 +1453,9 @@ export function useChat<P extends keyof AgentRoutes>(
       // comes back.
       const setAside =
         authored.length > 0 && !turn.toolResults?.length && ifBusy !== "parallel" && previous.threadId
-          ? (previous.pending as ChatPendingToolCall[]).filter((call) => call.turn !== undefined)
+          ? // Not a card being answered: its answer settles it, whatever the
+            // message's run does.
+            (previous.pending as ChatPendingToolCall[]).filter((call) => call.turn !== undefined && !call.answering)
           : [];
       const answered = turn.toolResults?.length
         ? settledBy(
@@ -1567,7 +1569,8 @@ export function useChat<P extends keyof AgentRoutes>(
           const open = setAside.filter(
             (call) => !resolved.has(call.path?.[0] ?? call.toolCallId) && !held.has(call.toolCallId),
           );
-          if (open.length > 0) commit({ ...current, pending: [...current.pending, ...open] });
+          // Ahead of what the message's own run asked: they were asked first.
+          if (open.length > 0) commit({ ...current, pending: [...open, ...current.pending] });
         }
       } catch (error) {
         // An abort is `stop()` or unmount; both already put the UI where it
