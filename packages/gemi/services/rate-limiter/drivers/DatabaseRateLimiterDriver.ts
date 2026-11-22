@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { DatabaseManager } from "../../../database/DatabaseManager";
+import { Log } from "../../../facades/Log";
 import { app } from "../../../foundation/app";
 import { DatabaseLockStore } from "../../lock/DatabaseLockStore";
 import type { LockStore } from "../../lock/LockStore";
@@ -120,7 +121,16 @@ export class DatabaseRateLimiter extends RateLimiterDriver {
   private maybePrune() {
     if (this.pruneEvery === 0 || ++this.calls % this.pruneEvery !== 0 || this.pruning) return;
     this.pruning = this.prune()
-      .catch((error: unknown) => console.error("[gemi] DatabaseRateLimiter could not prune ended windows", error))
+      .catch((error: unknown) => {
+        const message = "DatabaseRateLimiter could not prune ended windows";
+        const metadata = { error: error instanceof Error ? error.message : String(error) };
+        try {
+          Log.error(message, metadata);
+        } catch {
+          // No app to log through (a limiter used outside one): still say it.
+          console.error(`[gemi] ${message}`, error);
+        }
+      })
       .finally(() => {
         this.pruning = undefined;
       });

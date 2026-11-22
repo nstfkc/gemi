@@ -274,14 +274,19 @@ export class DatabaseLockStore implements LockStore {
     // in `LIMIT`.
     const limit = q.unsafe(String(Math.max(1, Math.floor(batch))));
     // A prefix compared as a string, not a `LIKE` pattern: `_` and `%` in it
-    // match only themselves.
+    // match only themselves. Byte for byte on MySQL, whose default collations
+    // ignore case: `RATELIMIT:` is not `ratelimit:`.
     const length = q.unsafe(String(prefix.length));
-    const owned = q`substr(name, 1, ${length}) = ${prefix} AND expires_at <= ${now}`;
+    const owned = this.mysql
+      ? q`CAST(substr(name, 1, ${length}) AS BINARY) = CAST(${prefix} AS BINARY) AND expires_at <= ${now}`
+      : q`substr(name, 1, ${length}) = ${prefix} AND expires_at <= ${now}`;
     const result = this.mysql
       ? await q`DELETE FROM ${table} WHERE ${owned} LIMIT ${limit}`
       : await q`
           DELETE FROM ${table}
           WHERE name IN (SELECT name FROM ${table} WHERE ${owned} LIMIT ${limit})
+            -- Again here: a hit may have restarted a window since the select.
+            AND expires_at <= ${now}
         `;
     return affected(result);
   }

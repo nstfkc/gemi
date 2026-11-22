@@ -131,11 +131,13 @@ for (const backend of backends) {
         const store = db.store();
         await store.acquire("lock", "owner", 50);
         await store.hit("rlX_other", 5, 50);
+        // The prefix in another case: MySQL's default collation would match it.
+        await store.hit("RL_upper", 5, 50);
         await new Promise((resolve) => setTimeout(resolve, 250));
 
         expect(await limiter.prune()).toBe(3);
-        // The window still open, the lock (lapsed, but a lock) and the look-alike stay.
-        expect(await db.names()).toEqual(["lock", "rlX_other", "rl_open"]);
+        // The window still open, the lock (lapsed, but a lock) and the look-alikes stay.
+        expect(await db.names()).toEqual(["RL_upper", "lock", "rlX_other", "rl_open"]);
       } finally {
         await db.dispose();
       }
@@ -150,7 +152,9 @@ for (const backend of backends) {
           await limiter.consume({ key: `ip:${i}`, limit: 1, window: 20 });
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
-        await limiter.prune();
+        // Counted with no `prune()` of the test's own, after the last
+        // background one has had time to end: without them, 60 rows.
+        await new Promise((resolve) => setTimeout(resolve, 200));
         expect((await db.names()).length).toBeLessThan(20);
       } finally {
         await db.dispose();
