@@ -74,7 +74,9 @@ export type ChatStatus = "idle" | "submitted" | "streaming" | "awaiting-input" |
  * per running reply, so a UI can show each with its own status and questions.
  *
  * - `id`: a client-side id, the same for as long as the entry is listed: a
- *   key for the UI. A turn waiting on its questions is keyed by its turn.
+ *   key for the UI. A turn waiting on its questions is keyed by its turn
+ *   (`turn:<turn>`), and the answer to that turn alone keeps the id while it
+ *   streams. An answer that covers several turns' questions gets a new id.
  * - `runId`: the run, once its stream says (`run-start`, or the run an attach
  *   asked for). None before that, and none for a turn waiting on its
  *   questions: its run has ended.
@@ -450,8 +452,9 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    * The replies in progress (#1344): the requests in flight (a send, an
    * answer, an attach that found a run), in the order they started, then the
    * turns waiting on their questions. Empty when the chat is idle: an attach
-   * or a probe that has not found a run yet is not listed. One entry for a chat that never runs side
-   * by side; several with `ifBusy: "parallel"`. See `ChatRun`.
+   * or a probe that has not found a run yet is not listed. One entry for a
+   * chat that never runs side by side; several with `ifBusy: "parallel"`.
+   * See `ChatRun`.
    */
   runs: ChatRun[];
   /**
@@ -1456,10 +1459,14 @@ export function useChat<P extends keyof AgentRoutes>(
       }
       const clientRunId = localId();
       const controller = new AbortController();
+      // An answer to one turn's questions keeps that turn's entry id, so a row
+      // keyed by `run.id` stays mounted from waiting to streaming. Unless a
+      // request in flight already carries it (a second answer to that turn).
+      const single = answerTurns?.size === 1 ? `turn:${[...answerTurns][0]}` : undefined;
       const flight: Flight = {
         controller,
         clientRunId,
-        id: clientRunId,
+        id: single && ![...flightsRef.current].some((other) => other.id === single) ? single : clientRunId,
         ...(answerTurns ? { turns: answerTurns } : turn.text || turn.files?.length ? { turns: "new" as const } : {}),
       };
       const wasBusy = flightsRef.current.size > 0;

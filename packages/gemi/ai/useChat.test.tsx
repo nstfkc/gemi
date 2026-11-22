@@ -571,6 +571,7 @@ describe("runs (#1344)", () => {
       await box.api.sendMessage("publish");
     });
     expect(shape(box.api.runs)).toEqual([{ turn: "turn_a", status: "awaiting-input" }]);
+    const waitingId = box.api.runs[0]!.id;
 
     const answer = controlled();
     fetchMock.mockResolvedValueOnce(answer.response);
@@ -579,8 +580,10 @@ describe("runs (#1344)", () => {
       done = box.api.approve("tc_a", true);
       await Promise.resolve();
     });
-    // One reply, not two: the answer going out is that turn's.
+    // One reply, not two: the answer going out is that turn's, under the
+    // same id, so a row keyed by it stays mounted.
     expect(shape(box.api.runs)).toEqual([{ turn: "turn_a", status: "submitted" }]);
+    expect(box.api.runs[0]!.id).toBe(waitingId);
     await act(async () => {
       answer.push(start("run_a2"), message("ma2", "turn_a"), ...finish("run_a2", "ma2"));
       answer.close();
@@ -655,7 +658,10 @@ describe("runs (#1344)", () => {
       { turn: "turn_b", status: "awaiting-input" },
     ]);
     const answer = controlled();
-    fetchMock.mockResolvedValueOnce(answer.response);
+    // Held open: the cards being answered are still in `pending` until the
+    // server answers, which is when they would show as waiting turns too.
+    let release!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (release = resolve)));
     let done!: Promise<void>;
     await act(async () => {
       done = Promise.all(box.api.pending.map((call) => box.api.approve(call.toolCallId, true))).then(() => {});
@@ -664,6 +670,7 @@ describe("runs (#1344)", () => {
     await settle();
     expect(shape(box.api.runs)).toEqual([{ status: "submitted" }]);
     await act(async () => {
+      release(answer.response);
       answer.push(start("run_a2"), ...finish("run_a2", "ma2"));
       answer.close();
       await done;
