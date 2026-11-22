@@ -6,7 +6,7 @@ An agent run has a meter of its own (`ctx.meter` in its tools, `result.metered` 
 
 ## Prices
 
-Declare what you pay once, at boot. The table form is USD per million tokens, the same `ModelPrice` that `Eval.create({ pricing })` takes:
+Declare what you pay once, at boot. The table form (`ModelPrices`) is USD per million tokens, the same `ModelPrice` that `Eval.create({ pricing })` takes. gemi ships no prices of its own: they change and differ by contract.
 
 ```ts
 // app/config/ai.ts
@@ -24,8 +24,11 @@ Usage.configure({
 ```
 
 - A key also prices the model ids it's a prefix of (`gpt-5.4` prices `gpt-5.4-2026-03-05`), and the longest matching key wins.
-- `cachedInput` defaults to `input`. `imageInput` and `imageOutput` price image tokens; without them, image tokens are priced as text.
-- A model with no price costs 0 and is listed in `unpriced`.
+- **Set `cachedInput` for every model that reads the prompt cache.** A cache read is a fraction of `input` (Anthropic: a tenth or less, depending on the model), and an agent loop is mostly cache reads. Without it, `usage.costUsd` of a call with cache reads is `null`, and a meter prices them at `input`, an over-count.
+- `cacheWriteInput` defaults to `input` times the provider's published rule (`provider.cacheWriteFactor(model)`): 1.25 on Anthropic, for the 5-minute cache gemi asks for. A `FallbackProvider` asks the leg that served the call. Other providers state none: `costUsd` of a call that writes the cache is then `null` unless you set `cacheWriteInput`, and a meter prices writes at `input`. Set `cacheWriteInput` for a contract rate too.
+- `imageInput` and `imageOutput` price image tokens; without them, image tokens are priced as text.
+- A table can't express long-context tiers, fast modes, regional premiums or batch discounts. Price those with a function, and read the meter's `cost`: a function gives no `costUsd`.
+- In a meter, a model with no price costs 0 and is listed in `unpriced`.
 
 Or give a function. It answers the cost in whatever unit you count in, and `undefined` for a model it doesn't price:
 
@@ -51,6 +54,22 @@ If the function throws or answers something that isn't a finite number, the call
 Every cost a meter holds is in the pricing's unit, including the ones you `add`. So with the function above, add micros too.
 
 A meter can override the pricing for itself with `Usage.meter(fn, { pricing })`. A meter without its own pricing uses the nearest enclosing meter's, then `Usage.configure`'s. The configured pricing is read when a call is recorded, so meters that are already open pick up a change.
+
+## `usage.costUsd`
+
+With a table in effect, every model call's usage gets `costUsd` when it finishes, and it's summed with the usage. So `result().usage.costUsd` is the run's cost in USD (its steps, its tools' `generate` calls, sub-runs and images), `generate`'s `result.usage.costUsd` is that call's, and `ImageModel`'s `image.usage.costUsd` that image's.
+
+```ts
+const result = await agent.stream(params).result();
+await log.insert({ runId: result.runId, costUsd: result.usage.costUsd });
+```
+
+- `null` when gemi can't price a call without guessing: its model isn't in the table, or it read the cache and the model has no `cachedInput`, or it wrote the cache with neither `cacheWriteInput` nor a provider rule. A total with such a call in it is `null` too. The first one of each model and reason logs one warning, to the run's log.
+- `null` under a pricing function (its unit is yours, not necessarily USD), including a call inside a `Usage.meter(fn, { pricing })` with a function, so a run mixing the two isn't a partial sum. The meter's `cost` covers that case. Absent with no pricing at all.
+- A fallback chain prices each leg at its own model: the closing `finish` splits the usage by model (`byModel`) when abandoned legs spent something.
+- **Server-side only.** `costUsd` is on `result().usage`, `generate`'s result (its `usage` and its `messages`), `ImageModel`'s results, and `usageLimits.onUsage` (`report.costUsd.delta` / `.total`). An agent run strips it from every frame sent to a client (`usage`, `message-end`, tool calls' generated-image records) and from what it stores (its messages, a sub-run's transcript, compaction summaries), so end users never see what their work cost you.
+- **`result().usage` includes it**, and so does `AgentTurn.result()`. Pick the fields you return from a route or an MCP tool rather than returning the result whole. To show spend, send it yourself.
+- Video: gemi has no video model. Report what a video API costs with `Usage.add("video", cost)` in the run or meter.
 
 ## Metering work outside a run
 
@@ -198,7 +217,7 @@ How a limit is applied:
 
 - **Checked before what it limits.** `steps` and `tokens` before every model call, `toolCalls` before every tool call. Tokens are only known after a call, so a run stops once it has reached its token limit; the call that crossed it isn't undone.
 - **Over a limit,** the run ends with `finishReason: "error"` and the error code `"usage_limit"` (not retryable). The client is told which kind of limit, never a scope's key. `result().error.usageLimit` and the controller's `onError` get `{ scope, metric, limit, used }`, where `scope` is `"run"` or the key. A tool call refused by a limit gets a `usage_limit` result, and the run ends after that step. A scope that's already spent ends the turn before the model is called.
-- **`onUsage`** hears what was spent after each model call and each batch of tool calls, and once more as the run ends (`final: true`), with the `delta`, the run's `total` and the scope keys. A throw is logged and the run goes on.
+- **`onUsage`** hears what was spent after each model call and each batch of tool calls, and once more as the run ends (`final: true`), with the `delta`, the run's `total` and the scope keys, and `costUsd: { delta, total }` in USD once a call has been priced at a table. A throw is logged and the run goes on.
 - **The store.** The default `MemoryUsageLimitStore` counts per process and forgets on restart. Give a shared store when you run more than one instance: an object with `get(key)` and `add(key, delta)`, backed by a database row or Redis. A store whose `get` throws fails the run (code `unknown`, retryable) rather than letting it go on unmetered; an `add` that throws is logged.
 - **Concurrency.** Limits are soft under concurrency: two runs of one key can each take their next step before either has added what it spent.
 - **Sub-agents.** A sub-run started by `ctx.runAgent` has no limits of its own, but its tokens count toward the parent run's.

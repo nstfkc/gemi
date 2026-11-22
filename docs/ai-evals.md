@@ -134,7 +134,7 @@ Eval.create({
 });
 ```
 
-A key also prices the model ids it's a prefix of (`gpt-5.4` prices `gpt-5.4-2026-03-05`), and the longest matching key wins. Models without a price are listed in `totals.unpriced`. `imageInput` and `imageOutput` price image tokens; without them, image tokens are priced as text. Cache-write surcharges (some vendors bill writing to the prompt cache above the input rate) aren't modelled, because `Usage` doesn't report them.
+A key also prices the model ids it's a prefix of (`gpt-5.4` prices `gpt-5.4-2026-03-05`), and the longest matching key wins. Models without a price are listed in `totals.unpriced`. `imageInput` and `imageOutput` price image tokens; without them, image tokens are priced as text. Cache writes are priced at `cacheWriteInput`, else at `input`. An eval re-prices each model's usage after the run and has no provider at hand, so it doesn't apply a provider's cache-write rule (Anthropic's 1.25x), while a run's meter and `usage.costUsd` do. Set `cacheWriteInput` in the eval's pricing for Anthropic models to make the two agree.
 
 The same meter is available on its own:
 

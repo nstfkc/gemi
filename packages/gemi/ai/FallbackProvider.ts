@@ -288,6 +288,18 @@ export class FallbackProvider extends AgentProvider {
     return first.deleteFile(fileId);
   }
 
+  /**
+   * The factor of the leg that serves `model`: the one named so, else one
+   * whose model the reported id starts with (a dated id); none when no leg
+   * does.
+   */
+  cacheWriteFactor(model: string): number | undefined {
+    const leg =
+      this.entries.find((entry) => entry.provider.model === model) ??
+      this.entries.find((entry) => model.startsWith(entry.provider.model));
+    return leg?.provider.cacheWriteFactor?.(model);
+  }
+
   normalizeError(error: unknown): AgentError {
     return this.entries[0]!.provider.normalizeError(error);
   }
@@ -352,10 +364,18 @@ export class FallbackProvider extends AgentProvider {
         return { type: "usage", usage: addUsage(addUsage(emptyUsage(), billed), event.usage), byModel };
       };
 
-      const closing = (event: Extract<ProviderEvent, { type: "finish" }>) => {
-        const merged = billed ? addUsage(addUsage(emptyUsage(), billed), event.usage) : event.usage;
+      /** The leg's closing `finish` as the whole call's: the abandoned legs' cost added, by model. */
+      const closing = (event: Extract<ProviderEvent, { type: "finish" }>): Extract<ProviderEvent, { type: "finish" }> => {
+        if (!billed) return event;
+        const own = event.model ?? model;
+        const byModel = { ...billedByModel };
+        byModel[own] = addUsage(addUsage(emptyUsage(), byModel[own] ?? emptyUsage()), event.usage);
+        const merged = addUsage(addUsage(emptyUsage(), billed), event.usage);
         billed = undefined;
-        return { ...event, usage: merged };
+        for (const key of Object.keys(billedByModel)) delete billedByModel[key];
+        // Only a split worth telling: a leg that spent nothing adds nothing.
+        const spent = Object.entries(byModel).filter(([key, part]) => key === own || part.totalTokens > 0);
+        return spent.length > 1 ? { ...event, usage: merged, byModel: Object.fromEntries(spent) } : { ...event, usage: merged };
       };
 
       try {
@@ -485,7 +505,12 @@ export class FallbackProvider extends AgentProvider {
         if (!finished && billed) {
           // The leg ended without a closing frame; the abandoned legs' cost
           // still has to be told to someone.
-          yield { type: "finish", reason: failure ? "error" : "stop", usage: billed };
+          yield {
+            type: "finish",
+            reason: failure ? "error" : "stop",
+            usage: billed,
+            byModel: { ...billedByModel },
+          };
           billed = undefined;
         }
         this.report({
