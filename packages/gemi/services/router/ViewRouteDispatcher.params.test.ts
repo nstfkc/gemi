@@ -125,6 +125,28 @@ describe("view route parameters", () => {
     ]);
   });
 
+  // Decoding is many-to-one, so the data is filed under the path as it was
+  // requested, never one rebuilt from the decoded params: that is the key the
+  // client router looks it up under (`ClientRouter.viewDataKey.test.tsx`).
+  const spellings: [string, string][] = [
+    ["/notes/john@x.com", "john@x.com"],
+    ["/notes/john%40x.com", "john@x.com"],
+    ["/notes/c++", "c++"],
+    ["/notes/a:b", "a:b"],
+    ["/notes/a%2fb", "a/b"],
+  ];
+
+  test.each(spellings)("a page load of %s files the loader data under that path", async (path, id) => {
+    const html = await (await page(path)).text();
+    expect(html).toContain(`"pageData":{${JSON.stringify(path)}:{"Note":{"Note":{"id":${JSON.stringify(id)}}`);
+  });
+
+  test.each(spellings)("a client navigation to %s files the loader data under that path", async (path, id) => {
+    const body = await (await navigate(`${path}.json`)).json();
+    expect(Object.keys(body.data)).toEqual([path]);
+    expect(body.data[path].Note.Note).toEqual({ id });
+  });
+
   test("a malformed escape is a 404 page load that runs no loader", async () => {
     const res = await page("/notes/%E0%A4%A");
     expect(res.status).toBe(404);

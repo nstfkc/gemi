@@ -28,7 +28,6 @@ import { QueryManagerContext, QueryManagerProvider, type QueryConfig } from "./Q
 import { I18nProvider } from "./I18nContext";
 import { useNavigate } from "./useNavigate";
 import { type PageData, type RouteState, RouteStateProvider } from "./RouteStateContext";
-import { applyParams } from "../utils/applyParams";
 import type { Action } from "history";
 import { useRouteData } from "./useRouteData";
 import { updateMeta } from "./Head";
@@ -500,9 +499,12 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       <RouteStateProvider state={routeState}>
         <Tree
           action={routeState.action}
-          // `applyParams` strips the trailing slash, so the root comes back as
-          // `""` while the server keys its data under `/` (#819).
-          pathname={applyParams(routeState.pathname ?? "/", routeState.params) || "/"}
+          // The path the router is on, as the server keyed the view data: the
+          // requested URL, or the history entry's after a navigation. Not
+          // rebuilt from the params, which are decoded (#1322): re-encoding
+          // `john@x.com` gives `john%40x.com`, and a `:` in a concrete path
+          // would be read as a param.
+          pathname={routeState.pathname || "/"}
           tree={componentTree}
           entries={routeState.pathname ? routeState.views : ["404"]}
         />

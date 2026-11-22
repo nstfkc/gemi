@@ -3,48 +3,32 @@ import { describe, test, expect } from "vitest";
 import { initialRenderedRoute } from "./partialRender";
 
 describe("initialRenderedRoute()", () => {
-  test("resolves the route pattern the server matched", () => {
-    // What the router holds on the first render — a pattern, not a path.
-    expect(
-      initialRenderedRoute({
-        pathname: "/app/:orgId/chat",
-        params: { orgId: "acme" },
-        search: "",
-      }),
-    ).toBe("/app/acme/chat");
-  });
-
-  test("keeps an already-resolved path as it is", () => {
-    expect(
-      initialRenderedRoute({ pathname: "/about", params: {}, search: "" }),
-    ).toBe("/about");
+  test("keeps the path the router is on", () => {
+    expect(initialRenderedRoute({ pathname: "/app/acme/chat", search: "" })).toBe("/app/acme/chat");
   });
 
   test("keeps the search string", () => {
-    expect(
-      initialRenderedRoute({
-        pathname: "/app/:orgId/chat",
-        params: { orgId: "acme" },
-        search: "?tab=2",
-      }),
-    ).toBe("/app/acme/chat?tab=2");
+    expect(initialRenderedRoute({ pathname: "/app/acme/chat", search: "?tab=2" })).toBe(
+      "/app/acme/chat?tab=2",
+    );
   });
 
   test("falls back to the root", () => {
     expect(initialRenderedRoute({})).toBe("/");
+    expect(initialRenderedRoute({ pathname: "" })).toBe("/");
   });
 });
 
-describe("initialRenderedRoute() with decoded params (#1322)", () => {
-  test("encodes a slash so it stays in its segment", () => {
-    expect(
-      initialRenderedRoute({ pathname: "/notes/:id", params: { id: "a/b" }, search: "" }),
-    ).toBe("/notes/a%2Fb");
-  });
-
-  test("encodes a literal percent sign", () => {
-    expect(
-      initialRenderedRoute({ pathname: "/notes/:id", params: { id: "%2F" }, search: "" }),
-    ).toBe("/notes/%252F");
+describe("initialRenderedRoute() is not rebuilt from decoded params (#1322)", () => {
+  test.each([
+    "/notes/a%2Fb",
+    "/notes/a%2fb",
+    "/notes/%252F",
+    "/u/john@x.com",
+    "/u/c++",
+    // A `:` here is part of the value, not a param.
+    "/u/a:b",
+  ])("%s goes out as it came in", (pathname) => {
+    expect(initialRenderedRoute({ pathname, search: "" })).toBe(pathname);
   });
 });
