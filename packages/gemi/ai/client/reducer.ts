@@ -160,6 +160,75 @@ export function initialChatState<T extends ToolShapes = ToolShapes, O = unknown>
 }
 
 /**
+ * The turn each tool call in `messages` was asked in (`AgentMessage.turn` of
+ * the message holding it), by `toolCallId`: for a pending call without its
+ * own `turn`. `undefined` for a call stored without one.
+ */
+function callTurns(messages: readonly AgentMessage<any, any>[]): Map<string, string | undefined> {
+  const turns = new Map<string, string | undefined>();
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type === "tool-call") turns.set(part.toolCallId, message.turn);
+    }
+  }
+  return turns;
+}
+
+/** The top-level call a pending one stands for: itself, or the call its sub-run is nested under. */
+const hostOf = (call: { toolCallId: string; path?: string[] }) => call.path?.[0] ?? call.toolCallId;
+
+/**
+ * The held calls an answer to the calls in `ids` settles (#1355): the calls
+ * of the turns those belong to. Another turn's question is that turn's to
+ * answer, and the server leaves it open. Where a turn can't be told (a
+ * transcript stored before `AgentMessage.turn`, a call the transcript doesn't
+ * hold), every held call, as before.
+ */
+export function settledBy(
+  messages: readonly AgentMessage<any, any>[],
+  pending: readonly PendingToolCall<any>[],
+  ids: ReadonlySet<string>,
+): Set<string> {
+  const turns = callTurns(messages);
+  const turnOf = (call: PendingToolCall<any>) => call.turn ?? turns.get(hostOf(call));
+  const answered = pending.filter((call) => ids.has(call.toolCallId));
+  const named = new Set(answered.map(turnOf));
+  if (answered.length === 0 || named.has(undefined)) {
+    return new Set(pending.map((call) => call.toolCallId));
+  }
+  return new Set(
+    pending
+      .filter((call) => {
+        const turn = turnOf(call);
+        return turn === undefined || named.has(turn);
+      })
+      .map((call) => call.toolCallId),
+  );
+}
+
+/**
+ * The held calls in `pending` that belong to a turn none of `next` belongs
+ * to: what an `awaiting-input` frame for one turn leaves standing (#1355).
+ * None when a turn can't be told, as before.
+ */
+function othersTurns<T extends ToolShapes>(
+  messages: readonly AgentMessage<T, any>[],
+  pending: readonly PendingToolCall<T>[],
+  next: readonly PendingToolCall<T>[],
+): PendingToolCall<T>[] {
+  if (pending.length === 0) return [];
+  const turns = callTurns(messages);
+  const turnOf = (call: PendingToolCall<T>) => call.turn ?? turns.get(hostOf(call));
+  const asking = new Set(next.map(turnOf));
+  if (asking.has(undefined) || asking.size === 0) return [];
+  const replaced = new Set(next.map((call) => call.toolCallId));
+  return pending.filter((call) => {
+    const turn = turnOf(call);
+    return turn !== undefined && !asking.has(turn) && !replaced.has(call.toolCallId);
+  });
+}
+
+/**
  * The calls a stored transcript is still waiting on (#1052): every
  * `AgentMessage.pending` entry whose tool call has no result yet.
  *
@@ -605,7 +674,13 @@ function reduce<T extends ToolShapes, O>(
     }
 
     case "awaiting-input":
-      return { ...state, runId: event.runId, pending: [...event.pending] };
+      // The questions of this run's turn (#1355): another turn's, still
+      // waiting beside it, are kept.
+      return {
+        ...state,
+        runId: event.runId,
+        pending: [...othersTurns(state.messages, state.pending, event.pending), ...event.pending],
+      };
 
     case "message-end":
       return withMessage(state, event.messageId, now, (message) => ({
@@ -657,7 +732,12 @@ function reduce<T extends ToolShapes, O>(
       // Clearing `pending` here is what keeps "pending is non-empty exactly
       // when the UI is awaiting input" true: a run that errored is not holding
       // a question any more, it is holding a failure.
-      return { ...state, error: event.error, pending: [] };
+      //
+      // Calls that name their turn are kept (#1355): they are other turns'
+      // questions, still open on the server. A run's own turn holds none by
+      // the time it fails, since it settled them on the way in, and
+      // `awaiting-input` is terminal.
+      return { ...state, error: event.error, pending: state.pending.filter((call) => call.turn !== undefined) };
 
     case "run-end":
       return {
