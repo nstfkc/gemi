@@ -72,6 +72,10 @@ export {
   type RedisRateLimiterFailureMode,
   type RateLimiterRedisClient,
 } from "./rate-limiter/drivers/RedisRateLimiterDriver";
+export {
+  DatabaseRateLimiter,
+  type DatabaseRateLimiterOptions,
+} from "./rate-limiter/drivers/DatabaseRateLimiterDriver";
 export { RateLimiterDriver } from "./rate-limiter/drivers/RateLimiterDriver";
 export type { ConsumeParams, RateLimitResult } from "./rate-limiter/types";
 export type { ConsumeOptions, RateLimitMessage } from "./rate-limiter/RateLimiter";

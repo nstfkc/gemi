@@ -414,6 +414,7 @@ describe.each(backends)("locks across instances on $name", (backend) => {
     const sorted = [...runs].sort((x, y) => x - y);
     expect(sorted[3]! - sorted[0]!).toBeGreaterThanOrEqual(1_200);
     expect(sorted[4]! - sorted[1]!).toBeGreaterThanOrEqual(1_200);
-    expect(await countJobs(database)).toBe(0);
+    // A job's row goes once its run has returned, a moment after `run()`.
+    await until(async () => (await countJobs(database)) === 0);
   });
 });

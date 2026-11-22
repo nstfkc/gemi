@@ -336,7 +336,7 @@ An abandoned tick is not retried: the next one is whenever its expression next m
 
 ### In tests
 
-A vitest process (`VITEST` is set) does not start the schedule, so a test that boots the app does not run its cron jobs against the test database. Jobs are still discovered, and `app(Scheduler).jobs` answers as it does elsewhere, so a test can run a tick by hand. Set `GEMI_SCHEDULE=1` for a test that needs the real schedule. `GEMI_NO_SCHEDULE=1` still turns it off everywhere, and wins over `GEMI_SCHEDULE`.
+A vitest process (`VITEST` is set) does not start the schedule, so a test that boots the app does not run its cron jobs against the test database. Jobs are still discovered, and `app(Scheduler).jobs` answers as it does elsewhere, so a test can run a tick by hand. Set `GEMI_SCHEDULE=1` for a test that needs the real schedule. `GEMI_NO_SCHEDULE=1` still turns it off everywhere, and wins over `GEMI_SCHEDULE`. When there are jobs to skip, one line on stderr says so, once per test file that boots the app. A server a test spawns inherits `VITEST` and so skips the schedule too; see [What a test process does not do](./testing.md#what-a-test-process-does-not-do).
 
 ## Cron jobs vs. queued jobs
 

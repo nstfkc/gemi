@@ -12,10 +12,25 @@
  * `127.0.0.1`, `::1`: a test server, a local model) is let through.
  */
 
-// The globals as the process started with them: a stub set later is not the
+// The globals as this module first saw them: a stub set later is not the
 // network.
-const nativeFetch = globalThis.fetch;
-const nativeWebSocket = (globalThis as { WebSocket?: unknown }).WebSocket;
+const loadedFetch = globalThis.fetch;
+const loadedWebSocket = (globalThis as { WebSocket?: unknown }).WebSocket;
+
+/**
+ * Whether `current` is a stand-in for the real global. Under Bun, whose own
+ * `fetch` and `WebSocket` are native code, that is anything that is not
+ * native, so a mock installed before gemi loaded (MSW's
+ * `setupServer().listen()` in a vitest setup file) counts too. Elsewhere it is
+ * anything set after this module loaded.
+ */
+function stubbed(current: unknown, loaded: unknown): boolean {
+  if (typeof Bun === "undefined") return current !== loaded;
+  return (
+    typeof current !== "function" ||
+    !/\{\s*\[native code\]\s*\}\s*$/.test(Function.prototype.toString.call(current))
+  );
+}
 
 /** A built-in provider refused a network call under vitest without `GEMI_AI_LIVE=1`. */
 export class LiveModelCallRefusedError extends Error {
@@ -35,14 +50,14 @@ export function liveCallsAllowed(env: NodeJS.ProcessEnv = process.env): boolean 
 
 /** Throws unless this process may send a real request with the global `fetch`. */
 export function assertLiveFetch(url: string): void {
-  if (liveCallsAllowed() || globalThis.fetch !== nativeFetch || isLoopback(url)) return;
+  if (liveCallsAllowed() || stubbed(globalThis.fetch, loadedFetch) || isLoopback(url)) return;
   throw new LiveModelCallRefusedError(url);
 }
 
 /** Throws unless this process may open a real socket with the global `WebSocket`. */
 export function assertLiveWebSocket(url: string): void {
-  const stubbed = (globalThis as { WebSocket?: unknown }).WebSocket !== nativeWebSocket;
-  if (liveCallsAllowed() || stubbed || isLoopback(url)) return;
+  const current = (globalThis as { WebSocket?: unknown }).WebSocket;
+  if (liveCallsAllowed() || stubbed(current, loadedWebSocket) || isLoopback(url)) return;
   throw new LiveModelCallRefusedError(url);
 }
 

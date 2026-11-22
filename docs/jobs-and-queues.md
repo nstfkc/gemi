@@ -532,7 +532,7 @@ model GemiLock {
 }
 ```
 
-Without Prisma, `await app(QueueManager).locks.store.createTable()` (a `DatabaseLockStore`) creates it. Nothing reads or writes the table until a unique job, a `withoutOverlapping` or `onOneServer` cron job, or the `Lock` facade is used. Rows are kept after release so tokens keep growing; `store.prune(olderThanMs)` deletes idle ones.
+Without Prisma, `await app(QueueManager).locks.store.createTable()` (a `DatabaseLockStore`) creates it. Nothing reads or writes the table until a unique job, a `withoutOverlapping` or `onOneServer` cron job, the `Lock` facade or a [`DatabaseRateLimiter`](./middleware.md#the-database-driver) is used. Rows are kept after release so tokens keep growing; `store.prune(olderThanMs)` deletes idle ones.
 
 The queue slice's `locks` picks another store: `"auto"` (the default: the driver's own), `"memory"`, `"database"` (the default connection), a `LockStore`, or `(app) => LockStore`.
 
