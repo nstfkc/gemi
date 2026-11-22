@@ -829,7 +829,7 @@ export function withTransaction<T>(
   }
 
   if (options?.dialect === "sqlite") {
-    return queuedOnSqlite(pool, (release) => openTransaction(pool, fn, options, current, name, release));
+    return queuedOnSqlite(pool, (release) => openTransaction(pool, fn, options, current, name, release), options);
   }
   return openTransaction(pool, fn, options, current, name);
 }
@@ -844,28 +844,105 @@ export function withTransaction<T>(
 const sqliteQueues = new WeakMap<SQL, Promise<void>>();
 
 /**
- * `begin` once the transactions queued on `pool` before it have let it go.
+ * A transaction on a SQLite pool waited, in the queue, for one it is itself
+ * inside (#1362). It would wait forever: the open transaction can't commit
+ * until this one, which it is waiting on, has run.
  *
- * The next one goes at COMMIT, not when `begin` resolves: `release` is the
- * first after-commit callback. `begin` resolves only after every callback
- * deferred until the commit has run (a sync event listener, say), and one of
- * those that opened a transaction would otherwise wait on the very
- * transaction that waits on it. A rollback runs no callbacks; settling lets
- * it go then.
- *
- * Savepoints never come here: they run inside the open transaction. A
- * transaction that waits for *another* top-level transaction on the same
- * pool, started outside its scope (a detached task it then awaits), waits
- * forever, where before it failed at `BEGIN`.
+ * Thrown, rather than hung, when a transaction that isn't nested through the
+ * ORM's scope starts from inside an open one on the same connection: a raw
+ * `sql.begin` (a store's), or code that deliberately left the transaction's
+ * ORM scope while still awaited by it (an in-process API call or channel
+ * message, `ormContext.exit`). Run that work after the commit
+ * (`afterCommit`), or inside the transaction, where it becomes a savepoint.
  */
-function queuedOnSqlite<T>(pool: SQL, begin: (release: () => void) => Promise<T>): Promise<T> {
+export class TransactionQueueDeadlockError extends Error {
+  constructor() {
+    super(
+      "A SQLite transaction started from inside an open transaction on the same connection, " +
+        "outside its scope (a raw `begin`, or an in-process call that left the transaction's scope " +
+        "while the transaction waits on it). SQLite runs one transaction per connection, so it " +
+        "would wait for the transaction that waits on it. Run it after the commit (`afterCommit`), " +
+        "or inside the transaction.",
+    );
+    this.name = "TransactionQueueDeadlockError";
+  }
+}
+
+/** The transaction each SQLite pool's queue is running now: its token. */
+const queueHolders = new WeakMap<SQL, object>();
+
+/**
+ * The queued transactions the current async context is inside of. An ORM
+ * scope exit (`ormContext.exit`) doesn't leave this one, which is the point:
+ * code that left the ORM scope on purpose is still awaited by the
+ * transaction around it.
+ */
+const insideQueued = new AsyncLocalStorage<ReadonlySet<object>>();
+
+/** How long a transaction waits in the queue before development warns. */
+const QUEUE_WAIT_WARNING_MS = 5_000;
+
+/**
+ * `begin` once the transactions queued on `pool` before it have let it go
+ * (#1362). Exported for the stores that open their own transactions on an
+ * app connection, so every transaction on the pool takes the same turns.
+ *
+ * The next one goes when `release` is called: the ORM calls it first thing
+ * after COMMIT, before the after-commit callbacks, since `begin` resolves
+ * only after those have run and one that opened a transaction would
+ * otherwise wait on the very transaction that waits on it. Settling lets it
+ * go too (a rollback, or a caller that never calls it).
+ *
+ * Savepoints never come here: they run inside the open transaction. One
+ * queued from inside the transaction holding the queue throws
+ * `TransactionQueueDeadlockError`; one waiting longer than 5 seconds warns in
+ * development (`slowTransactionThreshold: false` turns it off).
+ */
+export function queuedOnSqlite<T>(
+  pool: SQL,
+  begin: (release: () => void) => Promise<T>,
+  options: { slowTransactionThreshold?: number | false } = {},
+): Promise<T> {
+  const holder = queueHolders.get(pool);
+  const inside = insideQueued.getStore();
+  if (holder && inside?.has(holder)) return Promise.reject(new TransactionQueueDeadlockError());
+
+  const token = {};
   let release!: () => void;
-  const released = new Promise<void>((resolve) => (release = resolve));
+  const released = new Promise<void>((resolve) => {
+    release = () => {
+      if (queueHolders.get(pool) === token) queueHolders.delete(pool);
+      resolve();
+    };
+  });
   const previous = sqliteQueues.get(pool) ?? Promise.resolve();
   sqliteQueues.set(pool, released);
-  const result = previous.then(() => begin(release));
+
+  const stopWatching = watchQueueWait(options.slowTransactionThreshold);
+  const result = previous.then(() => {
+    stopWatching();
+    queueHolders.set(pool, token);
+    return insideQueued.run(new Set([...(inside ?? []), token]), () => begin(release));
+  });
   result.then(release, release);
   return result;
+}
+
+/** Development's warning for a transaction still waiting in the queue. */
+function watchQueueWait(configured?: number | false): () => void {
+  if (slowTransactionThreshold(configured) === null) return () => {};
+  const site = new Error("transaction queued here");
+  const timer = setTimeout(() => {
+    const stack = site.stack?.split("\n").slice(1).join("\n") ?? "";
+    console.warn(
+      `[gemi] A SQLite transaction has waited ${QUEUE_WAIT_WARNING_MS}ms for the one open on its ` +
+        `connection (SQLite runs one at a time per connection). Look for a long transaction, or ` +
+        `one that waits on work started outside it.\n${stack}\n` +
+        `(development only; database.slowTransactionThreshold: false switches it off)`,
+    );
+  }, QUEUE_WAIT_WARNING_MS);
+  timer.unref?.();
+  return () => clearTimeout(timer);
 }
 
 /** The outermost half of `withTransaction`: `BEGIN` on `pool`, `fn`, `COMMIT`, then the after-commit list. */

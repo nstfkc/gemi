@@ -301,6 +301,7 @@ export class ConnectionQueries {
         {
           slowTransactionThreshold: connection.config.slowTransactionThreshold,
           connection: name,
+          dialect: connection.dialect,
           deferSettings: true,
         },
       );
@@ -375,7 +376,7 @@ export class ConnectionQueries {
       return withTransaction(
         db.sql,
         (tx) => runOnConnection(name, () => tx.unsafe(text, values)),
-        { slowTransactionThreshold: db.config.slowTransactionThreshold, connection: name },
+        { slowTransactionThreshold: db.config.slowTransactionThreshold, connection: name, dialect: db.dialect },
       );
     }
     if (handle === undefined) return db.sql.unsafe(text, values);

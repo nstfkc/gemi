@@ -1,11 +1,19 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { DatabaseManager } from "../database/DatabaseManager";
 import { DB } from "../facades/DB";
 import { Application } from "../foundation/Application";
-import { afterCommit, currentTransaction } from "./context";
+import { DatabaseLockStore } from "../services/lock/DatabaseLockStore";
+import {
+  afterCommit,
+  currentTransaction,
+  ormContext,
+  queuedOnSqlite,
+  TransactionQueueDeadlockError,
+  withTransaction,
+} from "./context";
 import { Model } from "./Model";
 import { clearRegistry, register } from "./registry";
 import type { FieldSchema, ModelSchema } from "./schema";
@@ -225,5 +233,130 @@ describe("transactions on one SQLite connection (#1362)", () => {
       5000,
     );
     expect(await bodies()).toHaveLength(20);
+  });
+
+  test("a store's transactions take turns with the ORM's on the same connection", async () => {
+    const connection = database.connection();
+    // Both the store's own `begin` (no connection name) and its ORM-joined form.
+    const raw = new DatabaseLockStore({ sql: connection.sql, dialect: connection.dialect }, { table: `${table}_locks` });
+    const named = new DatabaseLockStore(connection, { table: `${table}_locks` });
+    await raw.createTable();
+    for (const store of [raw, named]) {
+      const token = (await store.acquire("job", "me", 60_000))!;
+      expect(token).not.toBeNull();
+      const held = gate();
+      const fenced = store.fence("job", "me", token, async () => {
+        await held.opened;
+        return "fenced";
+      });
+      await tick();
+      const orm = Note.transaction(async () => {
+        await Note.create({ data: { body: "beside the store" } });
+      });
+      await tick();
+      held.open();
+      expect(await within(fenced)).toBe("fenced");
+      await within(orm);
+      await store.release("job", "me", token);
+    }
+    expect(await bodies()).toEqual(["beside the store", "beside the store"]);
+  });
+
+  test("a raw begin through queuedOnSqlite takes its turn with the ORM's", async () => {
+    const pool = database.connection().sql;
+    const held = gate();
+    const orm = Note.transaction(async () => {
+      await Note.create({ data: { body: "orm" } });
+      await held.opened;
+    });
+    await tick();
+    const raw = queuedOnSqlite(pool, () =>
+      pool.begin(async (tx) => {
+        await tx.unsafe(`INSERT INTO "${table}" (body) VALUES ('raw')`);
+      }),
+    );
+    held.open();
+    await within(Promise.all([orm, raw]));
+    expect(await bodies()).toEqual(["orm", "raw"]);
+  });
+
+  test("two SQLite files don't wait on each other", async () => {
+    const other = new DatabaseManager({ url: `sqlite://${join(dir, "other.sqlite")}` });
+    try {
+      const held = gate();
+      const a = Note.transaction(async () => {
+        await held.opened;
+      });
+      await tick();
+      // On the other file's pool: no queue in common with `a`.
+      await within(
+        withTransaction(other.connection().sql, async (tx) => tx.unsafe("select 1"), { dialect: "sqlite" }),
+        500,
+      );
+      held.open();
+      await within(a);
+    } finally {
+      await other.close();
+    }
+  });
+
+  test("a store's own begin inside an open ORM transaction on its connection fails loudly, not hangs", async () => {
+    const connection = database.connection();
+    const raw = new DatabaseLockStore({ sql: connection.sql, dialect: connection.dialect }, { table: `${table}_locks` });
+    await raw.createTable();
+    const token = (await raw.acquire("inside", "me", 60_000))!;
+    await expect(
+      within(
+        Note.transaction(async () => {
+          await raw.fence("inside", "me", token, async () => "never");
+        }),
+      ),
+    ).rejects.toBeInstanceOf(TransactionQueueDeadlockError);
+    await raw.release("inside", "me", token);
+    // The queue goes on.
+    await within(Note.transaction(async () => void (await Note.create({ data: { body: "after" } }))));
+    expect(await bodies()).toEqual(["after"]);
+  });
+
+  test("a transaction from a scope that left its caller's transaction fails loudly, not hangs", async () => {
+    // What an in-process API call or channel message does: leave the ORM scope
+    // on purpose while the caller's transaction awaits it.
+    await expect(
+      within(
+        Note.transaction(async () => {
+          await ormContext.exit(() =>
+            Note.transaction(async () => {
+              await Note.create({ data: { body: "inner" } });
+            }),
+          );
+        }),
+      ),
+    ).rejects.toBeInstanceOf(TransactionQueueDeadlockError);
+    expect(await bodies()).toEqual([]);
+  });
+
+  test("development warns about a transaction waiting in the queue for long", async () => {
+    const previousEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "development";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const held = gate();
+      const a = Note.transaction(async () => {
+        await held.opened;
+      });
+      await Promise.resolve();
+      const b = Note.transaction(async () => {});
+      vi.advanceTimersByTime(5_000);
+      const waited = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("has waited"));
+      expect(waited).toHaveLength(1);
+      vi.useRealTimers();
+      held.open();
+      await within(Promise.all([a, b]));
+    } finally {
+      vi.useRealTimers();
+      warn.mockRestore();
+      process.env.NODE_ENV = previousEnv;
+    }
   });
 });

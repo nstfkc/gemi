@@ -1624,15 +1624,24 @@ transaction usable.
 where a second `BEGIN` while a transaction is open fails ("cannot start a transaction within a
 transaction"). So a `Model.transaction` or `DB.transaction` that starts while another one is
 open on the same connection, from another request in the process, waits for it, and starts once
-it commits or rolls back. SQLite allows one writer at a time anyway, so this changes the order,
+it commits or rolls back. gemi's database stores on the same connection (locks and the database
+rate limiter, agent threads, agent jobs) take the same turns. SQLite allows one writer at a time anyway, so this changes the order,
 not the throughput. Savepoints don't queue, and the next transaction starts at the commit,
 before the after-commit callbacks run, so a callback can open a transaction of its own.
 
 - Several processes on one database file aren't queued against each other: SQLite's own locking
   (`SQLITE_BUSY`) applies there.
-- A transaction that waits for a *separate* top-level transaction on the same connection, one
-  started outside its scope (a detached task it then awaits), waits forever, where it used to
-  fail at `BEGIN`. Start that work after the transaction, or nest it.
+- A transaction started from inside an open one on the same connection, but outside its scope,
+  throws `TransactionQueueDeadlockError` instead of waiting forever on the transaction that waits
+  on it. That's a store's own `begin`, or an in-process API call or channel message (which leave
+  the caller's scope on purpose) made inside a transaction. Run that work after the commit
+  (`afterCommit`), or inside the transaction.
+- A transaction that waits on one started elsewhere that queued behind it (a shared promise
+  another request started outside any transaction) can't be told apart, and waits. In
+  development, a transaction that has waited in the queue for 5 seconds logs a warning with
+  where it was queued (`database.slowTransactionThreshold: false` turns it off).
+- Plain statements outside a transaction don't queue, and on SQLite they run inside whichever
+  transaction is open on the connection ([#1375](https://github.com/nstfkc/gemi/issues/1375)).
 
 ### Two things that will bite you
 
