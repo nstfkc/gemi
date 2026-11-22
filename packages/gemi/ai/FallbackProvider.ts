@@ -300,6 +300,9 @@ export class FallbackProvider extends AgentProvider {
     // What the abandoned legs billed. Added to the closing `finish`, so the
     // run's usage is what the call cost rather than what the winning leg cost.
     let billed: Usage | undefined;
+    // The same, by model, for `usage` events (#1353): a stop prices each leg
+    // at its own model.
+    const billedByModel: Record<string, Usage> = {};
     const outer = params.signal;
 
     let attempt = 0;
@@ -336,6 +339,18 @@ export class FallbackProvider extends AgentProvider {
       let timedOut = false;
       let iterator: AsyncIterator<ProviderEvent> | undefined;
       let done = false;
+      // This leg's last `usage` event: its cost when it is left without a
+      // `finish` (timed out, fell back from).
+      let legSoFar: Usage | undefined;
+      /** A leg's `usage` event as the whole call's: the abandoned legs' cost added, by model. */
+      const progress = (event: Extract<ProviderEvent, { type: "usage" }>): ProviderEvent => {
+        legSoFar = event.usage;
+        const own = event.model ?? model;
+        if (!billed) return { ...event, model: own };
+        const byModel = { ...billedByModel };
+        byModel[own] = addUsage(addUsage(emptyUsage(), byModel[own] ?? emptyUsage()), event.usage);
+        return { type: "usage", usage: addUsage(addUsage(emptyUsage(), billed), event.usage), byModel };
+      };
 
       const closing = (event: Extract<ProviderEvent, { type: "finish" }>) => {
         const merged = billed ? addUsage(addUsage(emptyUsage(), billed), event.usage) : event.usage;
@@ -386,6 +401,11 @@ export class FallbackProvider extends AgentProvider {
           // commits would deliver it after the wait it announces.
           if (event.type === "retry") {
             yield event;
+            continue;
+          }
+          // So is the call's usage so far, with the abandoned legs' added.
+          if (event.type === "usage") {
+            yield progress(event);
             continue;
           }
 
@@ -527,7 +547,12 @@ export class FallbackProvider extends AgentProvider {
       });
 
       if (fallback) {
-        if (usage) billed = addUsage(billed ?? emptyUsage(), usage);
+        const spent = usage ?? legSoFar;
+        if (spent) {
+          billed = addUsage(billed ?? emptyUsage(), spent);
+          const key = responseModel ?? model;
+          billedByModel[key] = addUsage(billedByModel[key] ?? emptyUsage(), spent);
+        }
         continue;
       }
 
