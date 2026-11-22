@@ -61,16 +61,40 @@ async function events(provider: AgentProvider, signal?: AbortSignal) {
 const claude = (bodies: Array<() => ReadableStream<Uint8Array>>, maxRetries = 0, model = "claude-sonnet-4-6") =>
   withFetch(new AnthropicProvider(model, { apiKey: "k", maxRetries }), bodies);
 
-/** Runs an agent until `ready` says so, then stops it. */
-async function stopped(provider: AgentProvider, ready: () => boolean) {
+/**
+ * `provider`, noting each event once its consumer has taken it and asked for
+ * the next: the point a stop is sure to find it counted.
+ */
+function watched(provider: AgentProvider) {
+  const consumed: ProviderEvent[] = [];
+  const wrapper: AgentProvider = Object.create(provider);
+  wrapper.stream = async function* (params) {
+    for await (const event of provider.stream(params)) {
+      yield event;
+      consumed.push(event);
+    }
+  };
+  return { provider: wrapper, consumed };
+}
+
+/** Resolves once `ready` says so; a hang fails the test at its timeout. */
+async function until(ready: () => boolean) {
+  while (!ready()) await new Promise((resolve) => setTimeout(resolve, 1));
+}
+
+const usageOf = (consumed: ProviderEvent[], inputTokens: number) => () =>
+  consumed.some((event) => event.type === "usage" && event.usage.inputTokens === inputTokens);
+
+/** Runs an agent on `provider` until its consumer has taken a usage event with `inputTokens`, then stops it. */
+async function stopped(inner: AgentProvider, inputTokens: number) {
+  const { provider, consumed } = watched(inner);
   const stream = Agent.create({ name: "writer", provider }).stream({ messages: [], turn: { text: "go" } });
   const reading = (async () => {
     for await (const _event of stream) {
       // drained
     }
   })();
-  for (let i = 0; i < 200 && !ready(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await until(usageOf(consumed, inputTokens));
   await stream.stop();
   await reading;
   return stream.result();
@@ -112,13 +136,13 @@ describe("Anthropic", () => {
   });
 
   test("a stopped run is billed what the call used so far", async () => {
-    const provider = claude([() => body([MESSAGE_START, TEXT, DELTA_USAGE], "hang")]);
+    const { provider, consumed: consumedHere } = watched(claude([() => body([MESSAGE_START, TEXT, DELTA_USAGE], "hang")]));
     const stream = Agent.create({ name: "writer", provider }).stream({ messages: [], turn: { text: "go" } });
     for await (const event of stream) {
       if (event.type === "text-delta") break;
     }
-    // Let the delta's usage arrive before the stop.
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Wait for the delta's usage to arrive before the stop.
+    await until(() => consumedHere.some((event) => event.type === "usage" && event.usage.outputTokens === 7));
     await stream.stop();
     const result = await stream.result();
     expect(result.finishReason).toBe("aborted");
@@ -129,33 +153,18 @@ describe("Anthropic", () => {
 
 describe("stopped before the first content", () => {
   test("a stop right after message_start bills the input", async () => {
-    let started = false;
-    const provider = claude([
-      () => {
-        started = true;
-        return body([MESSAGE_START], "hang");
-      },
-    ]);
-    const result = await stopped(provider, () => started);
+    const provider = claude([() => body([MESSAGE_START], "hang")]);
+    const result = await stopped(provider, 10);
     expect(result.finishReason).toBe("aborted");
     expect(result.usage).toMatchObject({ inputTokens: 10, outputTokens: 1 });
   });
 
   test("a FallbackProvider's usage includes the legs it fell back from, each metered at its own model", async () => {
-    let second = false;
     const first = claude([() => body([MESSAGE_START], "drop")], 0, "claude-sonnet-4-6");
-    const backup = claude(
-      [
-        () => {
-          second = true;
-          return body([MESSAGE_START], "hang");
-        },
-      ],
-      0,
-      "claude-opus-5-5",
-    );
+    const backup = claude([() => body([MESSAGE_START], "hang")], 0, "claude-opus-5-5");
     const provider = new FallbackProvider([{ provider: first }, { provider: backup }]);
-    const result = await stopped(provider, () => second);
+    // The second leg's event: both legs' input.
+    const result = await stopped(provider, 20);
     expect(result.usage).toMatchObject({ inputTokens: 20, outputTokens: 2 });
     expect(result.metered?.byModel["claude-sonnet-4-6"]?.usage).toMatchObject({ inputTokens: 10 });
     expect(result.metered?.byModel["claude-opus-5-5"]?.usage).toMatchObject({ inputTokens: 10 });
@@ -163,9 +172,9 @@ describe("stopped before the first content", () => {
 
   test("a stopped generate() bills what its call used", async () => {
     const controller = new AbortController();
-    const provider = claude([() => body([MESSAGE_START], "hang")]);
+    const { provider, consumed } = watched(claude([() => body([MESSAGE_START], "hang")]));
     const answer = generate({ provider, output: s.object({ a: s.string() }), prompt: "x", signal: controller.signal });
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await until(usageOf(consumed, 10));
     controller.abort();
     const result = await answer;
     expect(result.ok).toBe(false);
