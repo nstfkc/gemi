@@ -1,3 +1,11 @@
+# 0.233.1
+
+## Two email-code verifies at once for a new address no longer answer 500 (#1356)
+
+**Fix (patch version).** Both requests found no user, and the second insert broke the unique email: `UniqueConstraintError` escaped `POST /auth/email-code/verify` as a 500. Now, when creating the user fails and the user exists after all, the request goes on as a sign-in for that user (`isNewUser: false`), and `onUserCreated` runs once. With an issued code the second request is `invalid_code`, as before, since the first one spent it.
+
+What to check: nothing. An `onUserCreated` that wrote rows outside the user provider's transaction already ran only for the winning request.
+
 # 0.231.0
 
 ## A scripted provider for agent tests (#1343)

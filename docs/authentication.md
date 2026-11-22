@@ -738,6 +738,10 @@ export default defineAuthConfig({
   `{ session, isNewUser }`, sets the `access_token` cookie, and fires `onSignIn` and
   `onAuthenticated`. A wrong, expired or missing code is a validation error on `code`
   (`"invalid_code"`); the guess past `maxAttempts` burns the code (`"too_many_attempts"`).
+  Two verifies at once for a new address (a double submit, a retry) create the user once:
+  with an issued code the second is `"invalid_code"` (the code is spent); with the fixed
+  development code it signs in to the same user, with `isNewUser: false`. `onUserCreated`
+  runs once.
 
 Both answer 404 unless `enabled`. On the client:
 
