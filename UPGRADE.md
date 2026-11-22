@@ -1,3 +1,17 @@
+# 0.231.0
+
+## A scripted provider for agent tests (#1343)
+
+**New API (minor version), no behaviour change.** See [AI Scripted Provider](docs/ai-scripted-provider.md).
+
+- `scriptedProvider(steps | { [agent]: steps }, { exhausted? })` in `gemi/ai/testing`: answers each model call with the next step of its agent's script (text, tool calls, structured output, an error, or a function of the call). `calls`, `callsOf(name)` and `assertDone()`. A call past its script, or from an agent the scripts don't name, fails with a `ScriptedProviderError` naming the agent, the call and its turn. `NO_AGENT` keys the script for calls no agent makes (`generate()`, compaction); `{ error: { code, message, retryable } }` fails with exactly that error.
+- `turnOf(messages)` in `gemi/ai/testing`: the user turn a call answers, grouped as `splitTurns` groups.
+- `ProviderStreamParams.agent`: `{ name, depth }` of the agent making the call. A custom provider can ignore it; it is not sent to the model, and `RecordingProvider` neither records nor matches it, so existing recordings replay as before.
+
+What to check:
+
+- **A custom provider that forwards every field of `ProviderStreamParams` into its request body** would now send `agent` too. Drop it there, as with `signal`.
+
 # 0.230.0
 
 ## Every message names its turn (#1339)
