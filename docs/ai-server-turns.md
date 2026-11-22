@@ -122,6 +122,17 @@ protected maxThreadRuns(req: HttpRequest, { threadId, owner, body }) {
 - `stop` with only a `threadId` stops every run on the thread the caller may stop. `attach` with a `runId` attaches to that run; without one, to the newest. `watch` announces each run going on the thread. `useChat`'s `reattach()` resumes the run the chat was following, one run. With `watch: true`, the watch stream announces every run going on the thread each time it connects, and the chat attaches to each.
 - `maxThreadRuns` counts every run on the thread, whoever started it. On a thread several users share, one of them can use up its limit; count per owner in `maxThreadRuns` (`owner`, and `this.liveRuns.running({ threadId })` with `this.liveRuns.ownerOf(runId)`) if that matters.
 - **Questions stay with their turn** (#1355). Two parallel turns can each wait on a question (an approval, a client tool). A request that answers one of them settles only the calls of the turn it answers: the other turn's question stays open, with its `pending`, until it is answered in turn, in any order. A stop ends the stopped run's turn and refuses its calls, not another turn's. A new message from a turn that asked `ifBusy: "parallel"` (or that started beside a running one) leaves the other turns' questions open as well; any other new message refuses every open call, as before: the person moved on.
+- **`useChat` lists the replies in progress** (#1344). `chat.runs` holds one entry per reply: each request in flight, and each turn waiting on its questions. Each entry has a `status` (`"submitted"`, `"streaming"` or `"awaiting-input"`), the `runId` once the stream has said it, and the `turn` once known. The pending calls with the same `turn` are that reply's questions, so a UI can show each running reply and its cards separately. A streamed message gets its `turn` from `message-start`, before it finishes.
+
+```tsx
+const chat = useChat("/chat", { ifBusy: "parallel" });
+
+chat.runs.map((run) => (
+  <Reply key={run.runId ?? run.turn} status={run.status}>
+    {chat.pending.filter((call) => call.turn === run.turn).map((call) => <Card key={call.toolCallId} call={call} />)}
+  </Reply>
+));
+```
 - A parallel run leaves out the answers other runs are still writing, but not their user messages, so the model can see a question that is not answered yet before its own message. It usually answers only its own; say so in the instructions if it should.
 - Starting waits until the runs already going have taken their own turns in, for at most five seconds, and outside the thread's lock: a supersede or another turn meanwhile is not held up.
 

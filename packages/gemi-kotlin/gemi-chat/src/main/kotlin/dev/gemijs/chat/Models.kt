@@ -95,6 +95,8 @@ public data class AgentMessage(val json: JsonObject) {
   val content: List<ContentPart>
     get() = json["content"].array().orEmpty().map { ContentPart.from(it.obj() ?: JsonObject(emptyMap())) }
   val createdAt: String get() = json.string("createdAt") ?: ""
+  /** The id of the user message that started the turn this message belongs to. */
+  val turn: String? get() = json.string("turn")
   /** Absent while the message is still streaming. */
   val finishReason: FinishReason? get() = json.string("finishReason")?.let(::FinishReason)
   val usage: Usage? get() = Usage.from(json["usage"])
@@ -225,4 +227,8 @@ public data class PendingToolCall(val json: JsonObject) {
   /** The chain of tool calls a sub-agent's question is nested under,
    *  outermost first. Handed back untouched. */
   val path: List<String>? get() = json["path"].array()?.mapNotNull { it.string() }
+  /** The turn that asked it: `AgentMessage.turn` of the message holding the
+   *  call. Answering it settles that turn's calls only. Null from a server
+   *  older than turns. */
+  val turn: String? get() = json.string("turn")
 }

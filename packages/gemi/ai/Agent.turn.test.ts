@@ -50,6 +50,13 @@ describe("AgentMessage.turn (#1339)", () => {
     expect(stream.turn).toEqual({ id: question!.id });
   });
 
+  test("message-start names the turn, so a client can show a streaming reply under it (#1344)", async () => {
+    const agent = Agent.create({ name: "turns", provider: fakeProvider(say("hello")) });
+    const { result, events } = await drain(agent.stream({ messages: [], turn: { text: "hi" } }));
+    const [question, answer] = result.messages as AgentMessage[];
+    expect(events).toContainEqual({ type: "message-start", messageId: answer!.id, role: "assistant", turn: question!.id });
+  });
+
   test("answers to tool calls carry on the turn that asked them, and say so", async () => {
     const agent = Agent.create({
       name: "turns",

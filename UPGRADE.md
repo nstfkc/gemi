@@ -1,3 +1,23 @@
+# 0.236.0
+
+## useChat lists the replies in progress; native clients keep questions with their turn (#1344)
+
+**New API and a client behaviour change (minor version).**
+
+- `useChat` returns `runs: ChatRun[]`: one entry per reply in progress, a request in flight or a turn waiting on its questions, with `status` (`"submitted"`, `"streaming"` or `"awaiting-input"`), `runId` once known and `turn` once known. Match `pending` calls to a reply by `call.turn`. See [Parallel turns](docs/ai-server-turns.md).
+- The `message-start` event carries `turn` (the message's `AgentMessage.turn`) when the run knows it, and the reducer puts it on the streaming message. A streamed reply now has `message.turn` before it finishes.
+- **Kotlin and Swift clients** (`ChatSession`) are turn-aware, like the web hook since 0.232.0:
+  - `PendingToolCall.turn` and `AgentMessage.turn` are new.
+  - An `awaiting-input` for one turn keeps another turn's questions.
+  - An error keeps the questions that name their turn.
+  - Answers alone (`approve`/`answer`) take only the answered turn's cards off `pending`.
+
+What to check:
+
+- **An exhaustive check of `message-start`'s keys** (a test comparing the event with `toEqual`) sees the new `turn`.
+- **A native UI that expected `pending` to empty after answering one card** now keeps another turn's cards. That only happens on servers that run turns side by side. Calls without a `turn` (older servers) behave as before.
+- The conformance fixtures (`client/__fixtures__/reducer.json`) have new cases. A port of the client outside this repo should replay them.
+
 # 0.234.0
 
 ## The database rate limiter stores keys hashed (#1363)

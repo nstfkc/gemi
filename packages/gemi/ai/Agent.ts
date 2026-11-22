@@ -4709,7 +4709,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.current = message;
     this.history.push(message);
     this.produced.push(message);
-    this.emit({ type: "message-start", messageId: message.id, role: "assistant" });
+    this.emit({
+      type: "message-start",
+      messageId: message.id,
+      role: "assistant",
+      ...(message.turn ? { turn: message.turn } : {}),
+    });
     return message;
   }
 

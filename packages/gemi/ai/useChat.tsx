@@ -69,6 +69,26 @@ type BodyOf<P extends keyof AgentRoutes> = AgentRoutes[P] extends { body: infer 
 export type ChatStatus = "idle" | "submitted" | "streaming" | "awaiting-input" | "error";
 
 /**
+ * One reply of the chat's (#1344): a run streaming into it, or a turn waiting
+ * on its questions. With runs side by side (`ifBusy: "parallel"`) there is one
+ * per running reply, so a UI can show each with its own status and questions.
+ *
+ * - `runId`: the run, once its stream says (`run-start`). None before that,
+ *   and none for a turn waiting on its questions: its run has ended.
+ * - `turn`: the turn the reply belongs to, `AgentMessage.turn` of its
+ *   messages, once known: the pending calls of `pending` with the same `turn`
+ *   are its questions. None until the run's first message starts, for a run
+ *   answering calls that carry none, or a server older than this field.
+ * - `status`: `"submitted"` before the stream says anything, `"streaming"`
+ *   while it runs, `"awaiting-input"` for a turn whose run ended asking.
+ */
+export type ChatRun = {
+  runId?: string;
+  turn?: string;
+  status: "submitted" | "streaming" | "awaiting-input";
+};
+
+/**
  * A pending call as `useChat` holds it: the server's `PendingToolCall`, plus
  * whether this client is answering it right now (#1106).
  *
@@ -421,6 +441,13 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    * takes the answer; if the request fails it is plain pending again (#1106).
    */
   pending: ChatPendingToolCall<ToolsOf<P>>[];
+  /**
+   * The replies in progress (#1344): each request in flight (a send, an
+   * answer, an attach) and each turn waiting on its questions, oldest first.
+   * Empty when the chat is idle. One entry for a chat that never runs side
+   * by side; several with `ifBusy: "parallel"`. See `ChatRun`.
+   */
+  runs: ChatRun[];
   /**
    * The deferred tools the model has pulled in during the run in flight.
    *
@@ -1000,7 +1027,24 @@ type Flight = {
    * own. Unknown for an attach, or an answer to calls without a `turn`.
    */
   turns?: ReadonlySet<string> | "new";
+  /** The turn its stream's messages belong to, from their `message-start` (#1344). */
+  turn?: string;
 };
+
+/** `ChatRun` of a request in flight. */
+function flightRun(flight: Flight): ChatRun {
+  const answered = flight.turns instanceof Set && flight.turns.size === 1 ? [...flight.turns][0] : undefined;
+  const turn = flight.turn ?? answered;
+  return {
+    ...(flight.runId ? { runId: flight.runId } : {}),
+    ...(turn ? { turn } : {}),
+    status: flight.runId ? "streaming" : "submitted",
+  };
+}
+
+const sameRuns = (a: ChatRun[], b: ChatRun[]) =>
+  a.length === b.length &&
+  a.every((run, i) => run.runId === b[i]!.runId && run.turn === b[i]!.turn && run.status === b[i]!.status);
 
 /** How often a run announced mid-stream checks whether the chat is free to attach it. */
 const WATCH_RECHECK_MS = 100;
@@ -1090,6 +1134,14 @@ export function useChat<P extends keyof AgentRoutes>(
   // stops a run. More than one when replies stream at once: a parallel turn,
   // or a send while a reply streams that did not cut it off (`ifBusy`).
   const flightsRef = useRef(new Set<Flight>());
+  // `runs` of the requests in flight, set whenever `flightsRef` or a
+  // flight's run or turn changes (`syncRuns`). A ref alone would not render.
+  const [flightRuns, setFlightRuns] = useState<ChatRun[]>([]);
+  const syncRuns = useCallback(() => {
+    if (!mountedRef.current) return;
+    const next = [...flightsRef.current].map(flightRun);
+    setFlightRuns((current) => (sameRuns(current, next) ? current : next));
+  }, []);
   // The phase as last set, for a send that must not turn a streaming chat
   // back to `submitted`.
   const phaseRef = useRef<"idle" | "submitted" | "streaming">("idle");
@@ -1141,9 +1193,10 @@ export function useChat<P extends keyof AgentRoutes>(
   const land = useCallback(
     (flight: Flight) => {
       if (!flightsRef.current.delete(flight)) return;
+      syncRuns();
       if (flightsRef.current.size === 0) setPhaseSafe("idle");
     },
-    [setPhaseSafe],
+    [setPhaseSafe, syncRuns],
   );
 
   /**
@@ -1217,7 +1270,13 @@ export function useChat<P extends keyof AgentRoutes>(
         // cursor when several stream at once (`applyRunFrame`). A stream can
         // carry a second run after the first: a joined message the run did
         // not take starts a turn of its own on the same stream.
-        if (frame.event.type === "run-start") flight.runId = frame.event.runId;
+        if (frame.event.type === "run-start") {
+          flight.runId = frame.event.runId;
+          syncRuns();
+        } else if (frame.event.type === "message-start" && frame.event.turn && flight.turn !== frame.event.turn) {
+          flight.turn = frame.event.turn;
+          syncRuns();
+        }
         setPhaseSafe("streaming");
         const previous = stateRef.current!;
         const next = applyRunFrame(previous, flight.runId ?? flight.asked, frame);
@@ -1293,7 +1352,7 @@ export function useChat<P extends keyof AgentRoutes>(
         }
       }
     },
-    [commit, setPhaseSafe],
+    [commit, setPhaseSafe, syncRuns],
   );
 
   const send = useCallback(
@@ -1377,6 +1436,7 @@ export function useChat<P extends keyof AgentRoutes>(
       };
       const wasBusy = flightsRef.current.size > 0;
       flightsRef.current.add(flight);
+      syncRuns();
 
       for (const cut of superseded) {
         // Aborting the fetch only closes the connection, and a closed connection
@@ -1587,7 +1647,7 @@ export function useChat<P extends keyof AgentRoutes>(
         land(flight);
       }
     },
-    [commit, consume, fail, land, post, postStop, setPhaseSafe],
+    [commit, consume, fail, land, post, postStop, setPhaseSafe, syncRuns],
   );
 
   const sendMessage = useCallback(
@@ -1806,6 +1866,7 @@ export function useChat<P extends keyof AgentRoutes>(
     const flights = [...flightsRef.current];
     for (const flight of flights) flight.controller.abort();
     flightsRef.current.clear();
+    syncRuns();
     const stopped = markAllAborted(stateRef.current!);
     commit({
       ...stopped,
@@ -1854,7 +1915,7 @@ export function useChat<P extends keyof AgentRoutes>(
     }
     if (bodies.length === 0) bodies.push(threadId ? { threadId } : {});
     await Promise.all(bodies.map((body) => postStop(body, fail)));
-  }, [commit, fail, postStop, setPhaseSafe]);
+  }, [commit, fail, postStop, setPhaseSafe, syncRuns]);
 
   const regenerate = useCallback(async () => {
     const messages = stateRef.current!.messages as AgentMessage[];
@@ -2023,6 +2084,7 @@ export function useChat<P extends keyof AgentRoutes>(
       // otherwise.
       const flight: Flight = { controller, ...(cursorRunId ? { asked: cursorRunId } : {}) };
       flightsRef.current.add(flight);
+      syncRuns();
       try {
         const body: AgentAttachBody = {
           threadId,
@@ -2060,7 +2122,7 @@ export function useChat<P extends keyof AgentRoutes>(
         land(flight);
       }
     },
-    [consume, following, land, post],
+    [consume, following, land, post, syncRuns],
   );
 
   const reattach = useCallback(() => probe(false), [probe]);
@@ -2180,9 +2242,27 @@ export function useChat<P extends keyof AgentRoutes>(
           ? "error"
           : "idle";
 
+  // The turns waiting on their questions, after the requests in flight: a
+  // turn that has one (an answer going out) is shown by it.
+  // A call without a turn (an older server) is one waiting reply, shown only
+  // when nothing is in flight.
+  const pendingNow = state.pending;
+  const runs = useMemo(() => {
+    const flying = new Set(flightRuns.map((run) => run.turn).filter(Boolean));
+    const waiting: ChatRun[] = [];
+    for (const call of pendingNow) {
+      const turn = call.turn;
+      if (turn ? flying.has(turn) : flightRuns.length > 0) continue;
+      if (waiting.some((run) => run.turn === turn)) continue;
+      waiting.push({ ...(turn ? { turn } : {}), status: "awaiting-input" });
+    }
+    return waiting.length === 0 ? flightRuns : [...flightRuns, ...waiting];
+  }, [flightRuns, pendingNow]);
+
   return {
     messages: state.messages as AgentMessage<ToolsOf<P>, OutputOf<P>>[],
     status,
+    runs,
     error: state.error,
     threadId: state.threadId,
     runId: state.runId,

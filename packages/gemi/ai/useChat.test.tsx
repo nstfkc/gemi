@@ -471,6 +471,120 @@ describe("awaiting input", () => {
   });
 });
 
+describe("runs (#1344)", () => {
+  const start = (runId: string): AgentStreamFrame => ({ seq: 0, event: { type: "run-start", runId, threadId: "th_r" } });
+  const message = (messageId: string, turn: string): AgentStreamFrame => ({
+    seq: 1,
+    event: { type: "message-start", messageId, role: "assistant", turn },
+  });
+  const finish = (runId: string, messageId: string): AgentStreamFrame[] => [
+    { seq: 2, event: { type: "message-end", messageId, finishReason: "stop" } },
+    { seq: 3, event: { type: "run-end", runId, finishReason: "stop" } },
+  ];
+  const settle = () => act(async () => void (await new Promise((resolve) => setTimeout(resolve, 0))));
+
+  test("one reply: submitted, then streaming under its run and turn, then gone", async () => {
+    const { box } = mount({ threadId: "th_r", attach: false });
+    expect(box.api.runs).toEqual([]);
+    const a = controlled();
+    fetchMock.mockResolvedValueOnce(a.response);
+    let done!: Promise<void>;
+    await act(async () => {
+      done = box.api.sendMessage("hi");
+      await Promise.resolve();
+    });
+    expect(box.api.runs).toEqual([{ status: "submitted" }]);
+    await act(async () => {
+      a.push(start("run_a"), message("ma", "turn_a"));
+    });
+    await settle();
+    expect(box.api.runs).toEqual([{ runId: "run_a", turn: "turn_a", status: "streaming" }]);
+    // The streamed message carries its turn too.
+    expect(box.api.messages.find((m) => m.id === "ma")?.turn).toBe("turn_a");
+    await act(async () => {
+      a.push(...finish("run_a", "ma"));
+      a.close();
+      await done;
+    });
+    expect(box.api.runs).toEqual([]);
+  });
+
+  test("two replies side by side, each with its own run and turn", async () => {
+    const { box } = mount({ threadId: "th_r", attach: false, ifBusy: "parallel" });
+    const a = controlled();
+    const b = controlled();
+    fetchMock.mockResolvedValueOnce(a.response).mockResolvedValueOnce(b.response);
+    let aDone!: Promise<void>;
+    let bDone!: Promise<void>;
+    await act(async () => {
+      aDone = box.api.sendMessage("one");
+      bDone = box.api.sendMessage("two");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      a.push(start("run_a"), message("ma", "turn_a"));
+      b.push(start("run_b"), message("mb", "turn_b"));
+    });
+    await settle();
+    expect(box.api.runs).toEqual([
+      { runId: "run_a", turn: "turn_a", status: "streaming" },
+      { runId: "run_b", turn: "turn_b", status: "streaming" },
+    ]);
+    await act(async () => {
+      a.push(...finish("run_a", "ma"));
+      a.close();
+      await aDone;
+    });
+    expect(box.api.runs).toEqual([{ runId: "run_b", turn: "turn_b", status: "streaming" }]);
+    await act(async () => {
+      b.push(...finish("run_b", "mb"));
+      b.close();
+      await bDone;
+    });
+    expect(box.api.runs).toEqual([]);
+  });
+
+  test("a turn that ended asking waits under its turn; its answer streams as it", async () => {
+    const { box } = mount({ threadId: "th_r", attach: false });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        start("run_a"),
+        message("ma", "turn_a"),
+        {
+          seq: 2,
+          event: {
+            type: "awaiting-input",
+            runId: "run_a",
+            pending: [{ toolCallId: "tc_a", name: "publish", input: {}, kind: "approval", signature: "sig", turn: "turn_a" }],
+          },
+        },
+        { seq: 3, event: { type: "message-end", messageId: "ma", finishReason: "awaiting-input" } },
+        { seq: 4, event: { type: "run-end", runId: "run_a", finishReason: "awaiting-input" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("publish");
+    });
+    expect(box.api.runs).toEqual([{ turn: "turn_a", status: "awaiting-input" }]);
+
+    const answer = controlled();
+    fetchMock.mockResolvedValueOnce(answer.response);
+    let done!: Promise<void>;
+    await act(async () => {
+      done = box.api.approve("tc_a", true);
+      await Promise.resolve();
+    });
+    // One reply, not two: the answer going out is that turn's.
+    expect(box.api.runs).toEqual([{ turn: "turn_a", status: "submitted" }]);
+    await act(async () => {
+      answer.push(start("run_a2"), message("ma2", "turn_a"), ...finish("run_a2", "ma2"));
+      answer.close();
+      await done;
+    });
+    expect(box.api.runs).toEqual([]);
+  });
+});
+
 describe("questions of parallel turns (#1355)", () => {
   /** A run of turn `turn` that ends asking one approval, `toolCallId`. */
   const parks = (runId: string, messageId: string, turn: string, toolCallId: string): AgentStreamFrame[] => [

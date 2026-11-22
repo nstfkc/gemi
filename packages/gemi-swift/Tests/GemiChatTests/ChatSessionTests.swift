@@ -208,6 +208,42 @@ func eventually(_ condition: () -> Bool) async {
     #expect(reported == ["thread_not_found"])
   }
 
+  @Test func answeringOneTurnsQuestionLeavesAnotherTurnsOpen() async {
+    let transport = FakeTransport { request in
+      if request.url!.path.hasSuffix("support"),
+        JSONValue.parse(request.httpBody!)?["turn"]?["toolResults"] != nil
+      {
+        return sse(answer("Published.", run: "run_2", message: "m2"))
+      }
+      return sse([
+        ["type": "run-start", "runId": "run_1"],
+        [
+          "type": "awaiting-input", "runId": "run_1",
+          "pending": [
+            [
+              "toolCallId": "tc_a", "name": "publish", "input": [:], "kind": "approval",
+              "signature": "sa", "turn": "turn_a",
+            ],
+            [
+              "toolCallId": "tc_b", "name": "publish", "input": [:], "kind": "approval",
+              "signature": "sb", "turn": "turn_b",
+            ],
+          ],
+        ],
+        ["type": "run-end", "runId": "run_1", "finishReason": "awaiting-input"],
+      ])
+    }
+    let chat = UntypedChatSession(endpoint: endpoint, transport: transport)
+    await chat.send("Publish both")
+    #expect(chat.pending.map(\.turn) == ["turn_a", "turn_b"])
+
+    await chat.approve("tc_b", true).value
+
+    // Only B was answered; A's question is still that turn's to answer.
+    #expect(chat.pending.map(\.toolCallId) == ["tc_a"])
+    #expect(chat.status == .awaitingInput)
+  }
+
   @Test func approvalsGivenTogetherGoOutAsOneTurn() async {
     let transport = FakeTransport { request in
       if request.url!.path.hasSuffix("support"),
