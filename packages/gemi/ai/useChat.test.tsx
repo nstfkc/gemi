@@ -929,7 +929,70 @@ describe("questions of parallel turns (#1355)", () => {
     expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a"]);
   });
 
-  test("calls without a turn (an older server) settle together, as before", async () => {
+  test("a stateless chat posts the questions it still holds on the message that asked them (#1380)", async () => {
+    const { box } = mount({ attach: false });
+    const call = (toolCallId: string, page: number) => ({
+      type: "tool-call" as const,
+      toolCallId,
+      name: "publish",
+      input: { page },
+    });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_s" } },
+        {
+          seq: 1,
+          event: { type: "message-start", messageId: "ms", role: "assistant", turn: "u1" },
+        },
+        { seq: 2, event: { type: "tool-call", messageId: "ms", part: call("q1", 1) } },
+        { seq: 3, event: { type: "tool-call", messageId: "ms", part: call("q2", 2) } },
+        {
+          seq: 4,
+          event: {
+            type: "awaiting-input",
+            runId: "run_s",
+            pending: [
+              {
+                toolCallId: "q1",
+                name: "publish",
+                input: { page: 1 },
+                kind: "approval",
+                signature: "s1",
+                turn: "u1",
+              },
+              {
+                toolCallId: "q2",
+                name: "publish",
+                input: { page: 2 },
+                kind: "approval",
+                signature: "s2",
+                turn: "u1",
+              },
+            ],
+          },
+        },
+        { seq: 5, event: { type: "message-end", messageId: "ms", finishReason: "awaiting-input" } },
+        { seq: 6, event: { type: "run-end", runId: "run_s", finishReason: "awaiting-input" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("publish both");
+    });
+    fetchMock.mockResolvedValueOnce(streamed(ANSWER));
+    await act(async () => {
+      await box.api.approve("q1", true);
+    });
+    const posted = rawBodyOf(1).messages as AgentMessage[];
+    const asking = posted.find((message) => message.id === "ms")!;
+    expect(asking.pending?.map((held) => [held.toolCallId, held.signature])).toEqual([
+      ["q1", "s1"],
+      ["q2", "s2"],
+    ]);
+    expect(asking.pending?.some((held) => "answering" in held)).toBe(false);
+    expect(box.api.pending.map((held) => held.toolCallId)).toEqual(["q2"]);
+  });
+
+  test("calls without a turn settle one at a time too (#1380)", async () => {
     const { box } = mount({ attach: false });
     fetchMock.mockResolvedValueOnce(streamed(ASKING));
     await act(async () => {
@@ -938,7 +1001,7 @@ describe("questions of parallel turns (#1355)", () => {
     await act(async () => {
       await box.api.approve("tc_1", true);
     });
-    expect(box.api.pending).toEqual([]);
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
   });
 });
 
@@ -962,11 +1025,11 @@ describe("answering a pending call (#1106)", () => {
       done = box.api.approve("tc_1", true);
     });
 
-    // Both: the turn resolves every held call, so neither card should take a
-    // second answer while this one flies.
+    // Only the answered card: the reply's other question stays open on the
+    // server, and answerable here (#1380).
     expect(box.api.pending.map((call) => [call.toolCallId, call.answering])).toEqual([
       ["tc_1", true],
-      ["tc_2", true],
+      ["tc_2", undefined],
     ]);
     expect(box.api.status).toBe("awaiting-input");
 
@@ -975,8 +1038,8 @@ describe("answering a pending call (#1106)", () => {
       await done;
     });
 
-    expect(box.api.pending).toEqual([]);
-    expect(box.api.status).toBe("idle");
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
+    expect(box.api.status).toBe("awaiting-input");
   });
 
   test("a failed answer leaves the call pending with the error, and a second answer succeeds", async () => {
@@ -1003,9 +1066,9 @@ describe("answering a pending call (#1106)", () => {
     expect(bodyOf(2).turn.toolResults).toEqual([
       { toolCallId: "tc_1", signature: "sig_one", approve: true },
     ]);
-    expect(box.api.pending).toEqual([]);
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
     expect(box.api.error).toBeNull();
-    expect(box.api.status).toBe("idle");
+    expect(box.api.status).toBe("awaiting-input");
   });
 
   test("a 5xx answer restores the call the same way", async () => {
@@ -1052,10 +1115,7 @@ describe("answering a pending call (#1106)", () => {
     expect(box.api.error).toBeNull();
   });
 
-  test("answering another held call, or the same one differently, while one flies is reported, not sent", async () => {
-    // The turn in flight settles every held call, and the server refuses the
-    // ones it leaves out, so resolving as if `tc_2` had been approved would
-    // be a lie.
+  test("the same call answered differently while it flies is reported, not sent", async () => {
     let respond!: (response: Response) => void;
     const onError = vi.fn();
     const { box } = await asked({ onError });
@@ -1066,31 +1126,66 @@ describe("answering a pending call (#1106)", () => {
       first = box.api.approve("tc_1", true);
     });
     await act(async () => {
-      await box.api.approve("tc_2", true);
+      await box.api.approve("tc_1", false);
     });
 
     expect(calls()).toHaveLength(2);
     expect(onError).toHaveBeenCalledTimes(1);
     expect(box.api.error).toMatchObject({
       code: "invalid_tool_result",
-      toolCallId: "tc_2",
+      toolCallId: "tc_1",
       retryable: false,
     });
-
-    await act(async () => {
-      await box.api.approve("tc_1", false);
-    });
-
-    expect(calls()).toHaveLength(2);
-    expect(onError).toHaveBeenCalledTimes(2);
-    expect(box.api.error).toMatchObject({ code: "invalid_tool_result", toolCallId: "tc_1" });
 
     await act(async () => {
       respond(streamed(ANSWER));
       await first;
     });
     expect(calls()).toHaveLength(2);
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
+  });
+
+  test("the reply's other question answered while the first answer streams goes out behind it, not cutting it (#1380)", async () => {
+    const onError = vi.fn();
+    const { box } = await asked({ onError });
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async () => run.response);
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_q", threadId: "th_9" } },
+        { seq: 1, event: { type: "message-start", messageId: "mq", role: "assistant" } },
+        { seq: 2, event: { type: "text-delta", messageId: "mq", delta: "Both done." } },
+        { seq: 3, event: { type: "message-end", messageId: "mq", finishReason: "stop" } },
+        { seq: 4, event: { type: "run-end", runId: "run_q", finishReason: "stop" } },
+      ]),
+    );
+
+    let first!: Promise<void>;
+    await act(async () => {
+      first = box.api.approve("tc_1", true);
+    });
+    await act(async () => {
+      run.push(ANSWER[0]!, ANSWER[1]!);
+    });
+    await act(async () => {
+      await box.api.approve("tc_2", true);
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(calls()).toHaveLength(3);
+    expect(bodyOf(2).turn.toolResults).toEqual([
+      { toolCallId: "tc_2", signature: "sig_two", approve: true },
+    ]);
+    expect(rawBodyOf(2).ifBusy).toBe("queue");
+
+    await act(async () => {
+      run.push(ANSWER[2]!, ANSWER[3]!, ANSWER[4]!);
+      run.close();
+      await first;
+    });
     expect(box.api.pending).toEqual([]);
+    expect(box.api.error).toBeNull();
+    expect(box.api.status).toBe("idle");
   });
 
   test("retrying from inside onError sends the answer again", async () => {
@@ -1117,9 +1212,9 @@ describe("answering a pending call (#1106)", () => {
     expect(bodyOf(2).turn.toolResults).toEqual([
       { toolCallId: "tc_1", signature: "sig_one", approve: true },
     ]);
-    expect(mounted.box.api.pending).toEqual([]);
+    expect(mounted.box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
     expect(mounted.box.api.error).toBeNull();
-    expect(mounted.box.api.status).toBe("idle");
+    expect(mounted.box.api.status).toBe("awaiting-input");
   });
 
   test("a 2xx whose stream then fails does not restore the calls", async () => {
@@ -1142,9 +1237,9 @@ describe("answering a pending call (#1106)", () => {
       await done;
     });
 
-    expect(box.api.pending).toEqual([]);
+    // The reply's other question is still open (#1380).
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
     expect(box.api.error).toMatchObject({ code: "unknown", message: "network lost" });
-    expect(box.api.status).toBe("error");
   });
 
   test("the same call answered twice in one tick is sent once", async () => {

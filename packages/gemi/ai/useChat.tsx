@@ -961,6 +961,26 @@ function turnFrom(message: AgentMessage): ClientTurn {
  * dropped, while `progress` is not. The client's own copy is untouched: this
  * shapes the request body only, so a UI still renders every yield it received.
  */
+/**
+ * `history` with each held call in the `pending` of the message that made it
+ * (the top-level call, for a sub-agent's question), as a stored thread keeps
+ * them (#1052). Messages that hold none are left as they are.
+ */
+function withHeld(messages: AgentMessage[], held: readonly PendingToolCall[]): AgentMessage[] {
+  if (held.length === 0) return messages;
+  return messages.map((message) => {
+    const calls = new Set(
+      message.content.flatMap((part) => (part.type === "tool-call" ? [part.toolCallId] : [])),
+    );
+    const asked = held.filter((call) => calls.has(call.path?.[0] ?? call.toolCallId));
+    if (asked.length === 0) return message;
+    return {
+      ...message,
+      pending: asked.map(({ answering: _answering, ...call }: ChatPendingToolCall) => call),
+    };
+  });
+}
+
 function forWire(messages: AgentMessage[]): AgentMessage[] {
   return messages.map((full) => {
     // The client's own key and the app's notes on a message it sent (#818):
@@ -1429,7 +1449,19 @@ export function useChat<P extends keyof AgentRoutes>(
             flight.turns === "new" ||
             ![...flight.turns].some((id) => answerTurns.has(id)),
         );
-      const ifBusy = beside ? "parallel" : asked;
+      // An answer while this chat streams the reply an earlier answer
+      // carried on (#1380): the reply asked two questions, the first answer
+      // is running, and this is the second. It waits for that run to end
+      // (`queue`) rather than cutting it off: the question stays open on the
+      // server until it is answered. Not behind a new message, which a send
+      // cuts as before.
+      const answersOnly = Boolean(turn.toolResults?.length) && !turn.text && !turn.files?.length;
+      const behind =
+        !beside &&
+        answersOnly &&
+        stateRef.current!.threadId !== undefined &&
+        [...flightsRef.current].some((flight) => flight.turns !== "new");
+      const ifBusy = beside ? "parallel" : behind ? "queue" : asked;
       // Whether this send cuts off what this chat is streaming itself. Asked
       // for anything else, the server decides, and the streams show it.
       const cuts = ifBusy === undefined || ifBusy === "supersede";
@@ -1536,11 +1568,10 @@ export function useChat<P extends keyof AgentRoutes>(
       // back to plain pending if the request fails: dropping them on the way
       // out left a failed approval with no card to answer again.
       //
-      // Every held call of the answered calls' turns is marked, not only the
-      // answered ones: the turn resolves all of them (the server denies what
-      // it leaves out), so a second card of it answered while this one flies
-      // would only race it. Another turn's questions stay open on the server
-      // (#1355), and here.
+      // Only the answered calls are marked (and the other questions of a
+      // sub-agent run one of them came from, which its answer re-enters
+      // once). The reply's other questions (#1380) and other turns' (#1355)
+      // stay open on the server, and here.
       // A plain new message's held calls that name their turn: put back
       // once the run ends if the server refused none of them (no result in
       // the transcript), which is what a `busyPolicy` answering "parallel"
@@ -1581,8 +1612,8 @@ export function useChat<P extends keyof AgentRoutes>(
         // The error belonged to the attempt being retried. Leaving it up while
         // the retry streams is a UI that reports a failure and a success at once.
         error: null,
-        // Answered or not, this turn resolves every pending call — the server
-        // denies whatever the turn left out — so holding them would leave the UI
+        // A new message resolves every pending call — the server denies
+        // whatever the turn left out — so holding them would leave the UI
         // asking a question that is already settled. No local tool-result parts
         // are fabricated here: the server emits one per call, denials included,
         // and guessing at the output of a call it has not run yet would be a lie
@@ -1633,7 +1664,12 @@ export function useChat<P extends keyof AgentRoutes>(
           threadId: stateRef.current!.threadId,
           // Stripped of the progress logs, which no part of the server reads and
           // which every later turn would otherwise re-upload.
-          messages: stateRef.current!.threadId ? undefined : forWire(history),
+          // A stateless history carries the questions still held (#1380), on
+          // the messages that asked them, as a stored thread does: the server
+          // keeps a reply's other questions open only when it can see them.
+          messages: stateRef.current!.threadId
+            ? undefined
+            : forWire(withHeld(history, previous.pending as PendingToolCall[])),
           // On a thread the server holds the history, so trimming the local
           // copy alone changes nothing: this asks it to drop its last answer
           // and run the turn before it again (#451). Stateless needs no flag.
@@ -1698,8 +1734,10 @@ export function useChat<P extends keyof AgentRoutes>(
   /**
    * Answers queued within one tick become one turn.
    *
-   * This is not an optimisation. A turn that leaves a pending call unanswered
-   * denies it, so sending three approvals as three turns would have the first
+   * Since #1380 a turn of answers leaves the questions it does not answer
+   * open, so three turns would each carry the reply on; one turn carries it on
+   * once. Before that, a turn that left a pending call unanswered denied
+   * it, so sending three approvals as three turns would have the first
    * one refuse the other two — and the natural UI code, a loop over `pending`
    * calling `approve` for each, is exactly that shape. Coalescing on the
    * microtask is what makes the declared per-call signature safe to use the way
@@ -1720,8 +1758,8 @@ export function useChat<P extends keyof AgentRoutes>(
         // The same call answered twice in one tick is one answer: the first.
         if (!batch.results.some((queuedResult) => queuedResult.toolCallId === result.toolCallId)) {
           batch.results.push(result);
-          // Another turn's card answered in the same tick joins the batch:
-          // its turn's calls are marked too.
+          // Another card answered in the same tick joins the batch, and is
+          // marked too.
           const current = stateRef.current!;
           commit({
             ...current,
@@ -1828,9 +1866,9 @@ export function useChat<P extends keyof AgentRoutes>(
    *
    * A call marked `answering` with no batch still collecting is in flight.
    * Answering it again the same way (a double click) gets the request already
-   * going out, not another. Anything else while that turn flies (a different
-   * answer, or a different held call) cannot be honoured: the turn in flight
-   * settles every held call, and the server refuses the ones it leaves out. So
+   * going out, not another. A different answer to it, or another question of
+   * the same sub-agent run (which the answer in flight settles), cannot be
+   * honoured. So
    * it is reported as `invalid_tool_result`, the way answering a call this
    * client no longer holds is, rather than resolving as if it had been sent.
    *

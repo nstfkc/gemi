@@ -533,14 +533,16 @@ internal fun othersTurns(messages: List<AgentMessage>, pending: List<PendingTool
 }
 
 /**
- * The held calls an answer to the calls in `ids` settles: the calls of the
- * turns those belong to. Where a turn can't be told, every held call.
+ * The held calls an answer to the calls in `ids` settles: those calls, and
+ * the other questions of a sub-agent run one of them was asked in (its tool
+ * is re-entered once). Every other held call stays open: another turn's
+ * question (gemi #1355), and another question of the same reply (gemi #1380).
  */
+@Suppress("UNUSED_PARAMETER")
 internal fun settledBy(messages: List<AgentMessage>, pending: List<PendingToolCall>, ids: Set<String>): Set<String> {
-  val turns = callTurns(messages)
-  val turnOf = { call: PendingToolCall -> call.turn ?: turns[hostOf(call)] }
-  val answered = pending.filter { it.toolCallId in ids }
-  val named = answered.map(turnOf).toSet()
-  if (answered.isEmpty() || null in named) return pending.map { it.toolCallId }.toSet()
-  return pending.filter { call -> turnOf(call).let { it == null || it in named } }.map { it.toolCallId }.toSet()
+  val runs = pending.filter { it.toolCallId in ids && !it.path.isNullOrEmpty() }.map(::hostOf).toSet()
+  return pending
+    .filter { call -> call.toolCallId in ids || (!call.path.isNullOrEmpty() && hostOf(call) in runs) }
+    .map { it.toolCallId }
+    .toSet()
 }

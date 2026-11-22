@@ -20,12 +20,13 @@ import {
   type ThreadRunLimit,
 } from "./AgentController";
 import type { ProviderEvent } from "./AgentProvider";
+import { openPending } from "./client/reducer";
 import { decodeSSE } from "./client/sse";
 import { splitTurns, turnStarts } from "./contextWindow";
 import { fakeProvider } from "./providers/fakeProvider";
 import { s } from "./Schema";
 import { DatabaseAgentStore } from "./store/DatabaseAgentStore";
-import type { AgentMessage, AgentStreamFrame } from "./types";
+import type { AgentMessage, AgentStreamFrame, PendingToolCall } from "./types";
 
 /**
  * A message sent while a reply is still coming: joined to the running turn
@@ -1137,5 +1138,97 @@ describe("parallel: waiting for the runs going to take their turns in", () => {
     release(1);
     release(2);
     await Promise.all([superseding.result(), beside.result()]);
+  });
+});
+
+describe.each(stores)("one reply's questions answered one at a time (#1380, $name)", ({ make }) => {
+  async function askedTwo(replies: ProviderEvent[][]) {
+    const publish = AgentTool.create({
+      name: "publish",
+      description: "Publish",
+      inputSchema: s.object({ page: s.string() }),
+      requiresApproval: true,
+      execute: async ({ page }: { page: string }) => `published ${page}`,
+    });
+    const harness = await setup(
+      [
+        [
+          { type: "tool-call", toolCallId: "q1", name: "publish", args: '{"page":"home"}' },
+          { type: "tool-call", toolCallId: "q2", name: "publish", args: '{"page":"about"}' },
+          finish("tool-calls"),
+        ],
+        ...replies,
+      ],
+      { store: await make(), tools: [publish] },
+    );
+    const { store, Chat, release } = harness;
+    const { threadId } = await store.createThread({});
+    const asking = await Chat.startTurn({ threadId, text: "publish both" });
+    release(0);
+    const parked = await asking.result();
+    const [q1, q2] = parked.pending as [PendingToolCall, PendingToolCall];
+    const approval = (call: PendingToolCall) => ({
+      toolCallId: call.toolCallId,
+      signature: call.signature,
+      approve: true,
+    });
+    const resultOf = (messages: AgentMessage[], id: string) =>
+      messages
+        .flatMap((message) => message.content)
+        .find((part) => part.type === "tool-result" && part.toolCallId === id) as
+        | { status: string }
+        | undefined;
+    return { ...harness, threadId, q1, q2, approval, resultOf };
+  }
+
+  test("the first answer carries the turn on; the stored thread still asks the second, which then finishes it", async () => {
+    const { store, Chat, threadId, q1, q2, approval, resultOf, release, calls } = await askedTwo([
+      say("home is live"),
+      say("both are live"),
+    ]);
+    const one = await Chat.startTurn({ threadId, turn: { toolResults: [approval(q1)] } });
+    release(calls());
+    expect((await one.result()).text).toBe("home is live");
+    let stored = (await store.loadThread(threadId))!;
+    expect(resultOf(stored, "q1")?.status).toBe("ok");
+    expect(resultOf(stored, "q2")).toBeUndefined();
+    expect(openPending(stored).map((call) => call.toolCallId)).toEqual(["q2"]);
+
+    const two = await Chat.startTurn({ threadId, turn: { toolResults: [approval(q2)] } });
+    release(calls());
+    expect((await two.result()).text).toBe("both are live");
+    stored = (await store.loadThread(threadId))!;
+    expect(resultOf(stored, "q2")?.status).toBe("ok");
+    expect(openPending(stored)).toEqual([]);
+    expect(new Set(stored.map((message) => message.turn)).size).toBe(1);
+  });
+
+  test("the second answer sent while the first one's reply runs (`queue`) waits for it, and both land", async () => {
+    const { store, Chat, threadId, q1, q2, approval, resultOf, release, calls } = await askedTwo([
+      say("home is live"),
+      say("both are live"),
+    ]);
+    const one = await new Chat().stream(
+      request("", { threadId, turn: { toolResults: [approval(q1)] } }),
+    );
+    await until(() => calls() === 2);
+    // Not awaited: a queued turn's response starts once its run does.
+    const two = new Chat().stream(
+      request("", { threadId, turn: { toolResults: [approval(q2)] }, ifBusy: "queue" }),
+    );
+    await tick();
+    expect(calls()).toBe(2);
+    release(1);
+    const first = await framesOf(one);
+    expect(first.at(-1)!.event).toMatchObject({ type: "run-end", finishReason: "stop" });
+    await until(() => calls() === 3);
+    release(2);
+    const second = await framesOf(await two);
+    expect(second.some((frame) => frame.event.type === "error")).toBe(false);
+    expect(second.at(-1)!.event).toMatchObject({ type: "run-end", finishReason: "stop" });
+    const stored = (await store.loadThread(threadId))!;
+    expect(resultOf(stored, "q1")?.status).toBe("ok");
+    expect(resultOf(stored, "q2")?.status).toBe("ok");
+    expect(openPending(stored)).toEqual([]);
   });
 });

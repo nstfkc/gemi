@@ -1,3 +1,18 @@
+# 0.239.0
+
+## A reply's questions stay open until each one is answered (#1380)
+
+**Behaviour change (minor version).** When one assistant reply asked two questions (two approvals, an approval and a client tool), answering the first refused the second before the user had answered it. Now a request of answers settles only the calls it answers:
+- **Server.** The other questions of the same turn stay open, with their `pending`, as other turns' questions already did (#1355). The turn carries on with the answers it has. In the model's request, a question still waiting gets a placeholder result that says so ("waiting for the user's answer"), not "No result was recorded". This placeholder also replaces "No result was recorded" for other turns' open questions. The run's `awaiting-input` frame lists every question the turn waits on, including the ones left open, so `AgentTurnResult.pending` and `onAwaitingInput` include them too. Each question stays in its own message's `pending`. A stop of the reply an answer carried on doesn't refuse them.
+- **`useChat`.** Answering a card marks and then removes only that card. A second card answered while the first answer is in flight, or its reply streams, goes out with `ifBusy: "queue"` and runs once that reply ends, instead of cutting it off or being reported as `invalid_tool_result`. `status` stays `awaiting-input` while any card is held.
+- **Kotlin and Swift.** `settledBy` takes only the answered cards off `pending` (and the other questions of the same sub-agent run). A session still runs one turn at a time: answering the second card while the first answer's reply streams cuts that reply. The second card is still answered.
+- **Unchanged.** Several cards answered in the same tick still go out as one turn. A new message from the person still refuses every open question. Sub-agent questions under one tool call still resolve together. A call answered with a bad signature is still refused.
+
+What to check:
+- A UI that relied on the first answer closing the other cards will now keep showing them. To close them, answer them (`approve(id, false)`) or send a new message.
+- `onAwaitingInput` hooks that notify someone may now be called with questions they were already told about. Dedupe by `toolCallId` if that matters.
+- A UI that disabled every card while one answer was in flight (`call.answering` on all of them) now sees `answering` only on the answered card. The others can be answered.
+
 # 0.238.0
 
 ## `scriptedProvider`: `exhausted` takes a step (#1378)

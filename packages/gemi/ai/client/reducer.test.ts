@@ -1867,7 +1867,7 @@ describe("turns side by side (#1344, #1355)", () => {
   });
 });
 
-describe("settledBy (#1355)", () => {
+describe("settledBy (#1355, #1380)", () => {
   const call = (toolCallId: string, extra: Partial<PendingToolCall> = {}): PendingToolCall => ({
     toolCallId,
     name: "publish",
@@ -1886,24 +1886,34 @@ describe("settledBy (#1355)", () => {
   const settled = (messages: AgentMessage[], pending: PendingToolCall[], ids: string[]) =>
     [...settledBy(messages, pending, new Set(ids))].sort();
 
-  test("by the call's own turn: only that turn's calls", () => {
+  test("only the answered call: the reply's other question stays open (#1380)", () => {
     expect(settled([], [call("a1", { turn: "A" }), call("a2", { turn: "A" }), call("b1", { turn: "B" })], ["a1"])).toEqual([
       "a1",
-      "a2",
     ]);
   });
 
-  test("by the turn of the message holding the call", () => {
+  test("another turn's question stays open", () => {
     const messages = [asked("ma", "A", "a1"), asked("mb", "B", "b1")];
     expect(settled(messages, [call("a1"), call("b1")], ["b1"])).toEqual(["b1"]);
   });
 
-  test("a nested call goes by the call it is nested under", () => {
-    const messages = [asked("ma", "A", "host_a"), asked("mb", "B", "b1")];
-    expect(settled(messages, [call("sub_a", { path: ["host_a"] }), call("b1")], ["sub_a"])).toEqual(["sub_a"]);
+  test("a nested call settles the other questions of its sub-agent run, and nothing else", () => {
+    const messages = [asked("ma", "A", "host_a", "a2"), asked("mb", "B", "b1")];
+    expect(
+      settled(
+        messages,
+        [
+          call("sub_1", { path: ["host_a"] }),
+          call("sub_2", { path: ["host_a"] }),
+          call("a2"),
+          call("b1"),
+        ],
+        ["sub_1"],
+      ),
+    ).toEqual(["sub_1", "sub_2"]);
   });
 
-  test("an answered call whose turn can't be told settles every held call", () => {
-    expect(settled([], [call("x"), call("b1", { turn: "B" })], ["x"])).toEqual(["b1", "x"]);
+  test("calls without a turn (an older transcript) settle one at a time too", () => {
+    expect(settled([], [call("x"), call("y")], ["x"])).toEqual(["x"]);
   });
 });

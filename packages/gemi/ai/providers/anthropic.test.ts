@@ -21,6 +21,7 @@ import {
   toClaudeSchema,
   toMessages,
 } from "./anthropicRequest";
+import { WAITING_ON_USER } from "./request";
 import { parseMessagesStream, toAnthropicUsage } from "./anthropicStream";
 import { capabilitiesForClaude, supportsForcedToolChoice } from "./capabilities";
 import { ANTHROPIC_VERSION } from "./endpoints";
@@ -478,6 +479,29 @@ describe("toMessages()", () => {
         ],
       },
     ]);
+  });
+
+  test("a call still waiting on the user's answer is told so, not as lost (#1380)", () => {
+    const out = toMessages(
+      [
+        message({ role: "user", content: [{ type: "text", text: "publish both" }] }),
+        message({
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: "t1", name: "w", input: {} },
+            { type: "tool-call", toolCallId: "t2", name: "w", input: {} },
+            { type: "tool-result", toolCallId: "t1", name: "w", status: "ok", output: "a" },
+          ],
+          pending: [{ toolCallId: "t2", name: "w", input: {}, kind: "approval", signature: "s" }],
+        }),
+      ],
+      CLAUDE,
+    );
+    expect(out[2]!.content).toContainEqual({
+      type: "tool_result",
+      tool_use_id: "t2",
+      content: WAITING_ON_USER,
+    });
   });
 
   test("another provider's reasoning is left out; the assistant's whitespace text is kept, empty text is not", () => {

@@ -241,9 +241,10 @@ public final class ChatSession<Agent: AgentSchema> {
     state.messages = history + authored
     // The error belonged to the attempt being retried, and the pending calls
     // this turn settles go: the server denies whatever it left out. Answers
-    // alone settle only the answered calls' turns; another turn's questions
-    // stay open, and if the server refuses them after all, their results
-    // take them off. A new message settles them all, as before.
+    // alone settle only the answered calls (gemi #1380); the reply's other
+    // questions and other turns' stay open, and if the server refuses them
+    // after all, their results take them off. A new message settles them
+    // all, as before.
     state.error = nil
     let answered = Set(turn.toolResults.map(\.toolCallId))
     let settled =
