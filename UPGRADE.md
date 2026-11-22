@@ -2,7 +2,7 @@
 
 ## Two password sign-ups at once no longer answer 500 (#1361)
 
-**Fix (patch version).** Two `POST /auth/sign-up` requests for the same new address (a double submit) both found no user. The second insert broke the unique email, and the request answered 500. Now one creates the account, and the other gets the validation error on `email` ("Email address already exists"), the same answer it would get a moment later. Only a failed insert is treated this way, and only when the user exists by then. An `onUserCreated` that throws still fails the request.
+**Fix (patch version).** Two `POST /auth/sign-up` requests for the same new address (a double submit) both found no user. The second insert broke the unique email, and the request answered 500. Now one creates the account, and the other gets the validation error on `email` ("Email address already exists"), the same answer it would get a moment later. The same applies to an invited sign-up, where the losing request fails earlier, on consuming the invitation the winner already used. Only a failed insert or invitation delete is treated this way, and only when the user exists by then. An `onUserCreated` that throws still fails the request.
 
 The OAuth callback already handled this race (the losing callback signs in once the identity resolves), and a new real-database test now covers it. Magic links only sign in existing users, so they can't race to create one.
 

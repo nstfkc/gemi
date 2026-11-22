@@ -34,6 +34,8 @@ const POSTGRES_URL = process.env.TEST_POSTGRES_URL;
 const suffix = `${process.pid}_${Math.floor(Math.random() * 1e6)}`;
 const users = `gemi_signup_users_${suffix}`;
 const accounts = `gemi_signup_social_${suffix}`;
+const invitations = `gemi_signup_invites_${suffix}`;
+const memberships = `gemi_signup_members_${suffix}`;
 
 const field = (name: string, extra: Partial<FieldSchema> = {}): FieldSchema => ({
   name,
@@ -101,6 +103,34 @@ const accountSchema: ModelSchema = {
   },
 };
 
+const invitationSchema: ModelSchema = {
+  name: "OrganizationInvitation",
+  table: invitations,
+  fields: {
+    id: id(),
+    publicId: field("publicId", { nullable: false }),
+    organizationId: field("organizationId", { type: "Int", nullable: false }),
+    email: field("email", { nullable: false }),
+    role: field("role", { type: "Int", nullable: false }),
+  },
+  primaryKey: ["id"],
+  uniques: [["publicId"]],
+  relations: {},
+};
+const membershipSchema: ModelSchema = {
+  name: "Account",
+  table: memberships,
+  fields: {
+    id: id(),
+    userId: field("userId", { type: "Int" }),
+    organizationId: field("organizationId", { type: "Int" }),
+    organizationRole: field("organizationRole", { type: "Int", nullable: false }),
+  },
+  primaryKey: ["id"],
+  uniques: [],
+  relations: {},
+};
+
 /** What a generated model class adds: the operations, each a call to `$exec`. */
 function modelOf(schema: ModelSchema) {
   return class extends Model {
@@ -123,10 +153,15 @@ function modelOf(schema: ModelSchema) {
     static updateMany(args: object) {
       return this.$exec("updateMany", args);
     }
+    static delete(args: object) {
+      return this.$exec("delete", args);
+    }
   };
 }
 const User = modelOf(userSchema);
 const SocialAccount = modelOf(accountSchema);
+const OrganizationInvitation = modelOf(invitationSchema);
+const Account = modelOf(membershipSchema);
 
 const dir = mkdtempSync(join(tmpdir(), "gemi-signup-race-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -138,6 +173,8 @@ const backends = [
     ddl: [
       `CREATE TABLE "${users}" (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, name TEXT, password TEXT, "verificationToken" TEXT, "emailVerifiedAt" DATETIME, locale TEXT)`,
       `CREATE TABLE "${accounts}" (id INTEGER PRIMARY KEY AUTOINCREMENT, "userId" INTEGER NOT NULL REFERENCES "${users}"(id), provider TEXT NOT NULL, "providerId" TEXT, email TEXT, username TEXT, "accessToken" TEXT, "refreshToken" TEXT, "expiresAt" DATETIME, UNIQUE (provider, "providerId"))`,
+      `CREATE TABLE "${invitations}" (id INTEGER PRIMARY KEY AUTOINCREMENT, "publicId" TEXT NOT NULL UNIQUE, "organizationId" INTEGER NOT NULL, email TEXT NOT NULL, role INTEGER NOT NULL)`,
+      `CREATE TABLE "${memberships}" (id INTEGER PRIMARY KEY AUTOINCREMENT, "userId" INTEGER REFERENCES "${users}"(id), "organizationId" INTEGER, "organizationRole" INTEGER NOT NULL)`,
     ],
   },
   ...(POSTGRES_URL
@@ -148,6 +185,8 @@ const backends = [
           ddl: [
             `CREATE TABLE "${users}" (id SERIAL PRIMARY KEY, email TEXT UNIQUE, name TEXT, password TEXT, "verificationToken" TEXT, "emailVerifiedAt" TIMESTAMPTZ, locale TEXT)`,
             `CREATE TABLE "${accounts}" (id SERIAL PRIMARY KEY, "userId" INTEGER NOT NULL REFERENCES "${users}"(id), provider TEXT NOT NULL, "providerId" TEXT, email TEXT, username TEXT, "accessToken" TEXT, "refreshToken" TEXT, "expiresAt" TIMESTAMPTZ, UNIQUE (provider, "providerId"))`,
+            `CREATE TABLE "${invitations}" (id SERIAL PRIMARY KEY, "publicId" TEXT NOT NULL UNIQUE, "organizationId" INTEGER NOT NULL, email TEXT NOT NULL, role INTEGER NOT NULL)`,
+            `CREATE TABLE "${memberships}" (id SERIAL PRIMARY KEY, "userId" INTEGER REFERENCES "${users}"(id), "organizationId" INTEGER, "organizationRole" INTEGER NOT NULL)`,
           ],
         },
       ]
@@ -180,7 +219,7 @@ describe.each(backends)("two sign-ups at once for a new person ($name)", ({ url,
         hashPassword: async (password: string) => `hashed:${password}`,
         onUserCreated: created,
       } as never,
-      new UserProvider({ User, SocialAccount } as never),
+      new UserProvider({ User, SocialAccount, OrganizationInvitation, Account } as never),
     );
     auth.createOrUpdateSessionV2 = (async () => ({
       token: "session-token",
@@ -191,10 +230,14 @@ describe.each(backends)("two sign-ups at once for a new person ($name)", ({ url,
     Application.setInstance(application);
     register("User", User);
     register("SocialAccount", SocialAccount);
+    register("OrganizationInvitation", OrganizationInvitation);
+    register("Account", Account);
     for (const statement of ddl) await database.connection().sql.unsafe(statement);
   });
 
   afterAll(async () => {
+    await database.connection().sql.unsafe(`DROP TABLE IF EXISTS "${memberships}"`);
+    await database.connection().sql.unsafe(`DROP TABLE IF EXISTS "${invitations}"`);
     await database.connection().sql.unsafe(`DROP TABLE IF EXISTS "${accounts}"`);
     await database.connection().sql.unsafe(`DROP TABLE IF EXISTS "${users}"`);
     clearRegistry();
@@ -277,6 +320,48 @@ describe.each(backends)("two sign-ups at once for a new person ($name)", ({ url,
         JSON.stringify({ email: ["Email address already exists"] }),
       ]);
       expect(await rows(email)).toHaveLength(1);
+      expect(created).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  test("password, invited: one account and one membership, and the other request is told the address exists", async () => {
+    for (let round = 0; round < 5; round++) {
+      const email = `invited-${round}-${crypto.randomUUID()}@example.test`;
+      const invitationId = `invite-${crypto.randomUUID()}`;
+      await database
+        .connection()
+        .sql.unsafe(
+          `INSERT INTO "${invitations}" ("publicId", "organizationId", email, role) VALUES ('${invitationId}', 7, '${email}', 2)`,
+        );
+      created.mockClear();
+      const signUp = () =>
+        inRequest(
+          "http://localhost/api/auth/sign-up",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password: "correct horse battery", name: "Ada", invitationId }),
+          },
+          {},
+          () => new AuthController().signUp(),
+        );
+      const answers = await Promise.allSettled([signUp(), signUp()]);
+      const won = answers.filter((answer) => answer.status === "fulfilled");
+      const lost = answers.filter((answer) => answer.status === "rejected") as PromiseRejectedResult[];
+      expect(won).toHaveLength(1);
+      expect(lost.map((answer) => JSON.stringify(answer.reason?.errors ?? String(answer.reason)))).toEqual([
+        JSON.stringify({ email: ["Email address already exists"] }),
+      ]);
+      const [user] = (await rows(email)) as { id: number }[];
+      expect(user).toBeTruthy();
+      const members = await database
+        .connection()
+        .sql.unsafe(`SELECT "organizationId" FROM "${memberships}" WHERE "userId" = ${user!.id}`);
+      expect(members).toHaveLength(1);
+      const left = await database
+        .connection()
+        .sql.unsafe(`SELECT id FROM "${invitations}" WHERE "publicId" = '${invitationId}'`);
+      expect(left).toHaveLength(0);
       expect(created).toHaveBeenCalledTimes(1);
     }
   });

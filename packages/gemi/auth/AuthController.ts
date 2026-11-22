@@ -597,15 +597,18 @@ export class AuthController extends Controller {
     // signature.
     let verificationToken = "";
 
-    // Set when the insert itself failed: the only failure a concurrent
-    // sign-up for the same address explains (#1361). One in `onUserCreated`
-    // is the app's, and fails as it is.
+    // Set when a write a concurrent sign-up for the same address explains
+    // failed (#1361): the insert (the unique email), or, for an invited
+    // sign-up, consuming the invitation (the other request deleted it first).
+    // A failure in `onUserCreated` is the app's, and fails as it is.
     let insertFailed = false;
-    const insert = (args: Parameters<typeof userProvider.createUser>[0]) =>
-      userProvider.createUser(args).catch((error: unknown) => {
+    const flagged = <T>(write: Promise<T>) =>
+      write.catch((error: unknown) => {
         insertFailed = true;
         throw error;
       });
+    const insert = (args: Parameters<typeof userProvider.createUser>[0]) =>
+      flagged(userProvider.createUser(args));
     // A double submit: both requests found no user, and the second insert
     // broke the unique email. Told what it would have been told a moment
     // later, rather than answered 500. Only when the user now exists.
@@ -626,7 +629,7 @@ export class AuthController extends Controller {
         // Consuming the invitation belongs in here too. Deleted before the
         // transaction, a rollback would leave the invite burned and no user to
         // show for it, so the invitee could not retry.
-        await userProvider.deleteInvitationById(invitationId);
+        await flagged(userProvider.deleteInvitationById(invitationId));
 
         const user = await insert({
           email,
