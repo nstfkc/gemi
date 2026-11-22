@@ -604,35 +604,33 @@ function suite(label: string, url?: string) {
      * `docs/orm.md` says it plainly and unconditionally: "It does **not** join
      * the ambient transaction — use `DB.query` when that matters."
      *
-     * Measured, that holds on Postgres and **not** on SQLite. `DatabaseManager`
-     * gives SQLite a single connection, so a `DB.sql` statement issued inside a
-     * `Model.transaction` is on the same connection and therefore inside the
-     * transaction — it rolls back with everything else. Postgres has a pool, so
-     * the statement takes a different connection and escapes.
+     * It holds on both, differently. Postgres has a pool, so the statement
+     * takes a different connection and escapes: the rollback leaves it behind.
+     * On a SQLite file a statement outside the transaction runs on a second
+     * connection too (#1375), but SQLite has one writer at a time and the
+     * transaction holds the lock from `BEGIN IMMEDIATE`, so the write waits
+     * for the transaction that is waiting for it, and fails with
+     * `TransactionQueueDeadlockError` after 5 seconds instead of hanging.
      *
-     * The direction matters. A developer who tests on SQLite watches a `DB.sql`
-     * write roll back correctly and ships it; on Postgres the rollback leaves
-     * that write behind. It is the same hazard the transactions section already
-     * warns about for a caught statement — "passes in development on SQLite and
-     * takes out the transaction in production on Postgres" — reached by a
-     * different door.
+     * Before #1375 SQLite had one connection, so the write ran inside the
+     * transaction and rolled back with it: a developer testing on SQLite
+     * watched it roll back correctly and shipped it, and on Postgres the
+     * rollback left it behind. Now neither dialect lets it pass quietly.
      *
      * Both halves are asserted per dialect rather than skipping the one that is
      * inconvenient: the point is that they genuinely differ.
      */
-    test("whether a DB.sql write survives a rollback depends on the dialect", async () => {
-      await expect(
-        Model.transaction(async () => {
-          await DB.sql`update "User" set "name" = ${"escaped"} where "email" = ${"ada@x.test"}`;
-          throw new Error("rolled back");
-        }),
-      ).rejects.toThrow("rolled back");
-
-      const after = await DB.query<{ name: string | null }>(
-        sql`select "name" from "User" where "email" = ${"ada@x.test"}`,
-      );
+    test("a DB.sql write inside a transaction escapes it on Postgres and fails on SQLite", async () => {
+      const attempt = Model.transaction(async () => {
+        await DB.sql`update "User" set "name" = ${"escaped"} where "email" = ${"ada@x.test"}`;
+        throw new Error("rolled back");
+      });
 
       if (url) {
+        await expect(attempt).rejects.toThrow("rolled back");
+        const after = await DB.query<{ name: string | null }>(
+          sql`select "name" from "User" where "email" = ${"ada@x.test"}`,
+        );
         // Postgres: a different connection from the pool, so the transaction
         // never contained it and the rollback did not reach it.
         expect(after[0].name).toBe("escaped");
@@ -640,10 +638,15 @@ function suite(label: string, url?: string) {
           sql`update "User" set "name" = null where "email" = ${"ada@x.test"}`,
         );
       } else {
-        // SQLite: one connection, so it was inside the transaction after all.
+        // SQLite: the other connection waits for the transaction's lock,
+        // which waits for it, so it fails rather than hangs, and writes nothing.
+        await expect(attempt).rejects.toMatchObject({ name: "TransactionQueueDeadlockError" });
+        const after = await DB.query<{ name: string | null }>(
+          sql`select "name" from "User" where "email" = ${"ada@x.test"}`,
+        );
         expect(after[0].name).toBeNull();
       }
-    });
+    }, 10_000);
 
     /**
      * ...and `DB.query` / `DB.execute`, which the docs point to instead, roll

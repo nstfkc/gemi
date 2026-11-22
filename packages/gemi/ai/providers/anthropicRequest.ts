@@ -13,6 +13,8 @@ import {
   attachmentLine,
   isImageFile,
   toolResultOutput,
+  WAITING_ON_USER,
+  waitingOnUser,
 } from "./request";
 
 /**
@@ -149,7 +151,23 @@ export function buildMessagesRequest(
     if (params.toolChoice !== undefined || choice.disable_parallel_tool_use) body.tool_choice = choice;
   }
 
-  return withCacheBreakpoints(body);
+  return withTrailingContext(withCacheBreakpoints(body), params.trailingContext);
+}
+
+/**
+ * `trailingContext` after the conversation (#1345), added once the cache
+ * breakpoints are placed: the last one stays on the block before it, so the
+ * prefix the cache holds is the same whatever the text says. A text block at
+ * the end of the last user message (after its tool results, which the API
+ * wants first), or a user message of its own after an assistant one.
+ */
+function withTrailingContext(body: MessagesRequest, text: string | undefined): MessagesRequest {
+  if (!text) return body;
+  const block: MessagesBlock = { type: "text", text };
+  const last = body.messages.at(-1);
+  if (last?.role === "user") last.content = [...last.content, block];
+  else body.messages.push({ role: "user", content: [block] });
+  return body;
 }
 
 function repliesWithThinking(messages: MessagesMessage[]): boolean {
@@ -395,7 +413,8 @@ function toolChoice(
  * pairing rules are those of
  * `reconcileToolPairs` in `request.ts`, and for the same reasons: a repeated
  * call or result is dropped, a result for a call this history does not hold is
- * dropped, and a call left without a result gets one saying so.
+ * dropped, and a call left without a result gets one saying so (or, for a
+ * call waiting on the user's answer, saying that).
  */
 export function toMessages(
   messages: AgentMessage[],
@@ -478,11 +497,12 @@ export function toMessages(
     else out.push({ role, content: [block] });
   };
   const called = new Set<string>();
+  const waiting = waitingOnUser(messages);
   // The calls of the assistant turn being written, answered when it ends.
   let open: string[] = [];
   let stepEnded = false;
   const answer = () => {
-    for (const id of open) push("user", results.get(id) ?? noResult(id));
+    for (const id of open) push("user", results.get(id) ?? noResult(id, waiting.has(id)));
     open = [];
     stepEnded = false;
   };
@@ -525,8 +545,13 @@ const CONTINUE = "Continue.";
 
 const NO_RESULT_RECORDED = "No result was recorded for this tool call. Assume it did not complete.";
 
-function noResult(toolUseId: string): MessagesBlock {
-  return { type: "tool_result", tool_use_id: toolUseId, content: NO_RESULT_RECORDED };
+/** A call left without a result: one still waiting on the user's answer (#1380) is told so. */
+function noResult(toolUseId: string, waiting: boolean): MessagesBlock {
+  return {
+    type: "tool_result",
+    tool_use_id: toolUseId,
+    content: waiting ? WAITING_ON_USER : NO_RESULT_RECORDED,
+  };
 }
 
 /** A reasoning part this provider wrote, back as its block; else nothing. */

@@ -1561,7 +1561,7 @@ function suite(label: string, url?: string) {
       });
 
       /**
-       * The folio predicate from #407 — `COALESCE(payload->>'x', name) = v`
+       * An app's predicate from #407 — `COALESCE(payload->>'x', name) = v`
        * spelled in the grammar, and the read that could not leave Prisma.
        *
        * The second branch is the one that needed `AnyNull`: "the extracted

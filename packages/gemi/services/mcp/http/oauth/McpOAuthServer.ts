@@ -5,7 +5,7 @@ import { sessionUser } from "../../../../auth/accessToken";
 import type { User } from "../../../../auth/types";
 import { app } from "../../../../foundation/app";
 import { HttpRequest } from "../../../../http/HttpRequest";
-import { clientIp } from "../../../../http/RateLimitMiddleware";
+import { clientAddress } from "../../../../http/RateLimitMiddleware";
 import { bearerToken, type McpCallerResolver, type McpResolution, type McpResolveContext } from "../callers";
 import { overBudget, type Budget } from "../limits";
 import { sign, verify } from "../signedState";
@@ -320,7 +320,7 @@ export class McpOAuthServer implements McpCallerResolver {
   private async register(req: Request): Promise<Response> {
     const registration = this.options.registration || {};
     const retryAfter = await overBudget(
-      `mcp-oauth-register:${clientIp(new HttpRequest(req, {}, "api", `${this.base}/register`))}`,
+      `mcp-oauth-register:${clientAddress(new HttpRequest(req, {}, "api", `${this.base}/register`))}`,
       registration.rateLimit ?? DEFAULT_REGISTRATION_BUDGET,
     );
     if (retryAfter !== null) {

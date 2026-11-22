@@ -12,7 +12,7 @@ import type { AgentStreamEvent } from "./types";
  * #656: a run that fails says why on `result()`, logs it, and still tells the
  * client no more than it did before.
  *
- * The two failures kyte hit are the first two tests, through the real OpenAI
+ * The two failures an app hit are the first two tests, through the real OpenAI
  * provider with `fetch` replaced: an endpoint nothing answers on, and a 400 for
  * a parameter the model refuses. Both used to resolve `result()` with
  * `finishReason: "error"`, no output and nothing else, and log nothing.

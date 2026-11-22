@@ -14,7 +14,12 @@ import {
   type MessagesRequest,
 } from "./providers/anthropicRequest";
 import { parseMessagesStream } from "./providers/anthropicStream";
-import { capabilitiesForClaude, capabilitiesForModel } from "./providers/capabilities";
+import {
+  capabilitiesForClaude,
+  capabilitiesForModel,
+  claudeRequestFeatures,
+  responsesRequestFeatures,
+} from "./providers/capabilities";
 import {
   anthropicTarget,
   azureRealtimeTarget,
@@ -75,11 +80,26 @@ export type ProviderCapabilities = {
   /**
    * Whether the model takes a forced `toolChoice` (`"required"` or
    * `{ name }`) (#1261). A provider that answers `false` sends one as `auto`,
-   * and `Agent` emulates it: a system line naming the call the step must
-   * make, and one more ask when the step ends without it. Absent means
+   * and `Agent` emulates it: a line after the conversation (with the
+   * trailing context) naming the call the step must make, and one more ask when the step ends without it. Absent means
    * `true`, so a custom provider written before this flag is unchanged.
    */
   supportsForcedToolChoice?: boolean;
+  /**
+   * Whether the provider sends `ProviderStreamParams.trailingContext` itself,
+   * after the conversation and outside the cached prefix (#1345). Absent
+   * means `false`: `Agent` then adds it as a last user message, so a custom
+   * provider still sends it, only with the cache breakpoint wherever it puts
+   * one.
+   */
+  trailingContext?: boolean;
+  /**
+   * Whether the provider takes `ProviderStreamParams.allowedTools` (#1345):
+   * the full tool list is sent and the call is held to the names given, so
+   * a step that narrows its tools keeps the cached prefix. Absent means
+   * `false`: `Agent` sends only the narrowed list.
+   */
+  allowedTools?: boolean;
 };
 
 /** A tool as the model is shown it: schema only, no implementation. */
@@ -141,6 +161,29 @@ export interface ProviderStreamParams {
    * a cut is retried like any other retryable failure.
    */
   retryToolArgumentsTooLong?: boolean;
+  /**
+   * Text for the model sent after the conversation on this call (#1345): the
+   * current screen, the time, a small state note. Never stored. A provider
+   * that declares `capabilities.trailingContext` sends it after the last
+   * message and keeps its cache breakpoint before it, so it can change on
+   * every call without a cache miss.
+   */
+  trailingContext?: string;
+  /**
+   * The tool names this call may use, when a step narrowed them (#1345).
+   * Only sent to a provider that declares `capabilities.allowedTools`; `tools`
+   * is then the run's full list. A call to a tool not named is refused by
+   * `Agent` either way.
+   */
+  allowedTools?: string[];
+  /**
+   * The agent making the call (#1343): its `name`, and `depth` (0 for the
+   * run, 1 for a sub-agent it called, and so on). For a provider shared by
+   * several agents that answers each its own way, for example a test's
+   * `scriptedProvider`. Not sent to the model. Unset on a call no agent
+   * makes (`generateText`, a compaction summary).
+   */
+  agent?: { name: string; depth: number };
   signal?: AbortSignal;
 }
 
@@ -231,7 +274,38 @@ export type ProviderEvent =
    * request that failed before any response, or a provider that does not know.
    * Optional so a custom provider need not fill it in (#741).
    */
-  | { type: "finish"; reason: FinishReason; usage: Usage; model?: string }
+  | {
+      type: "finish";
+      reason: FinishReason;
+      usage: Usage;
+      model?: string;
+      /**
+       * The same usage split by the model that spent it, when more than one
+       * did: a fallback chain's abandoned legs and the leg that answered. So
+       * each is priced at its own model (#1146). Absent for one model.
+       */
+      byModel?: Record<string, Usage>;
+    }
+  /**
+   * What the call has used so far (#1353), whenever the stream reports it
+   * before the end (Anthropic's `message_start` and `message_delta`): the
+   * whole call's, attempts dropped before it included, not a delta. The
+   * `finish` that closes the call has the final count and replaces it. What
+   * `Agent` bills for a call it stops, whose `finish` it never reads.
+   * Informational: a consumer that ignores it loses nothing but that. A
+   * provider need not send it.
+   */
+  | {
+      type: "usage";
+      usage: Usage;
+      /** The model the count is for, when the provider said. */
+      model?: string;
+      /**
+       * `usage` by model, when the call used more than one (a
+       * `FallbackProvider` that fell back): what a meter prices each at.
+       */
+      byModel?: Record<string, Usage>;
+    }
   /**
    * `status` and `requestId` describe the HTTP response the error came from,
    * when there was one, and `providerType`, `providerCode` and
@@ -264,6 +338,13 @@ export type ProviderEvent =
       error: AgentError;
       /** Set when the call was cut at `maxToolArgumentChars` (#1259). */
       toolArgumentsTooLong?: ToolArgumentsTooLong;
+      /**
+       * What the call used before it failed (#1353), when the provider said:
+       * the whole call's, dropped attempts included, the same count as the
+       * `finish` that follows. A call cut at the output limit or broken
+       * halfway is billed for it.
+       */
+      usage?: Usage;
     } & ProviderErrorDetail);
 
 /**
@@ -288,6 +369,12 @@ export type ProviderEvent =
  *   once the retries are spent (#1259). `phase` is then `"stream"`.
  */
 export type ProviderRetryInfo = ProviderErrorDetail & {
+  /**
+   * What the failed attempt used, when the provider said (#1353). Billed
+   * though dropped; it is also added to the `finish` that closes the call,
+   * so a consumer summing `finish` usage counts it once.
+   */
+  usage?: Usage;
   attempt: number;
   maxRetries: number;
   error: AgentError;
@@ -355,6 +442,16 @@ export abstract class AgentProvider {
    * envelope as OpenAI, and the one place it differs — the content filter's
    * code, buried in `innererror` — is handled by reading both.
    */
+  /**
+   * What a prompt-cache write costs, as a multiple of the input price, for
+   * `model`'s calls (#1146), when the vendor publishes one rule for it: the
+   * default of `ModelPrice.cacheWriteInput`. A provider that states none
+   * leaves `Usage.costUsd` of a call that writes the cache `null` unless the
+   * table prices writes. Optional, so a provider that implements this class
+   * rather than extending it still type-checks.
+   */
+  cacheWriteFactor?(model: string): number | undefined;
+
   normalizeError(error: unknown): AgentError {
     return normalizeProviderError(error);
   }
@@ -406,7 +503,7 @@ export class OpenAIProvider extends AgentProvider {
   constructor(model: string, config: ProviderConfig = {}) {
     super();
     this.model = model;
-    this.capabilities = capabilitiesForModel(model);
+    this.capabilities = { ...capabilitiesForModel(model), ...responsesRequestFeatures(model) };
     this.config = config;
   }
 
@@ -503,8 +600,18 @@ export class AnthropicProvider extends AgentProvider {
   constructor(model: string, config: AnthropicConfig = {}) {
     super();
     this.model = model;
-    this.capabilities = capabilitiesForClaude(model);
+    this.capabilities = { ...capabilitiesForClaude(model), ...claudeRequestFeatures() };
     this.config = config;
+  }
+
+  /**
+   * Anthropic's published rule: a 5-minute cache write is 1.25x the input
+   * price. It assumes 5-minute writes: gemi marks `cache_control` as
+   * `ephemeral` with no `ttl`. A 1-hour write is 2x; an option that sends
+   * `ttl` must price `cache_creation.ephemeral_1h_input_tokens` apart.
+   */
+  cacheWriteFactor(_model: string): number {
+    return 1.25;
   }
 
   /**
@@ -638,7 +745,7 @@ export class AzureAnthropicProvider extends AnthropicProvider {
 
   constructor(model: string, config: FoundryConfig = {}) {
     super(model, config);
-    this.capabilities = { ...capabilitiesForClaude(model), fileInput: false };
+    this.capabilities = { ...capabilitiesForClaude(model), ...claudeRequestFeatures(), fileInput: false };
   }
 
   /** `ANTHROPIC_FOUNDRY_*` from the environment for what `config` leaves out. */
@@ -704,7 +811,7 @@ export class AzureOpenAIProvider extends AgentProvider {
     // Read off the model, not the deployment: a deployment called `prod` says
     // nothing, and an unrecognized name lands on the all-capabilities default
     // anyway. See `capabilitiesForModel`.
-    this.capabilities = capabilitiesForModel(model);
+    this.capabilities = { ...capabilitiesForModel(model), ...responsesRequestFeatures(model) };
     this.config = config;
   }
 

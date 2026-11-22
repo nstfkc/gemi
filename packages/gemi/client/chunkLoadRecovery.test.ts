@@ -234,7 +234,7 @@ describe("recoverFromBuildMismatch (#1056)", () => {
     expect(assign).toHaveBeenCalledWith("https://app.test/settings");
   });
 
-  // folio#2750: the load was cancelled ("Stay" on a dirty page's
+  // The load was cancelled ("Stay" on a dirty page's
   // `beforeunload` prompt; here `assign`/`reload` do nothing) and the page
   // keeps running. Nothing may stay latched behind it.
   test("a cancelled load does not hold back another URL", () => {

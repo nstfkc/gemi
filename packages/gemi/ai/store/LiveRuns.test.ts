@@ -28,6 +28,38 @@ async function collect(frames: AsyncIterable<AgentStreamFrame>): Promise<AgentSt
 }
 
 describe("MemoryLiveRuns", () => {
+  test("lists every run going on a thread, oldest first, and drops each as it ends", async () => {
+    const runs = new MemoryLiveRuns({ ttlMs: 100 });
+    const first = new StubAgentRun("run_a");
+    const second = new StubAgentRun("run_b");
+    const elsewhere = new StubAgentRun("run_c");
+    runs.register(first, { threadId: "t1" });
+    runs.register(second, { threadId: "t1" });
+    runs.register(elsewhere, { threadId: "t2" });
+    for (const run of [first, second, elsewhere]) run.emit(textDelta("x"));
+    await settle();
+
+    expect(runs.running({ threadId: "t1" }).map((info) => info.runId)).toEqual(["run_a", "run_b"]);
+    expect(runs.running({ threadId: "t1" })[0]!.startedAt).toBeTypeOf("number");
+    expect(runs.threadOf("run_b")).toBe("t1");
+    // `find` still names the newest.
+    expect((await runs.find({ threadId: "t1" }))?.runId).toBe("run_b");
+
+    first.finish();
+    await vi.waitFor(() =>
+      expect(runs.running({ threadId: "t1" }).map((info) => info.runId)).toEqual(["run_b"]),
+    );
+    // Ended, it is still there for `ttlMs`, just not running.
+    expect(runs.get("run_a")).toBe(first);
+
+    second.finish();
+    elsewhere.finish();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(runs.running({ threadId: "t1" })).toEqual([]);
+    expect(runs.threadOf("run_a")).toBeUndefined();
+    runs.clear();
+  });
+
   test("finds a run by thread and hands the run itself back by id", async () => {
     const runs = new MemoryLiveRuns();
     const run = new StubAgentRun("run_a");

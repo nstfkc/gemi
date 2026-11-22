@@ -2425,7 +2425,7 @@ describe("a user's upload, named to the model and handed to a tool", () => {
  *
  * A real `Agent` over a scripted provider throughout: what reaches the store
  * mid-run is what the run reports and emits, and a stub run would only report
- * what the test handed it. The tool is kyte's case: `buildPage` has saved
+ * what the test handed it. The tool is a real app's case: `buildPage` has saved
  * something and is still going when the process dies.
  */
 describe("a turn written as it runs", () => {
@@ -2937,7 +2937,7 @@ describe("the client's body reaches attachmentScope and authorizeRequest", () =>
   });
 
   test("the pre-#603 workaround, cloning the body in a stream override, keeps working", async () => {
-    // What kyte shipped while this was open. An app upgrading must not break
+    // What an app shipped while this was open. An app upgrading must not break
     // before it gets round to deleting it.
     const run = new StubAgentRun("run_603j");
     const { agent, calls } = stubAgent(run);

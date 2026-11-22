@@ -20,7 +20,7 @@ import { POSTGRES_URL } from "./scratch";
  * JSON-encode that text like any Json value: the column held the JSON *string*
  * `"[]"` (`jsonb_typeof` = `string`), and a migration that later ran
  * `jsonb_array_elements` over it failed with "cannot extract elements from a
- * scalar" in fager's production.
+ * scalar" in an app's production.
  *
  * Every assertion reads the column with the raw driver as well as through the
  * ORM. The ORM's own read is not enough on its own: on SQLite it decoded the

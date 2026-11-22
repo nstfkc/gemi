@@ -1,4 +1,33 @@
-# 0.226.0
+# 0.241.0
+
+## The local storage driver refuses symbolic links inside the store (#1324)
+
+**Behaviour change (minor version).** See [File Storage: symbolic links](docs/file-storage.md#symbolic-links).
+
+`FileSystemDriver` now checks every existing entry between its storage folder
+and the object. A link at the object's name or in any parent directory is
+refused, whether its target is inside the store, outside it, or missing.
+
+- `read()`, `fetch()` and `size()` reject with `FileNotFoundError`, so a stream
+  route answers 404. Before, a link such as `covers/latest.jpg` was served even
+  though `objects()` never listed it.
+- `put()`, `putStream()` and `delete()` reject. Nothing is written or removed
+  through the link, and the link itself is left in place.
+- `put()` now writes a temporary file next to the target and renames it into
+  place, as `putStream()` already did. A failed or aborted `put()` leaves the
+  previous version untouched, and replacing an object gives it a new inode.
+- A storage folder that is a link to a missing directory now fails writes with
+  `The storage folder "…" is a symbolic link to a missing directory` instead
+  of `EEXIST`.
+- `objects()` still skips links. A prefix whose directory is or passes through
+  a link now lists nothing, and `deletePrefix()` refuses it. Links found inside a
+  prefix are left in place, with their targets.
+- The storage folder itself may still be a link, for example a `storage` link to
+  a directory shared between releases. Use that layout instead of links inside
+  the store. Replace aliases inside the store with copies.
+- `fetch()` of a missing object now rejects with `FileNotFoundError`. Before, it
+  answered `200` and the body failed once it was read.
+  The file is open once `fetch()` resolves, so consume or cancel the body.
 
 ## View route parameters are decoded once (#1322)
 
@@ -30,6 +59,364 @@ status 404 on a page load, and on an in-app navigation too.
   server filed it, not under one rebuilt from the params. A page such as
   `/u/john@x.com` or `/u/c++` keeps its loader data, and a `:` in the path
   (`/u/a:b`) no longer throws `Missing parameter` on the first render.
+
+# 0.240.0
+
+## A reply's questions stay open until each one is answered (#1380)
+
+**Behaviour change (minor version).** When one assistant reply asked two questions (two approvals, an approval and a client tool), answering the first refused the second before the user had answered it. Now a request of answers settles only the calls it answers:
+- **Server.**
+  - The other questions of the same turn stay open, with their `pending`, as other turns' questions already did (#1355). The turn carries on with the answers it has, and a stop of that reply doesn't refuse them.
+  - In the model's request, a question still waiting gets a placeholder result that says so ("waiting for the user's answer"), instead of "No result was recorded". That includes other turns' open questions.
+  - When an answer arrives after the model has replied past its question, the first model call's input ends with a line saying the user has now answered it.
+  - A run whose turn still waits on a question ends with an `awaiting-input` frame listing every open question of the turn. When the model ended with `stop`, the run's `finishReason` is `awaiting-input`; the message keeps `stop`. So `AgentTurnResult.pending`, `onAwaitingInput` and a client's cards all show a turn that needs input. Clients older than this release put the second card back from that frame.
+- **`useChat`.**
+  - Answering a card marks and then removes only that card.
+  - A card answered while an earlier answer is going out or its reply streams waits in the chat until that reply ends, then goes out. Before, it was reported as `invalid_tool_result`. It keeps `answering: true` meanwhile, even when the running reply restates it. `stop()` puts it back unsent, and a new message sent meanwhile settles it, so its answer is never sent.
+  - A stateless chat posts the held questions on their messages, so the server can keep them open.
+- **Kotlin and Swift.** Only the answered card leaves `pending`. A card answered while an earlier answer's reply streams waits until that reply ends, then goes out, instead of cutting it.
+- **Unchanged.** Several cards answered in the same tick still go out as one turn. A new message from the person still refuses every open question. Sub-agent questions under one tool call still resolve together. A call answered with a bad signature is still refused.
+
+What to check:
+- A UI that relied on the first answer closing the other cards will now keep showing them. To close them, answer them (`approve(id, false)`) or send a new message.
+- `useChat`'s `status` is `awaiting-input` whenever a card is held. That includes while the first answer's reply streams, and after a failure (the error is in `error`, but `status` isn't `"error"` while a card is held). A UI that shows a stop button or typing indicator on `status === "streaming"` should read `chat.runs` instead.
+- A run that answered one card and ended now has `finishReason: "awaiting-input"` while another card of its turn is open. Code that treats `awaiting-input` as "the model just asked something" should read the frame's `pending`.
+- `onAwaitingInput` now fires at the end of every run that leaves a question of its turn open, including a run that answered one card and ended with text, and it lists every open question of the turn. A hook that notifies someone may be called again for questions they were already told about. Dedupe by `toolCallId` if that matters.
+- A UI that disabled every card while one answer was in flight (`call.answering` on all of them) now sees `answering` only on the cards being answered. The others can be answered.
+# 0.239.0
+
+## SQLite: statements outside a transaction use their own connection (#1375)
+
+**Behaviour change (minor version).** On a SQLite file database, a plain statement outside a transaction (a `Model.create` outside `transaction()`, `DB.sql`, a rate-limiter or lock-store write) ran on the same connection as every transaction, so while another request's transaction was open it ran *inside* it: it saw that transaction's uncommitted rows, and committed or rolled back with it. A rate-limit hit during a sign-up that rolled back was lost with it.
+
+Now a SQLite file connection opens two Bun clients on the file: transactions run on one, plain statements on the other.
+- **WAL mode.** gemi switches the file to WAL, so reads don't wait for writers. The database gets two companion files, `<name>-wal` and `<name>-shm`: copy, back up or delete all three together, and add them to `.gitignore` if the database file is listed there. WAL doesn't work on network filesystems (NFS, SMB); keep the file on a local disk. If the switch is refused, gemi warns once at startup. The mode is stored in the file, so a database opened once by this version stays in WAL mode if the app goes back to an older gemi.
+- **Waiting for the lock.** A plain write while a transaction is open meets SQLite's lock (`SQLITE_BUSY`). It waits its turn in the transaction queue (#1362), without blocking the event loop, and runs after that transaction ends. With its turn, a lock still held by another process is retried with a short backoff for up to 5 seconds, and so is a transaction's `BEGIN`. `busy_timeout` stays 0 on both connections (SQLite's own wait would block the event loop): the database lock store and queue driver no longer set it on these connections, and an app shouldn't either.
+- **`BEGIN IMMEDIATE`.** Transactions take the write lock at `BEGIN`, so a transaction that read first can't fail later because a plain write landed in between.
+- **Multi-statement strings are never run twice.** `sql.unsafe("…; …")` and `sql.file(...)` wait their turn before running, so they don't meet this process's open transaction. If one still meets another process's lock, it fails with `SqliteBusyError` instead of being retried, because the statements before the one that failed may have committed. A `;` inside a string literal, a quoted name or a comment, or a trailing one, doesn't make a string multi-statement. Since such a string waits for the open transaction even when it only reads, one issued through the pool inside a transaction fails after 5 seconds like a write; run it on the transaction's handle.
+- `:memory:` keeps one connection. Postgres and MySQL are unchanged.
+
+What to check:
+- **Writes through the pool inside a transaction now fail on SQLite.** A write that doesn't go through the transaction used to join it on SQLite. Now it waits for the transaction, which waits for it, and after 5 seconds fails with `TransactionQueueDeadlockError`. The error's `stack` (and its `callSite`) points at the call that issued the write, and its message quotes the statement. Postgres runs the same code on another connection, so it works there. This covers:
+  - your own `DB.sql` / `connection.sql` writes;
+  - gemi stores that write through the pool and don't join the transaction around them, by design (a rate-limit hit must not roll back with the sign-up it guarded): `DatabaseLockStore` (locks, and `hit` behind the database rate limiter; measured, `hit` inside `DB.transaction` fails after 5008 ms), `DatabaseConnectionStore` (OAuth connections), `DatabaseRunStore` and `DatabaseAgentJobStore`.
+
+  Call them before the transaction, or from `afterCommit` inside it. For your own SQL, use the ORM, `DB.query` / `DB.execute` or the handle `transaction()` passes, which join the transaction. Reads through the pool still work and see only committed rows, as on Postgres. The queue driver's `push`, the agent store and the change feed join the open transaction and are not affected.
+- A `busyTimeout` passed to `DatabaseQueueDriver` or `DatabaseLockStore` is ignored on a SQLite file connection, with a warning: gemi waits for another process's lock itself, for up to 5 seconds. It still applies to `:memory:` and to a client you built yourself.
+- Deployments that keep the SQLite file on a network filesystem, or copy only the main database file while the app runs.
+- `TransactionQueueDeadlockError`, `queuedOnSqlite` and `slowTransactionThreshold` are still exported from `orm/context`; they now live in `database/`.
+
+# 0.238.0
+
+## `scriptedProvider`: `exhausted` takes a step (#1378)
+
+**Feature (minor version).** `scriptedProvider(script, { exhausted })` now also takes a step, most usefully a function of the call, and answers every call past the script with it. A test simulator shared by a whole file no longer needs a script filled ahead of time (`Array(5000).fill(reply)`). A call from an agent the scripts don't name still fails, and `assertDone()` checks only the scripted steps.
+
+What to check: nothing for existing tests. A fixed text reply there is written `{ text: "..." }`, since a bare string is a mode.
+
+# 0.237.3
+
+## Detached work after a transaction settles runs outside it (#1376)
+
+**Fix (patch version).** Work a transaction starts but doesn't wait for (a `setTimeout`, `void service.record()`, an emitter callback) inherits the transaction's scope. When that work ran after the transaction had finished, its `Model.transaction` / `DB.transaction` still became a savepoint of the finished transaction, and its queries still used the finished transaction's handle. Now, once the transaction's callback has returned or thrown (before `COMMIT` or `ROLLBACK` is sent), that work is outside it:
+- a nested `transaction()` opens a transaction of its own (on SQLite it queues like any other);
+- plain queries run on the pool;
+- `afterCommit(...)` inside that new transaction waits for its commit. Outside any transaction, `afterCommit(...)` and `static afterCommit` dispatches still go by the transaction the work started in: they run once it has committed, and are dropped if it rolled back, since they may announce its writes.
+
+While the transaction is still open, nothing changes: a nested call is a savepoint and queries join it.
+
+What to check:
+- Detached work that used to fail with an error from the finished transaction (a savepoint or a statement on a closed transaction) now succeeds, and its writes are kept even when the transaction that started it rolled back. If that work should only happen when the transaction commits, run it from `afterCommit` inside the transaction, before its callback returns.
+- Detached work that writes after a rollback and announces it with `afterCommit` should open its own `transaction()` around both, or the announcement is dropped.
+
+# 0.237.2
+
+## `costUsd` follow-ups: image tokens need an image price; warnings go to the run's log (#1146)
+
+**Fix (patch version).**
+- A call with image tokens (`imageInputTokens` / `imageOutputTokens`) and no `imageInput` / `imageOutput` price for its model now has `usage.costUsd: null` and warns once, rather than pricing image tokens as text. Meters still price them as text.
+- The "no price" warning for a call inside an agent run goes to that run's log, including a tool's `generate` or image call, not to the console. Outside a run it still goes to the console.
+
+What to check: add `imageInput` / `imageOutput` for your image models if you read `costUsd` for them.
+
+# 0.237.1
+
+## SQLite transactions queue instead of failing at `BEGIN` (#1362)
+
+**Fix (patch version).** On SQLite, a `Model.transaction` or `DB.transaction` that started while another one was open on the same connection (another request in the process) failed with `SQLiteError: cannot start a transaction within a transaction`. Now it waits and starts once the open one commits or rolls back.
+- The next one starts at the commit, before the after-commit callbacks, so a callback can open a transaction of its own.
+- Savepoints (nested transactions) don't queue.
+- gemi's database stores on the same connection take the same turns: the lock store, which also backs the database rate limiter, the agent store and the agent job store.
+- `UserProvider.transaction` and `withLegacySessionLock` used their own queue for this (#1356). They now use the ORM's.
+
+Postgres and MySQL are unchanged.
+
+A transaction started from inside an open one on the same connection, but outside its scope, waits its turn too, in case the open one doesn't wait for it. If it's still waiting on that transaction 5 seconds later, it fails with `TransactionQueueDeadlockError` instead of hanging. That's a store's own `begin`, or an in-process API call or channel message, awaited inside a transaction. Before, it failed at `BEGIN` at once. In development, any transaction that waits in the queue for 5 seconds logs a warning.
+
+What to check:
+- On SQLite, a transaction that awaits work which queued its own top-level transaction elsewhere (a shared promise started outside any transaction) waits for it. Look for the development warning.
+- Plain statements outside a transaction still run inside whichever transaction is open on the connection (#1375).
+
+# 0.237.0
+
+## `usage.costUsd`: each model call priced when it finishes (#1146)
+
+**Feature (minor version).** With a price table in `Usage.configure({ pricing })` (now named `ModelPrices`), every model call's usage gets `costUsd` in USD when it finishes, and the sums carry it. That covers agent steps, `generate`, sub-runs and `ImageModel` images. So `result().usage.costUsd`, `generate`'s `result.usage.costUsd`, `image.usage.costUsd` and `usageLimits.onUsage`'s `report.costUsd` (`delta`, `total`) say what the work cost.
+
+- **No guessed prices.** `costUsd` is `null` in these cases, and so is any total that includes them:
+  - the call's model isn't in the table;
+  - it read the cache and the model has no `cachedInput`;
+  - it wrote the cache with neither `cacheWriteInput` nor a provider rule.
+
+  The first case of each model and reason logs one warning, to the run's log. Under a pricing function `costUsd` is `null` (its unit isn't USD), and with no pricing it's absent.
+- **Cache writes use the provider's published rule.** There's a new optional `AgentProvider.cacheWriteFactor?(model)`: Anthropic answers 1.25 (the 5-minute cache), and a `FallbackProvider` asks the leg that served the call. It's the default for `cacheWriteInput`, in `costUsd` and in meters, so **a meter's `cost` for Anthropic calls that write the cache goes up** unless the table sets `cacheWriteInput`. `Eval` re-prices after the run without the provider, so it stays at `input`.
+- **A fallback chain's closing `finish` splits its usage by model** (`byModel`) when abandoned legs spent something. Each leg is priced at its own model, in `costUsd` and in meters. Before, a meter priced every leg at the answering leg's model.
+- **Server-side only.** An agent run strips `costUsd` from every client frame (`usage`, `message-end`, a tool call's generated-image record) and from what it stores (messages, sub-run transcripts, compaction summaries). `result().usage` (and `AgentTurn.result()`) does carry it.
+
+What to check:
+- Add `cachedInput` for every model whose calls read the prompt cache. Otherwise their `costUsd` is `null`. A meter still prices reads at `input`, which over-counts Anthropic by roughly 10x.
+- If your table covers Anthropic models without `cacheWriteInput`, their metered cost now includes the 1.25x write price. That's the vendor's real bill. Set `cacheWriteInput` if you have a different rate, and in an `Eval`'s pricing to match the run.
+- Don't return `result()` or `turn.result()` whole from a route or MCP tool: pick the fields, because `usage.costUsd` is your cost.
+- If your code matches on a fallback chain's `finish` event exactly, it may now have `byModel`.
+- A provider of your own can declare `cacheWriteFactor(model)`.
+
+# 0.236.2
+
+## A server turn no longer refuses other turns' open questions (#1371)
+
+**Fix (patch version).** A turn started with `startTurn` (text or an `event`) that didn't run parallel refused every open question on the thread, the same as a person moving on with a new message. So a scheduled report or a job's result arriving while the person hadn't answered an approval killed that approval, and the agent asked again on the server turn. Now a server turn leaves other turns' questions open, queued or not, and each one is still answered on its own turn. A person's new message (not parallel) still refuses every open call, as before.
+
+What to check: if you relied on a `startTurn` clearing questions the person never answered, refuse them yourself (answer them with `approve: false`, or `stop` their run).
+
+# 0.236.1
+
+## Two password sign-ups at once no longer answer 500 (#1361)
+
+**Fix (patch version).** Two `POST /auth/sign-up` requests for the same new address (a double submit) both found no user. The second insert broke the unique email, and the request answered 500. Now one creates the account, and the other gets the validation error on `email` ("Email address already exists"), the same answer it would get a moment later. The same applies to an invited sign-up, where the losing request fails earlier, on consuming the invitation the winner already used. Only a failed insert or invitation delete is treated this way, and only when the user exists by then. An `onUserCreated` that throws still fails the request.
+
+The OAuth callback already handled this race (the losing callback signs in once the identity resolves), and a new real-database test now covers it. Magic links only sign in existing users, so they can't race to create one.
+
+What to check: nothing.
+
+# 0.236.0
+
+## useChat lists the replies in progress; native clients keep questions with their turn (#1344)
+
+**New API and a client behaviour change (minor version).**
+
+- `useChat` returns `runs: ChatRun[]`: one entry per reply in progress, a request in flight or a turn waiting on its questions, with a client-side `id` to key it by (a waiting turn keeps it while its answer streams), `status` (`"submitted"`, `"streaming"` or `"awaiting-input"`), `runId` once known and `turn` once known. Match `pending` calls to a reply by `call.turn`. See [Parallel turns](docs/ai-server-turns.md).
+- The `message-start` event carries `turn` (the message's `AgentMessage.turn`) when the run knows it, and the reducer puts it on the streaming message. A streamed reply now has `message.turn` before it finishes.
+- **Kotlin and Swift clients** (`ChatSession`) are turn-aware, like the web hook since 0.232.0:
+  - `PendingToolCall.turn` and `AgentMessage.turn` are new.
+  - An `awaiting-input` for one turn keeps another turn's questions.
+  - An error keeps the questions that name their turn.
+  - Answers alone (`approve`/`answer`) take only the answered turn's cards off `pending`.
+
+What to check:
+
+- **An exhaustive check of `message-start`'s keys** (a test comparing the event with `toEqual`) sees the new `turn`.
+- **A native UI that expected `pending` to empty after answering one card** now keeps another turn's cards. That only happens on servers that run turns side by side. Calls without a `turn` (older servers) behave as before.
+- The conformance fixtures (`client/__fixtures__/reducer.json`) have new cases. A port of the client outside this repo should replay them.
+
+# 0.235.0
+
+## Usage on failed, cut, retried and stopped model calls (#1353)
+
+**New API and behaviour changes (minor version).** See [Calls that don't end normally](docs/ai-usage.md#calls-that-dont-end-normally).
+
+- New `ProviderEvent` `{ type: "usage", usage }`: what a call has used so far, sent while it streams (the Anthropic providers send it on `message_start` and `message_delta`). The `finish` that closes the call replaces it.
+- A run, `generate()` call or compaction summary stopped mid-call now counts what the call had used, **on the Anthropic providers**: `result.usage`, the last message's `usage` and the meter include it, each `FallbackProvider` leg at its own model. Before, a stopped call counted nothing. **OpenAI and Azure OpenAI stream no usage before their last frame, so a stopped call there still counts nothing.**
+- A call cut or broken after some output ends with a `finish` (and an `error`, new `usage` field) carrying what the provider reported so far, instead of zero.
+- `retry` events (`ProviderRetryInfo.usage`, `onProviderRetry`) carry what the dropped attempt used. As before, it is also added to the closing `finish`.
+
+What to check:
+
+- **An exhaustive `switch` on `ProviderEvent`** (a custom provider wrapper, a consumer with a `never` check) needs a `case "usage"`. Passing it on, or ignoring it, are both fine.
+- **Recordings** made from now on contain `usage` events. Recordings made before replay as they did.
+- **Usage totals** go up a little for runs that were stopped or failed halfway: those calls are now counted.
+- **Tests that compare a provider's events with `toEqual`** see the new `usage` events (Anthropic), and `usage` on `error` and `retry`.
+
+# 0.234.0
+
+## The database rate limiter stores keys hashed (#1363)
+
+`DatabaseRateLimiter` now stores each key as its HMAC-SHA256 under the app's `SECRET` (`ratelimit:#<hex>`), not as given. Rate-limit keys usually hold a client address or an email, and the rows stay until their window ends and a prune deletes them. The prefix stays in clear, so `prune()` and `pruneEvery` work as before.
+
+What to check:
+
+- **`SECRET` must be set** wherever the database limiter runs. Without it, a production boot fails, a development boot warns, and every limited call fails ("DatabaseRateLimiter stores its keys hashed with the app's SECRET"). To key with another secret, pass `new DatabaseRateLimiter({ hashKeys: "<secret>" })`. To keep the old behaviour, pass `hashKeys: false`. An empty `hashKeys: ""` is refused.
+- **Test environments without `SECRET`** that exercise the database limiter (integration tests, CI jobs, preview builds) now fail their limited calls. Set a `SECRET` there (any value will do), or build the limiter with `hashKeys: "test"`.
+- **Budgets start again once** on upgrade: the rows are named differently, so the counts already in the table no longer match. A daily quota gives everyone a fresh day. The old rows are pruned as their windows end.
+- **Changing `SECRET`** starts every budget again too.
+- Code that reads `gemi_locks` rows by the limiter's key name finds nothing now. Count through the limiter instead.
+
+The in-memory and Redis drivers are unchanged.
+
+# 0.233.1
+
+## Two email-code verifies at once for a new address no longer answer 500 (#1356)
+
+**Fix (patch version).** Both requests found no user, and the second insert broke the unique email: `UniqueConstraintError` escaped `POST /auth/email-code/verify` as a 500. Now, when creating the user fails and the user exists after all, the request goes on as a sign-in for that user (`isNewUser: false`), and `onUserCreated` runs once. With an issued code the second request is `invalid_code`, as before, since the first one spent it. Only a failed insert is recovered this way: an `onUserCreated` that throws still fails the request.
+
+On SQLite, `UserProvider.transaction` now queues in the process, one transaction after another per connection, as the legacy-session lock already did: the second sign-up's `BEGIN` failed with "cannot start a transaction within a transaction" while the first one's was open. The next one begins at the commit, before the after-commit callbacks, so a listener that signs someone up again doesn't wait on itself. The queue doesn't cover an app's own `Model.transaction` calls in other requests, or several processes on one SQLite file ([#1362](https://github.com/nstfkc/gemi/issues/1362)).
+
+What to check: nothing. An `onUserCreated` that wrote rows outside the user provider's transaction already ran only for the winning request.
+
+# 0.233.0
+
+## Text after the conversation, and a prompt cache that holds across turns (#1345)
+
+**New API and behaviour changes (minor version).** See [Text after the conversation](docs/ai-agent-context.md#text-after-the-conversation) and [Prompt cache key](docs/ai-providers.md#prompt-cache-key).
+
+- New `AgentController.trailingContext(req, { body, context })` (and the `trailingContext` hook, `agent.stream({ trailingContext })`, `PrepareStepResult.trailingContext`): text sent after the last message on every model call of the turn, never stored, outside the cached prefix.
+- The default `promptCacheKey` hashes the agent's own `instructions` and the run's tools, no longer each call's. A turn's `instructions()`, a memory block or a step's `activeTools` no longer change it.
+- On the OpenAI and Azure OpenAI providers with gpt-5 models (and ids gemi doesn't know), a step that narrows its tools (`prepareStep` answering `activeTools`) is sent the full tool list with `tool_choice: allowed_tools`, so the cached prefix holds. Lists with namespaces or tool search, older models and the Anthropic providers still get the narrowed list.
+- New optional `ProviderCapabilities.trailingContext` and `.allowedTools`, and `ProviderStreamParams.trailingContext` and `.allowedTools`.
+- On a provider that can't force a tool (`supportsForcedToolChoice: false`, #1261), the line asking for the tool now goes after the conversation, with the trailing context, instead of at the end of the system prompt.
+- `scriptedProvider` declares `capabilities.trailingContext`, and its calls carry `trailingContext`.
+
+What to check:
+
+- **The first calls after the upgrade** get a new cache key, so the prompt cache starts cold once.
+- **A note you add as a fake message after the conversation** (a system or user message spliced in by `prepareStep`): move it to `trailingContext()`. On Anthropic it took the cache breakpoint, so every call wrote the cache again.
+- **A custom provider** is sent the trailing context as a last user message (carrying the turn's id as `turn`, so it isn't a turn start) unless it declares `capabilities.trailingContext: true` and places `params.trailingContext` itself. It never gets `allowedTools` unless it declares `capabilities.allowedTools: true`.
+- **Tests that compare `capabilities` with `toEqual`**: the built-in providers now include `trailingContext` (and `allowedTools` on OpenAI/Azure), and `FallbackProvider` both fields.
+- **Tests that assert the forced-tool line in `systemPrompt`**: read it from `trailingContext`, or the last message on a provider without the capability.
+- **Recordings of forced steps on Claude Opus 5.5, Sonnet 5.5 or Fable 5.1** made before the upgrade had the line in `systemPrompt`, and now replay as changed. Record them again.
+- **Tests that pin the default `promptCacheKey`** of a call with extra instructions now see the agent-level key.
+
+# 0.232.0
+
+## Answering one turn's question keeps the others open (#1355)
+
+**Behaviour change (minor version).** See [Runs side by side](docs/ai-server-turns.md#runs-side-by-side).
+
+- A request that only answers tool calls (approvals, client tools) now refuses only the unanswered calls of its own turn. Before, it refused every open call in the thread, so answering turn B's question refused the one turn A was waiting on.
+- A stop refuses the stopped run's own open calls, not another turn's.
+- A request of answers alone that matches no open call (the same answer sent twice, a retried submit, an id never asked) now refuses nothing and ends `invalid_tool_result` with no model step. Before, with other calls open, it refused them and the model replied. A sub-agent's answer is matched by its host call (`path[0]`).
+- A new message refuses every open call as before, unless its run is parallel (`ifBusy: "parallel"`, asked by the turn, or started beside a running one): then the other turns' questions stay open. New `AgentStreamParams.keepOtherTurnsOpen` for running the agent yourself.
+
+What to check:
+
+- **A thread can now hold open calls from more than one turn.** The built-in request builders pair a call without a result for the model, as for one still running. A custom provider that rejects a history with an unanswered call has to do the same.
+- **`PendingToolCall.turn`** (new, not signed): the turn that asked the call, on `awaiting-input` frames and `AgentMessage.pending`. Tests comparing pending calls with `toEqual` see the new field.
+- **`useChat`** follows the server: answering a call marks (`answering`) and then drops only the held calls of its turn, an `awaiting-input` frame from one turn keeps another turn's cards, and a new message sent with `ifBusy: "parallel"` keeps the held calls. An answer to another turn's question than the one streaming (sent, attached, re-attached or watched) goes out as `ifBusy: "parallel"` and no longer cuts or stops that stream. A plain new message drops the cards at once, as before; the ones the server left open (the app's `busyPolicy` ran the message beside them) come back when its stream ends. An `error` frame keeps other turns' cards. Calls with no `turn` (an older server, a thread stored before) settle together, as before.
+- `status` is `awaiting-input` whenever a card is held, as documented, so with parallel turns it can say `awaiting-input` while another turn's reply streams. A single-turn chat is unchanged: a new message drops the card and the status is `submitted`. A UI that disabled every card while any `answering` is set still works; it can now disable per card (`call.answering`).
+- **Kotlin and Swift clients** still drop every held call when one is answered: in an open chat, answering one turn's question hides the other turns' until the thread is read again (a reload, or `watch`). They follow in a later release.
+- Threads without parallel turns behave as before: their open calls all belong to one turn.
+
+# 0.231.0
+
+## A scripted provider for agent tests (#1343)
+
+**New API (minor version), no behaviour change.** See [AI Scripted Provider](docs/ai-scripted-provider.md).
+
+- `scriptedProvider(steps | { [agent]: steps }, { exhausted? })` in `gemi/ai/testing`: answers each model call with the next step of its agent's script (text, tool calls, structured output, an error, or a function of the call). `calls`, `callsOf(name)` and `assertDone()`. A call past its script, or from an agent the scripts don't name, fails with a `ScriptedProviderError` naming the agent, the call and its turn. `NO_AGENT` keys the script for calls no agent makes (`generate()`, compaction); `{ error: { code, message, retryable } }` fails with exactly that error.
+- `turnOf(messages)` in `gemi/ai/testing`: the user turn a call answers, grouped as `splitTurns` groups.
+- `ProviderStreamParams.agent`: `{ name, depth }` of the agent making the call. A custom provider can ignore it; it is not sent to the model, and `RecordingProvider` neither records nor matches it, so existing recordings replay as before.
+
+What to check:
+
+- **A custom provider that forwards every field of `ProviderStreamParams` into its request body** would now send `agent` too. Drop it there, as with `signal`.
+
+# 0.230.0
+
+## Every message names its turn (#1339)
+
+**New API and behaviour changes (minor version).** See [Which turn a message belongs to](docs/ai-server-turns.md#which-turn-a-message-belongs-to).
+
+- New `AgentMessage.turn`: the id of the user message that started the turn a message answers, written on every message a run writes. A new message's `turn` is its own id. A turn that only answers tool calls (or a bare continuation) carries on the turn that asked them, even when other turns were stored since.
+- `turnStarts`, `splitTurns`, `contextWindow` and compaction group by `turn` when a message has it. With runs side by side (`ifBusy: "parallel"`), a reply stored after another run's messages now goes with its own question, and a cut never keeps it without that question. Messages stored without `turn` are read as before.
+- New `AgentRun.turn` and `ctx.turn` in the controller's hooks: `{ id, continues?, answers? }`.
+- `busyPolicy`'s `running[]` gains `messageId` (the run's turn id) and `body` (the `Body` the request that started it carried).
+- `maxThreadRuns` may answer `{ max, overflow: "queue" | "reject" }`. With `"queue"`, a parallel turn past `max` waits until one of the runs ends, then starts, instead of answering `429 too_many_runs`. A bare number refuses, as before.
+- `AgentMessage.joined` is deprecated. It is still written on a joined message, with the same value as `turn`. Read `turn`; `joined` goes in a later minor version.
+
+What to check:
+
+- **Messages from a run's `inbox`** (`AgentJobs.message`, #1222) are now part of the run's turn: they are no longer turn starts. A `contextWindow` with `maxTurns` counts fewer turns on a thread that had them, and keeps a little more. Files a tool showed carry the turn that showed them as well.
+- **Code that groups messages itself** by "a user message starts a turn" mis-groups parallel runs. Use `splitTurns`, or group by `message.turn ?? <the legacy rule>`.
+- **Code that reads `message.joined`**: read `message.turn` instead, which every message has, not only joined ones. A joined message has both, with the same value.
+- **A `maxThreadRuns` override that calls `super.maxThreadRuns()`** now gets `ThreadRunLimit` (`number | { max, overflow }`) back, not `number`. The default still answers a number.
+- **Hand-built test objects** stop type-checking: `AgentHookContext` now requires `turn`, and `AgentRunningTurn` (each `running[]` entry `busyPolicy` gets) requires `messageId` and `body`. Add them (`turn: undefined`, `messageId: undefined`, `body: undefined` is enough). `AgentRun.turn` is optional, so a hand-written `AgentRun` still type-checks.
+- **`maxThreadRuns` answers are now checked**: anything but a positive whole number, `Infinity` or `{ max, overflow: "queue" | "reject" }` fails the turn with a `TypeError`. Before, a `NaN` silently turned the limit off.
+- **A store that keeps messages in its own columns** (not the built-in stores, which store the message as JSON) should keep `turn`, or every message it loads falls back to the legacy rule.
+
+# 0.229.0
+
+## A database rate limiter (#1341)
+
+**New API (minor version). Nothing to change in an existing app**, but see the boot warning below. See [The database driver](docs/middleware.md#the-database-driver).
+
+- New `DatabaseRateLimiter` in `gemi/services`: a rate-limiter driver that counts in the app's database (the `gemi_locks` table, which has to exist), so budgets survive deploys and are shared by every instance. It counts a fixed window. Options: `table`, `prefix` (default `ratelimit:`), `store`, `pruneEvery` (default 1000) and `pruneBatch` (default 1000).
+- Ended windows are deleted as it goes: every `pruneEvery` calls, up to `pruneBatch` rows under the limiter's prefix, in the background. `limiter.prune()` does the same on demand, for a cron job.
+- `RateLimiter.consume(key, { limit, window, cost })` already took `cost`. The database driver honours it in whole units, refuses a `cost` above the limit, and always passes a `cost` of `0`.
+- `LockStore.hit(name, limit, windowMs, cost?)` takes an optional `cost` (default `1`) and answers the window's `count`. On Postgres and SQLite it is now one upsert instead of three statements, which the queue's and workflows' throttles also use. New optional `LockStore.pruneWindows(prefix, batch?)`, on both built-in stores. A custom `LockStore` keeps working.
+- In production, gemi logs a warning at boot when the queue driver is the database one (`"database"`, a `DatabaseQueueDriver`, or a function that builds one) and no rate-limiter `driver` is set. Each process that boots the app logs it once.
+- Shared driver contract tests run against the in-memory driver and the database driver on SQLite, Postgres and MySQL, the last two in CI's `queue-databases` job.
+
+What to check:
+
+- **The new boot warning.** An app on the database queue that sets no `ratelimiter` driver now logs one line per process at boot in production. Set `driver: new DatabaseRateLimiter()` (or `RedisRateLimiter`), or `new InMemoryRateLimiter()` to keep in-memory limits on purpose, to silence it.
+
+Also in this release, follow-ups to 0.228.0's test defaults:
+
+- Under vitest, a skipped schedule prints one line on stderr, once per test file that boots an app with cron jobs.
+- Under Bun, the provider guard counts any `fetch` or `WebSocket` that is not Bun's own as stubbed, so an MSW server started in a vitest setup file (before gemi loads) is let through as well. So is a `fetch` an APM or error tracker wrapped in a test setup file, whose calls then go out. Call `server.listen({ onUnhandledRequest: "error" })`: MSW's default sends an unmatched request on to the network.
+- The docs now say that a server a test spawns inherits `VITEST`, and so skips the schedule and refuses real model calls.
+
+# 0.228.0
+
+## Tests do not start the schedule or reach real model providers (#1342)
+
+**Behaviour change (minor version).** See [What a test process does not do](docs/testing.md#what-a-test-process-does-not-do).
+
+- Under vitest (`VITEST` is set), the cron schedule does not start unless `GEMI_SCHEDULE=1`. Jobs are still discovered and listed in `app(Scheduler).jobs`. `GEMI_NO_SCHEDULE=1` still turns the schedule off everywhere, and wins.
+- Under vitest, the built-in providers (OpenAI, Azure OpenAI, Anthropic, Azure Anthropic, images, realtime and its sideband socket) refuse to send a request unless `GEMI_AI_LIVE=1`. The request fails before it is sent, with `LiveModelCallRefusedError`, and is not retried. A provider's own `fetchImpl`, a stubbed global `fetch` or `WebSocket`, and a provider pointed at `localhost`, `127.0.0.1` or `::1` are let through.
+- Nothing changes outside vitest.
+
+What to check:
+
+- **Tests that relied on cron jobs ticking** in the test process now see none. Run the job's `callback` by hand, or set `GEMI_SCHEDULE=1` for those tests (`vi.stubEnv` before the app boots).
+- **Tests that made real model calls** now fail with a `provider_error` that names `GEMI_AI_LIVE`. Give those agents a fake provider. A live suite that should call the real API sets `GEMI_AI_LIVE=1` in its script or its vitest `env`.
+- **Tests that mock the network with a library that patches `fetch` in place** (MSW, say) are let through as stubbed. Make sure the library refuses unhandled requests, or a provider call can still leave the process.
+
+# 0.227.0
+
+## Rate limits count an IPv6 client by its /64 (#1340)
+
+**Behaviour change (minor version).** See [The client's address](docs/middleware.md#the-clients-address).
+
+- New `clientAddress(req, { ipv6Prefix = 64 })` in `gemi/http`: `clientIp(req)` with an IPv6 address cut to its first `ipv6Prefix` bits (`2001:db8:1:2::/64`) and an IPv4-mapped address (`::ffff:203.0.113.7`) given as its IPv4 address. IPv4 addresses and anything that is not an address are answered unchanged.
+- It is now the default key of `RateLimitMiddleware`, of the email-code, magic-link and password per-IP limits (`requestLimit`, `verifyLimit`, `passwordLimits`), and of the MCP endpoint's failed-credential and OAuth registration budgets. `broadcast.maxConnectionsPerIp` counts an IPv6 client by its /64 too. One host is usually given a whole /64, and before this it got a fresh budget each time it changed address inside it.
+- `clientIp(req)` is unchanged: the exact address, for logs.
+
+What to check:
+
+- **Existing counters for IPv6 and IPv4-mapped clients reset once** on deploy, since their keys change. IPv4 keys are the same as before.
+- **Clients that share a /64 now share a budget.** That is usually one household or one host, but some networks put many customers in one /64 (some mobile carriers, a shared office network). If a route's limit (or `broadcast.maxConnectionsPerIp`) is tight enough for that to matter, raise it, or key it on a session, user or API key with `configure({ key })`.
+- **Your own limit keys** built from `clientIp(req)` (a `configure({ key })`, a `RateLimiter.consume` call, a `runLimitKey`) still use the full address. Switch them to `clientAddress(req)` to get the /64 grouping.
+
+# 0.226.0
+
+## Join the running turn, or run turns side by side on one thread
+
+**New API and one behaviour change (minor version).** See [A thread that is busy](docs/ai-server-turns.md#a-thread-that-is-busy).
+
+- `ifBusy` takes two more values, on `startTurn` and now from the chat (`useChat({ ifBusy })` or `sendMessage(text, { ifBusy })`):
+  - `"join"`: the message joins the running turn and the run reads it at its next step. It is stored in arrival order with `message.joined` set to the id of the message that started the turn, and it is not a turn start for `contextWindow` or `splitTurns`. A run that ends before it reads the message (last step, error, supersede, approval) answers it with a turn of its own after, on the same response stream; a stop drops it; a refused second try stores it and reports an `error` frame (and `startTurn`'s `result()` rejects). `AgentTurn.joined` says whether `startTurn` joined.
+  - `"parallel"`: a second run starts beside the first, with its own `runId` and stream. Each run reads the thread as it was when it started, plus its own messages. A thread takes at most `maxThreadRuns` runs at once (default 3, `429 too_many_runs` past it), and each run counts against `maxConcurrentRuns`.
+- New protected controller methods, also accepted as hooks: `busyPolicy(req, { threadId, running, requested, source, turn, body, owner })` decides per message on a busy thread, and `maxThreadRuns(req, { threadId, owner, body })` sets the per-thread limit. The default `busyPolicy` answers the request's `ifBusy`, `"supersede"` when there is none, so nothing changes until a request or the hook asks for more.
+- `AgentRun.join(turn)` (optional on the interface) adds a message to a running run; it answers `null` once the run can no longer take one.
+- `MemoryLiveRuns` gains `running({ threadId })` (every run going on the thread, oldest first) and `threadOf(runId)`. `attach` with a `runId` attaches to that run, `watch` announces each run going on the thread, and `stop` with only a `threadId` stops every run on it the caller may stop.
+- `useChat` follows several runs at once: each reply finishes on its own, `status` stays `"streaming"` until the last ends, and `stop()` stops them all. The reducer gains `applyRunFrame`, `markAllAborted`, `liveRunIds` and `runCursor` for clients that apply frames themselves.
+- New exported types: `AgentClientBusyPolicy`, `AgentRunningTurn`, `AgentRunningTurnMessage`, `BusyPolicyParams`, `AgentJoinTurn`, `AgentRunJoin`, `LiveRunInfo`, `ChatBusyPolicy`.
+
+What to check:
+
+- **`useChat({ watch: true })`:** a run announced while the chat streams its own is now attached at once, beside it, instead of once the chat's run ends. A UI that shows one streaming reply at a time can see two.
+- **A request body field named `ifBusy`** is now read by the controller and is no longer passed through as part of `body`. A value other than `"supersede"`, `"queue"`, `"join"` or `"parallel"` answers `400 invalid_request`. Rename an app field of that name.
+- **`reattach()` with parallel runs** resumes the one run the chat was following, not every run. A chat that uses `"parallel"` and should recover all replies after a dropped connection needs `watch: true`: the watch stream announces every run going each time it connects.
 
 # 0.225.2
 
@@ -1429,7 +1816,7 @@ What can stop compiling:
 
 # Upgrading from 0.166.0 to 0.166.1
 
-## Client: a cancelled build-mismatch reload no longer stalls later navigations (folio#2750)
+## Client: a cancelled build-mismatch reload no longer stalls later navigations
 
 **Fix (patch). Nothing to change in apps.**
 
@@ -1637,7 +2024,7 @@ What can stop compiling:
 
 - New option `onRedisError: "memory" | "open" | "closed"`, **default `"memory"`**: a call that Redis fails, times out on, or that finds the client disconnected is counted by an in-process limiter (new option `fallback`, default a new `InMemoryRateLimiter`). During an outage each instance enforces the limit on its own (N instances, N budgets) instead of the limit being turned off. Before, the default was to admit every request (`failOpen: true`).
   - To keep the old behaviour, pass `onRedisError: "open"`. `failOpen` still works and is deprecated: `true` is `"open"`, `false` is `"closed"`; `onRedisError` wins when both are set.
-  - An app that wrapped `RedisRateLimiter` to fall back to `InMemoryRateLimiter` from `onError` (folio's `SharedRateLimiter`) can drop the wrapper and use the driver as is.
+  - An app that wrapped `RedisRateLimiter` to fall back to `InMemoryRateLimiter` from `onError` can drop the wrapper and use the driver as is.
 - **Behaviour change:** after a failure the limiter stops sending its script until Redis answers a `PING` (at most one a second, in the background), and answers every call in between as `onRedisError` says, at once. Before, every call went to Redis and waited out `timeout`; and Bun's offline queue (after a disconnect) or a stalled connection (a paused Redis) ran every increment of the outage once Redis was back, putting its callers over budget for up to two windows. Now at most the calls sent before the first failure was seen (`timeout` worth) can land late. Limits are shared again about a second after Redis recovers.
 - **Behaviour change:** a client that was seen connected and now says `connected === false` is not sent to; the call is answered as `onRedisError` says and `onError` gets a `RedisRateLimiterDisconnectedError` (new export of `gemi/services`). `RateLimiterRedisClient` gains an optional `connected`.
 - **Behaviour change:** the default `onError` writes one `console.error` line at most once a minute (with how many failures and calls without Redis it left out) and a `console.info` line when Redis answers again, instead of one line per failure. A custom `onError` still gets every failure: each failed call, then each failed `PING` while Redis stays down.
@@ -1703,7 +2090,7 @@ What can stop compiling:
 - `{{> name}}` includes another prompt (a partial), which shares the values.
 - Files are cached when `NODE_ENV` is `production` and re-read otherwise. `Prompt.configure({ dir, shared, cache })` changes the folders or the caching.
 - `Prompt.placeholders(name)` lists the placeholders a prompt uses.
-- An app with its own loader (fager's `renderPrompt`) can switch with no change to its files: the name rules and the `{{word}}` syntax are the same.
+- An app with its own loader can switch with no change to its files: the name rules and the `{{word}}` syntax are the same.
 
 ## `HttpResponse.redirect`, `.noContent`, `.text`; `HttpResponse` from stream and file routes (#990, #714)
 
@@ -2621,7 +3008,7 @@ New, and opt-in: nothing changes unless `contextWindow.compact` is set. See [AI 
 - **`AgentStreamParams.summaryStore`**: where a run keeps its thread's summaries, unless `compact.store` names one.
 - New exports from `gemi/ai`: `MemorySummaryStore`, `defaultSummaryStore`, `keepSummary`, `COMPACT_SUMMARY_HEADER`, `DEFAULT_COMPACT_INSTRUCTIONS`, `DEFAULT_COMPACT_TRIGGER_TOKENS`, `DEFAULT_MAX_SUMMARY_TOKENS`, `settleSummaries`, and the types `ContextCompactOptions`, `SummaryStore` and `ThreadSummary`.
 
-kyte, which windows inside `AgentStore.loadThread` today, can move to `contextWindow` with `compact` and add `loadSummaries`/`saveSummary` to its store (one table, see the docs).
+An app that windows inside `AgentStore.loadThread` today can move to `contextWindow` with `compact` and add `loadSummaries`/`saveSummary` to its store (one table, see the docs).
 
 ## Change feeds: `ChangeFeed`, `useSubscription` (#761)
 
@@ -2721,7 +3108,7 @@ New, and opt-in: `gemi build` without `--stats` is unchanged. See [Bundle Stats]
 - To report per route without booting the app in the build, the route table is read in a child process (`gemi/stats/route-table`, a new export) that imports the Kernel and runs only its synchronous `boot()`: providers register, nothing boots. If it fails, the stats are reported per view instead, with a message.
 - New: `DomainRouter.viewGroups()`, and the `StatsConfig`/`StatsBudgets` types from `gemi/config`.
 
-An app with its own bundle-stats script (kyte's `scripts/bundle-stats.ts`) can move its budgets into `gemi.config.ts` and run `gemi build --stats --json … --base … --markdown …` instead.
+An app with its own bundle-stats script can move its budgets into `gemi.config.ts` and run `gemi build --stats --json … --base … --markdown …` instead.
 
 ## Static views set no cookies of their own, and take `cacheControl`
 
@@ -2747,7 +3134,7 @@ Behaviour change: a `CorsMiddleware` (or a subclass from `CorsMiddleware.configu
 
 New, nothing to change. `afterCommit(fn)` runs `fn` after the surrounding transaction commits, or immediately when no transaction is open, and never on rollback (including when the savepoint it was registered in rolls back). It is the commit hook `static afterCommit` events already use, so an app no longer needs to push onto `ormContext.getStore()?.afterCommit` itself. See [Running something after the commit](docs/orm.md#running-something-after-the-commit).
 
-An app doing that today (kyte's `SiteChangeSignals.signalAfterCommit`) can replace the `ormContext` branch with `afterCommit(() => this.signal(siteId))`.
+An app doing that today can replace the `ormContext` branch with `afterCommit(() => this.signal(siteId))`.
 
 ## `gemi dev` honours `SERVER_IDLE_TIMEOUT` (#787)
 
@@ -2759,7 +3146,7 @@ Behaviour changes to know:
 - **A blank `SERVER_IDLE_TIMEOUT=` means the default (10)** in both servers. `gemi start` used to read it as `0`, which disables the timeout; write `0` for that.
 - **A value that isn't a whole number from 0 to 255 fails the boot** with a message naming the variable. Before, Bun refused non-integers and values above 255 with its own message, and accepted negatives.
 
-An app that worked around the dev limit (kyte's site change feed falls back to a 10-second wait in development) can use the same wait in both.
+An app that worked around the dev limit (falling back to a 10-second wait in development, say) can use the same wait in both.
 
 # Upgrading from 0.108.0 to 0.109.0
 
@@ -2780,7 +3167,7 @@ Behaviour changes to know:
 - **The document payload carries `staticRoutes`** when an app has static routes, and the client router turns a navigation to one into a full page load (`location.replace`), since nothing on the client can render it. `Link` prefetching skips them.
 - **`getStyles(views, { layout })`**, the render callback the servers pass to the view router, takes an optional second argument. This only matters to code that calls the dispatcher's render function itself (tests that stub `getStyles` keep working).
 
-An app that serves public, mostly-static pages (kyte's published sites and previews) can declare those routes `.static({ layout })` with a site-only stylesheet, and turn its few interactive components into islands.
+An app that serves public, mostly-static pages (published sites and previews, say) can declare those routes `.static({ layout })` with a site-only stylesheet, and turn its few interactive components into islands.
 
 # Upgrading from 0.107.0 to 0.108.0
 
@@ -2790,7 +3177,7 @@ Bug fix, nothing to change. When two routes used the same view (a legacy path an
 
 ## `gemi build` precompresses the client bundle; `/assets/*` is served compressed and `immutable` (#789)
 
-`gemi start` compressed SSR HTML but sent `/assets/*.js` and `*.css` at their raw size, so a page's JavaScript went over the wire about three times larger than it needed to (a kyte page: 917 kB instead of ~231 kB brotli).
+`gemi start` compressed SSR HTML but sent `/assets/*.js` and `*.css` at their raw size, so a page's JavaScript went over the wire about three times larger than it needed to (one app's page: 917 kB instead of ~231 kB brotli).
 
 What changes:
 
@@ -2830,7 +3217,7 @@ Behaviour changes to know:
 - **The `message-id` stream event carries the stored user message** as an optional `message` field. A client that sent the turn renames its copy as before and ignores the field. A client that never held the copy (one attached from elsewhere) appends it, unless a message with that id is already there, so the question shows above the answer without re-reading the thread. The reducers in `useChat`, the Swift `ChatSession` and the Kotlin `ChatSession` all do this; a custom client can ignore the field.
 - **`run-start` empties a stored in-progress copy of its run.** A thread read while a run is going holds the answer so far (`AgentMessage.runId` set, no `finishReason`). A client that showed that read and then attached got the run replayed from its first frame on top of it, and the text was printed twice. The reducers now clear the content of those messages (and their `runId`) when that run's `run-start` arrives, so the replay rebuilds them in place. This also covers the mount-time attach onto a server-rendered mid-run thread.
 
-An app that re-reads its thread on a change feed (kyte's `useSharedThread`) can drop its "running elsewhere" heuristic and its own `/stop` call: call `reattach()` where it refetched, and use the chat's own `status`, `messages` and `stop()`.
+An app that re-reads its thread on a change feed can drop its "running elsewhere" heuristic and its own `/stop` call: call `reattach()` where it refetched, and use the chat's own `status`, `messages` and `stop()`.
 
 ## `gemi/ai`: `contextWindow`, `prepareStep` and turn helpers (#473)
 
@@ -2840,7 +3227,7 @@ New, and nothing changes unless an app opts in: without `contextWindow` or `prep
 - **`prepareStep`** on `Agent.create`, `Agent.stream` and `AgentController` (a method, also given the hook context) is called before every model call and may answer `{ messages, instructions }` for that call alone.
 - **Exported helpers**: `turnStarts`, `splitTurns`, `windowMessages`, `messageSize` and `injectedMessageIds` (previously internal), with the types `ContextWindowOptions`, `ContextWindowResult`, `PrepareStep`, `PrepareStepContext` and `PrepareStepResult`.
 
-An app that windows its thread in `AgentStore.loadThread` (kyte) can move that to `contextWindow` and let `loadThread` answer the whole thread. Its own turn splitter can use `turnStarts`, which steps over the messages a tool injected to show a file.
+An app that windows its thread in `AgentStore.loadThread` can move that to `contextWindow` and let `loadThread` answer the whole thread. Its own turn splitter can use `turnStarts`, which steps over the messages a tool injected to show a file.
 
 ## `gemi/http`: per-route request body limits, `body-limit:SIZE` (#752)
 
@@ -2877,7 +3264,7 @@ Nothing changes for an app that does not opt in. See [Testing routes](https://ns
 
 It applies to every object of that schema at any depth (inside arrays, `anyOf` members, and when the schema is nested in an `s.object` or an `s.recursive` body), whether or not the object says `additionalProperties: false`. The emitted JSON Schema is unchanged. A key whose value is `undefined` counts as absent. `SchemaIssueCode` gains `"additionalProperties"`; code that switches over it exhaustively needs the new case.
 
-**Action:** none. An app that checks a body's keys itself before `validate` (kyte's form submissions) can pass `unknownKeys: "error"` instead.
+**Action:** none. An app that checks a body's keys itself before `validate` can pass `unknownKeys: "error"` instead.
 
 # Upgrading from 0.105.0 to 0.106.0
 
@@ -3225,7 +3612,7 @@ No change is needed to upgrade: everything is opt-in, and nothing touches `gemi_
 `Json` columns take `has_key`, `has_some_keys` and `has_every_key`, on the column and at a `path`, on Postgres and SQLite:
 
 ```ts
-await AsyncJob.findMany({ where: { payload: { has_some_keys: ["folioAiWorkspace", "folioAiReadiness"] } } });
+await AsyncJob.findMany({ where: { payload: { has_some_keys: ["aiWorkspace", "aiReadiness"] } } });
 ```
 
 No change is needed to upgrade: both are opt-in, and existing updates and filters behave as before.
@@ -4222,10 +4609,9 @@ What to delete in your app:
 - `app/broadcasting/` (your `BroadcastingChannel` subclasses)
 - any `Broadcast.channel(...).publish(...)` call, and any `useSubscription` /
   `useBroadcast` in components
-- test stubs of `BroadcastManager`. folio's
-  `apps/web/app/auth/legacySessionMigration.postgres.bun-check.ts` imports
-  `BroadcastManager` from `gemi/services` only to stub the broadcasting branch
-  of `Auth.user()`; delete that import and the stub. `Auth.user()` no longer
+- test stubs of `BroadcastManager`. A test that imports `BroadcastManager`
+  from `gemi/services` only to stub the broadcasting branch of `Auth.user()`
+  can delete that import and the stub. `Auth.user()` no longer
   resolves `BroadcastManager`, so nothing replaces it.
 
 The typechecker finds each of these: every removed name is now a missing
@@ -4781,8 +5167,8 @@ your proxy-secret header.
 
 ```ts
 trustProxy: {
-  hostHeader: "x-kyte-host",                       // default "x-forwarded-host"
-  secret: { header: "x-kyte-proxy-secret", value: process.env.PROXY_SECRET! },
+  hostHeader: "x-app-host",                       // default "x-forwarded-host"
+  secret: { header: "x-app-proxy-secret", value: process.env.PROXY_SECRET! },
 }
 ```
 

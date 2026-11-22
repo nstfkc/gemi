@@ -2,7 +2,7 @@ import type { SQL, TransactionSQL } from "bun";
 
 import type { DatabaseConnection } from "../../database/Connection";
 import type { Dialect } from "../../database/dialect";
-import { currentConnectionName, currentTransaction, withTransaction } from "../../orm/context";
+import { currentConnectionName, currentTransaction, queuedOnSqlite, withTransaction } from "../../orm/context";
 import type { AgentStore, CreateThreadParams, ThreadSweepResult } from "../AgentController";
 import { keepSummary, type ThreadSummary } from "../contextCompaction";
 import type { AgentMessage } from "../types";
@@ -82,8 +82,6 @@ export type AgentThreadRecord = {
 
 type Row = Record<string, unknown>;
 
-/** Each SQLite client's transactions, chained so they run one at a time. */
-const sqliteQueue = new WeakMap<SQL, Promise<void>>();
 
 /** How much of the first user message becomes the thread's title. */
 const TITLE_LENGTH = 100;
@@ -542,6 +540,7 @@ export class DatabaseAgentStore implements AgentStore {
     if (this.joinable()) {
       return withTransaction(this.sql, (tx) => fn(tx as unknown as SQL), {
         connection: this.connection,
+        dialect: this.dialect,
       });
     }
     const scope = this.scope;
@@ -554,18 +553,10 @@ export class DatabaseAgentStore implements AgentStore {
     if (this.dialect !== "sqlite") return begin();
     // One SQLite client is one connection, which holds one transaction at a
     // time: a second `begin` while the first is open fails with "cannot start
-    // a transaction within a transaction". So this client's transactions take
-    // turns. (Several clients on one file wait on SQLite's own lock.)
-    const previous = sqliteQueue.get(this.sql) ?? Promise.resolve();
-    const next = previous.then(begin, begin);
-    sqliteQueue.set(
-      this.sql,
-      next.then(
-        () => {},
-        () => {},
-      ),
-    );
-    return next;
+    // a transaction within a transaction". So its transactions take turns, in
+    // the same queue as the ORM's on that connection (#1362). (Several
+    // clients on one file wait on SQLite's own lock.)
+    return queuedOnSqlite(this.sql, begin);
   }
 
   /** The open ORM transaction, when it is on this store's connection. */

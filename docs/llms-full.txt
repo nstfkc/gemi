@@ -1236,7 +1236,7 @@ Any other value (or none) leaves compression on.
 
 ## Behind a proxy: `GEMI_TRUST_PROXY`
 
-`X-Forwarded-For` is written by whoever sends the request, so `gemi start` does not believe it unless told to. Before your code (and `clientIp`, the default [rate-limit](./middleware.md#rate-limiting) key) sees the request, the server leaves exactly one address in `X-Forwarded-For` and drops `X-Real-IP`:
+`X-Forwarded-For` is written by whoever sends the request, so `gemi start` does not believe it unless told to. Before your code (and `clientIp`, which the default [rate-limit](./middleware.md#rate-limiting) key `clientAddress` groups by /64 for IPv6) sees the request, the server leaves exactly one address in `X-Forwarded-For` and drops `X-Real-IP`:
 
 | `GEMI_TRUST_PROXY` | Client address |
 | --- | --- |
@@ -3453,7 +3453,7 @@ Limits how often one client may hit a route. `N` is the number of requests, `W` 
 | `rate-limit:100` | 100 requests per 60s |
 | `rate-limit:10,30` | 10 requests per 30s |
 
-The default bucket is the client's IP (the `x-forwarded-for` address the server settled on — see [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy)) **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
+The default bucket is the client's address, `clientAddress(req)` (see [The client's address](#the-clients-address)), **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
 
 Counting uses a **sliding window**, so a client cannot spend a full budget at the end of one window and another at the start of the next. See [Rate limiting](#rate-limiting) below for drivers, Redis, and limiting by something other than an IP.
 
@@ -3947,9 +3947,10 @@ App providers run after the framework's, so they can rebind anything the framewo
 | Driver | Use it when |
 | --- | --- |
 | `InMemoryRateLimiter` (default) | one instance, or local development |
+| `DatabaseRateLimiter` | budgets that must outlast a deploy (daily quotas, sign-up caps), or several instances without Redis |
 | `RedisRateLimiter` | more than one instance — counters are shared, so the limit is the limit |
 
-The in-memory driver keeps counters in the process that served the request. With N instances behind a load balancer the effective limit is N × the configured limit, and it resets on every deploy. Switch to Redis as soon as you scale past one:
+The in-memory driver keeps counters in the process that served the request. With N instances behind a load balancer the effective limit is N × the configured limit, and it resets on every deploy. In production, `gemi` logs a warning at boot when the queue uses the database driver and the rate limiter is still in memory. Switch to the database or Redis as soon as you scale past one instance, or as soon as a budget must last longer than a deploy:
 
 ```typescript
 // app/config/ratelimiter.ts
@@ -3976,6 +3977,69 @@ export default defineRateLimiterConfig({
 | `onError` | one `console.error` line a minute | called with every Redis failure |
 | `failOpen` | | deprecated: `true` is `onRedisError: "open"`, `false` is `"closed"` |
 
+#### The database driver
+
+`DatabaseRateLimiter` counts in the application's database, in the locks table the database queue already uses (`gemi_locks`). Budgets survive restarts and deploys, and every instance on the database shares them.
+
+**Create the table first.** An app on the database queue has it already. Otherwise add the Prisma model from [Locks](./jobs-and-queues.md#locks--the-lock-facade), or call `new DatabaseLockStore(app(DatabaseManager)).createTable()` once. Without it every limited request fails, since a database error refuses the call.
+
+```typescript
+// app/config/ratelimiter.ts
+import { DatabaseRateLimiter, defineRateLimiterConfig } from "gemi/services";
+
+export default defineRateLimiterConfig({
+  driver: new DatabaseRateLimiter(),
+});
+```
+
+```typescript
+// Three starts a day per visitor, durable across deploys.
+await RateLimiter.enforce(`starts:visitor:${visitor.id}`, { limit: 3, window: 86_400 });
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `table` | `gemi_locks` | the locks table the default store uses |
+| `prefix` | `ratelimit:` | prepended to every key, so limiter rows never meet a lock's |
+| `store` | a `DatabaseLockStore` on the default connection | another `LockStore`, or `() => LockStore` built on the first call |
+| `pruneEvery` | `1000` | every this many calls, delete ended windows in the background; `0` turns it off |
+| `pruneBatch` | `1000` | the most rows one prune deletes |
+| `hashKeys` | `true` | store each key as its HMAC-SHA256 under `SECRET`; a string keys with that secret instead, `false` stores keys as given |
+
+**What is stored.** Each key gets one row: the prefix in clear plus an HMAC of the key (`ratelimit:#3f9a…`), a count and the window's end. The key itself never reaches the database, so a client address (`RateLimitMiddleware` keys on it) or an email (the email-code limits) isn't kept. A row stays until its window ends and the next prune deletes it: the window plus up to `pruneEvery` calls, or your cron interval with `pruneEvery: 0`. For a daily limit that can be more than a day. Without `SECRET` (and no `hashKeys` secret given), a production boot fails, a development boot warns, and every limited call fails rather than storing keys in clear. Set a `SECRET` in test environments too. Changing `SECRET` starts every budget again.
+
+Unlike the other two drivers it counts a **fixed window**: the window starts at the first call after the last window ended and lasts `window`. A client that spends its whole budget at the end of one window gets a new budget when the next one starts. That suits quotas (so many a day). For a burst limit on a busy route, the sliding window of the memory and Redis drivers is smoother.
+
+Each call is one guarded write, so concurrent calls never admit more than the limit. On Postgres and SQLite that is a single upsert (one round trip), with one more read when it refuses. On MySQL it is three statements: insert the row if missing, update it, read it back. `allowed` is exact everywhere. `remaining` is exact for an allowed call on Postgres and SQLite; on MySQL, and `retryAfter` on a refusal everywhere, are read just after the decision and may already include other instances' calls, so treat them as hints.
+
+Costs are whole numbers (a fractional `cost` is rounded up). A `cost` above the limit is always refused, and a `cost` of `0` always passes: it reads the budget without checking it. With `hashKeys: false`, a key longer than 150 characters is stored as its SHA-256. A database error rejects the call, so the request fails rather than going unlimited.
+
+**Old windows are deleted as it goes.** Each key is one row, and a per-IP limit sees a new key for every new address, so every `pruneEvery` calls the limiter deletes up to `pruneBatch` windows that have ended, in the background. It deletes only rows under its own `prefix` (compared as a string, not a `LIKE` pattern), never a lock's. To prune on a schedule instead, set `pruneEvery: 0` and call `prune()` from a cron job:
+
+```typescript
+// app/config/ratelimiter.ts
+import { DatabaseRateLimiter, defineRateLimiterConfig } from "gemi/services";
+
+export const limiter = new DatabaseRateLimiter({ pruneEvery: 0 });
+export default defineRateLimiterConfig({ driver: limiter });
+```
+
+```typescript
+// app/cron/PruneRateLimits.ts
+import { CronJob } from "gemi/services";
+import { limiter } from "@/app/config/ratelimiter";
+
+export class PruneRateLimits extends CronJob {
+  name = "PruneRateLimits";
+  cron = CronJob.exp("*/5 * * * *");
+
+  async callback() {
+    // A batch at a time, until no ended window is left.
+    while ((await limiter.prune()) > 0) {}
+  }
+}
+```
+
 #### When Redis fails
 
 `onRedisError` decides what a call gets when Redis fails, times out, or the client says it is disconnected:
@@ -3990,12 +4054,25 @@ Not sending is what keeps an outage from being counted twice. Bun's client queue
 
 Each call costs at most `timeout`: without it a request would wait as long as Bun's client does, which is the connect timeout plus the reconnect loop (10 to 30 s), and forever when Redis stops answering on an open connection. `onError` gets a `RedisRateLimiterTimeoutError` for a call that timed out, a `RedisRateLimiterDisconnectedError` for one skipped because the client said it was disconnected, and the client's own error otherwise; while Redis stays down it also gets each failed `PING`, so at most one a second. The default writes one `console.error` line at most once a minute, with how many calls were answered without Redis since the last one, and a `console.info` line when Redis answers again.
 
+### The client's address
+
+`clientAddress(req)` is the address a limit should be keyed on. It is `clientIp(req)` (the `x-forwarded-for` address the server settled on, see [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy)), grouped:
+
+| `clientIp(req)` | `clientAddress(req)` |
+| --- | --- |
+| `203.0.113.7` | `203.0.113.7` |
+| `2001:db8:1:2:aaaa:bbbb:cccc:dddd` | `2001:db8:1:2::/64` |
+| `::ffff:203.0.113.7` (IPv4-mapped) | `203.0.113.7` |
+| `unknown`, or anything else that is not an address | unchanged |
+
+An IPv6 client is counted by its /64 because one host is usually given a whole /64 and can use any address in it: keyed on the full address, it would get a fresh budget each time it changed address. `clientAddress(req, { ipv6Prefix: 48 })` groups by a different prefix length (0 to 128; 128 keeps the full address). It is the default key of `rate-limit`, the [auth limits](./authentication.md) and the MCP endpoints' limits. Use it in your own keys too, and keep `clientIp(req)` for logs, where the exact address is what you want.
+
 ### Limiting by something other than an IP
 
 Under `gemi start` the IP cannot be spoofed past the proxies [`GEMI_TRUST_PROXY`](./configuration.md#behind-a-proxy-gemi_trust_proxy) trusts, but it still does not distinguish two users behind one NAT. `configure()` replaces the key with anything you can read off the request:
 
 ```typescript
-import { RateLimitMiddleware, clientIp } from "gemi/http";
+import { RateLimitMiddleware, clientAddress } from "gemi/http";
 
 export default class extends MiddlewareServiceProvider {
   aliases = {
@@ -4004,7 +4081,7 @@ export default class extends MiddlewareServiceProvider {
     "user-rate-limit": RateLimitMiddleware.configure({
       limit: 60,
       window: 60,
-      key: (req) => `user:${req.ctx().user?.id ?? clientIp(req)}`,
+      key: (req) => `user:${req.ctx().user?.id ?? clientAddress(req)}`,
     }),
   };
 }
@@ -8605,6 +8682,19 @@ test("list-assets answers the projected result", async () => {
 
 Models and other services are mocked the usual way (`vi.mock`), or bound in a test service provider on the `Kernel`.
 
+## What a test process does not do
+
+Under vitest (`VITEST` is set) gemi keeps two things from happening by accident:
+
+- **The cron schedule does not start.** Every test worker that boots the app would otherwise run the whole schedule against the test database. One line on stderr says so, once per test file that boots an app with cron jobs. Set `GEMI_SCHEDULE=1` for a test that needs it. See [Cron: In tests](./cron.md#in-tests).
+- **The built-in model providers do not reach the network.** An agent left on a real provider, with keys in the environment, would make real, billed calls. Its request fails with `LiveModelCallRefusedError` before it is sent, and the run ends with a `provider_error` naming the provider's address and `GEMI_AI_LIVE`. Give the agent a fake provider: [`scriptedProvider`](./ai-scripted-provider.md) answers from a script. Set `GEMI_AI_LIVE=1` to make real calls on purpose, for a live suite.
+
+  These are still let through, since none of them reaches a provider: a `fetchImpl` passed to the provider, a stubbed global `fetch` or `WebSocket` (`vi.stubGlobal`), and a provider pointed at this machine (`localhost`, `127.0.0.1`, `::1`). Under Bun, any `fetch` or `WebSocket` that is not Bun's own counts as stubbed, whether it was installed before or after gemi loaded. That includes a `fetch` wrapped by an APM or error tracker that a test setup file loads: its calls go out. Mock providers or keep such a library out of the test setup.
+
+  **MSW:** `setupServer()` replaces the global `fetch` while it listens, so a provider's requests go to MSW and are let through. MSW's default for a request no handler matches (`onUnhandledRequest: "warn"`) sends it on to the real network, past this guard. Call `server.listen({ onUnhandledRequest: "error" })` so an unmatched provider call fails instead.
+
+A process the tests start inherits their environment, `VITEST` included. A server spawned for an end-to-end test (`Bun.spawn(["gemi", "start"])` with `env: process.env`) therefore runs without the schedule and refuses real model calls too. Pass `GEMI_SCHEDULE=1` or `GEMI_AI_LIVE=1` in its `env` if it should do either, or leave `VITEST` out of its environment if it should behave like a deployed server.
+
 ## Related
 
 - [Events & Listeners](./events.md#testing-with-eventfake) — `Event.fake()`, for asserting what a *server* test dispatched.
@@ -8614,6 +8704,7 @@ Models and other services are mocked the usual way (`vi.mock`), or bound in a te
 - [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, and the variant keys `queryData` mirrors.
 - [Internationalization](./i18n.md) — dictionaries and `useTranslator`.
 - [Navigation](./navigation.md) — `Link`, `useNavigate`, `useParams`.
+- [AI Scripted Provider](./ai-scripted-provider.md) — `scriptedProvider` and `turnOf`, for agent tests without a model.
 
 ---
 
@@ -8931,7 +9022,11 @@ These are the web hook's rules; the comments in `packages/gemi/ai/useChat.tsx` e
 
 - **Stateless by default.** Without a `threadId` the session keeps the history and posts it with every turn. It leaves out tool progress logs, which the server never reads. With a `threadId` (minted by an app route that calls `store.createThread`), the server keeps the history.
 - **Persist `messages` and `cursor` together.** Pass both back as `initialMessages` and `cursor` when the screen is rebuilt. A session on a thread then attaches to a run still going and asks only for the frames it hasn't seen. Restoring one without the other is how an answer ends up printed twice.
-- **Answers given together go out as one turn.** A turn that leaves a pending call unanswered refuses it. So `approve`/`answer` calls made in one go — a loop over `pending` — are coalesced into a single request.
+- **Answers given together go out as one turn.** `approve`/`answer` calls made in one go — a loop over `pending` — are coalesced into a single request, so the reply carries on once.
+- **A reply's questions are answered one at a time** (gemi #1380). Answering one card takes only that card off `pending`; the reply's other cards stay until they are answered. A card answered while an earlier answer is going out or its reply streams waits in the session until that reply ends, then goes out; nothing is cut or stopped. A second tap on it returns the same job. Unlike the web hook, the card shows no `answering` mark while it waits: disable it from your own state if that matters.
+- **Questions stay with their turn.** Each pending call has a `turn`, and so does each message (`AgentMessage.turn`). Answering a card takes only that card off `pending`: another turn's stay until they are answered, or until the server refuses them (their `tool-result` takes them off). A new message clears them all, as before. A session runs one turn at a time and has no `runs` list like `useChat`'s. On a server that runs turns side by side, that means two differences from the web hook:
+  - A new message drops the other turns' cards. The web hook sets them aside and puts them back if the server ran the message beside them; a native screen shows them again only after the next load.
+  - Answering another turn's card cuts the answer that is streaming. The web hook runs the two answers side by side.
 - **`stop()` ends the run. `close()` doesn't.** `stop()` marks the turn aborted at once and tells the server, which ends the generation and any tool in flight. `close()` only drops the connection, like a React unmount; the run finishes on the server, and a later session on the thread attaches to it. Call `close()` when the screen goes away.
 - **A turn cut off by a server restart reads as `interrupted`.** On a thread, the server stores a turn while it runs. If the server dies mid-run, the thread keeps the user's message and the assistant message up to that point, and it comes back with `finishReason` `interrupted` (`FinishReason.interrupted` / `FinishReason.Interrupted`), provided the app's route reads it with `readThread`. A tool call it left open has a `denied` result with cause `"interrupted"`: the tool may have run, so don't show it as refused. Show the message as cut off. The next turn goes on from there.
 - **Key a message by `localId ?? id`.** A message the session sends is shown at once under a client id (`local_…`), and the server's `message-id` renames its `id` to the stored one about one round trip later. The renamed message keeps the client id as `localId`, so a list keyed by `localId ?? id` doesn't rebuild that row (and replay its entrance animation) when the id changes. `id` is still the server's, for everything else. On the web, `useChat` also takes per-send options, `sendMessage(text, { body, metadata })`: `body` is merged over the hook's for that request only, and `metadata` stays on the sent message, client-side only.
@@ -9044,7 +9139,8 @@ const run = agent.stream({
 - `AgentController` has the same hook: `onProviderRetry(info, ctx)`, as a method or in `defineAgentHooks`.
 - The client gets `{ type: "retry", messageId, attempt, maxRetries, code, delayMs, remainingMs? }`: the error's `code` only, never its message, status or request id. A sub-run's retries arrive as `nested-event` frames. The reducer leaves the transcript as it is, and nothing is stored in the thread. `useChat({ onRetry })` is called with the frame's fields for this agent's own retries; a reattach that replays the run's frames calls it again.
 - `generate({ onProviderRetry })` takes the same hook, without the run's fields.
-- `FallbackProvider` passes a leg's `retry` events on as they happen. A custom `AgentProvider` that retries can yield `{ type: "retry", ...ProviderRetryInfo }` itself.
+- `FallbackProvider` passes a leg's `retry` events on as they happen. A custom `AgentProvider` that retries can yield `{ type: "retry", ...ProviderRetryInfo }` itself. The event's `usage` is what the dropped attempt used, when the provider said ([Calls that don't end normally](./ai-usage.md#calls-that-dont-end-normally)).
+- A custom provider can yield `{ type: "usage", usage }` while a call streams, the call's count so far, so a stopped run is billed for it. It is optional.
 
 ### Timeouts
 
@@ -9098,13 +9194,17 @@ A call cut after its output started leaves a message with `finishReason` `"error
 
 Every request carries a `prompt_cache_key` (#1223). The API routes requests with the same key and the same prompt prefix to the same cache, so the first step of a run can hit the prefix that another run of the same agent just warmed, parallel runs included. Without the key, first steps mostly miss.
 
-By default the key is the agent's name and a 16-digit hash of the call's instructions and tool list (`defaultPromptCacheKey`, exported from `gemi/ai`). Runs that send the same instructions and tools share a key, and agents with different prefixes don't crowd one cache. To set it yourself:
+By default the key is the agent's name and a 16-digit hash of the agent's own `instructions` and the run's tool list (`defaultPromptCacheKey`, exported from `gemi/ai`). What a turn adds (`instructions()` on a controller, `agent.stream({ instructions })`, a memory block) and what a step changes (`prepareStep`) don't change it, so every call of the agent's runs shares a key, and agents with different prefixes don't crowd one cache. To set it yourself:
 
 ```typescript
 Agent.create({ name: "specialist", provider, promptCacheKey: "site-specialists" }); // 1–64 characters
 Agent.create({ name: "private", provider, promptCacheKey: false });                 // send none
 agent.stream({ messages, promptCacheKey: `tenant-${tenantId}` });                   // per run
 ```
+
+A step that narrows its tools (`prepareStep` answering `activeTools`) is sent the run's full tool list on gpt-5 models (and on ids gemi doesn't know), with `tool_choice: {type: "allowed_tools", tools: [...]}` naming what the call may use, so the tool list at the start of the prefix stays the same (`capabilities.allowedTools`). A list with namespaces or tool search, and older models, get the narrowed list instead. A call to a tool left out is refused either way.
+
+A `trailingContext` (see [Text after the conversation](./ai-agent-context.md#text-after-the-conversation)) is sent as a last `developer` message, after the cached prefix.
 
 A shared key only helps when the requests really share a prefix. Keep a key's traffic below what one cache serves (OpenAI suggests about 15 requests a minute per key and prefix), and give busier groups their own keys.
 
@@ -9132,9 +9232,10 @@ How the agent's settings map onto the request:
 
 - **`maxOutputTokens`** is `max_tokens`, which the API requires. Without it, 64 000 is sent.
 - **`temperature`** is not sent. On API version `2026-10-21` it is rejected on every model.
-- **`toolChoice`**: `"auto"` and `"none"` are sent as they are. `"required"` is `any` and `{ name }` is `tool`, but Claude Opus 5.5, Sonnet 5.5 and Fable 5.1 reject forced tool choice, so on those (and on ids gemi doesn't know) the choice is sent as `auto` and `capabilities.supportsForcedToolChoice` is `false`. The agent then emulates the forced choice with a system line and one more ask (see [`toolChoice` in AI Context Window](./ai-context-window.md)).
+- **`toolChoice`**: `"auto"` and `"none"` are sent as they are. `"required"` is `any` and `{ name }` is `tool`, but Claude Opus 5.5, Sonnet 5.5 and Fable 5.1 reject forced tool choice, so on those (and on ids gemi doesn't know) the choice is sent as `auto` and `capabilities.supportsForcedToolChoice` is `false`. The agent then emulates the forced choice with a line after the conversation (in the trailing context, so the system prompt and the cached prefix stay the same) and one more ask (see [`toolChoice` in AI Context Window](./ai-context-window.md)).
 - **Tools** are sent flat with `eager_input_streaming`, so their arguments stream as they're written. Tool search is not supported yet (`capabilities.toolSearch` is `false`), so namespaces are flattened and deferred tools are sent whole. `strict` is not sent; the agent validates every call against the tool's schema.
 - **`promptCacheKey`** is not sent. Anthropic's cache keys on the prompt prefix itself.
+- **`trailingContext`** is a text block after the last message's blocks, added once the cache breakpoints are placed, so the last breakpoint stays on the block before it and the cached prefix is the same whatever the text says. The Messages API has no `allowed_tools`, so a step that narrows its tools is sent the narrowed list (and misses the cache from the tool list on).
 - **History**: a step's tool results are sent in the user turn right after its calls, as the API requires. The assistant's text goes back exactly as written, whitespace-only blocks included, and an `output` part goes back as the text the model wrote (`OutputPart.text`), not a re-serialized value. A history that starts or ends on the assistant gets a fixed user turn there ("(The conversation continues from an earlier point.)", "Continue."), because the API wants a user turn first and refuses a prefill. Another provider's reasoning parts are left out.
 - **Cut-off tool calls**: a tool call whose arguments `max_tokens` cut off is discarded (`tool-call-discard`), never run, and the call ends with reason `"length"`.
 - **`reasoning`** turns on adaptive thinking (`thinking: {type: "adaptive", display: "summarized"}`) with `output_config.effort` set to the effort (`minimal` is sent as `low`, and `xhigh` as `high` on the 4.6 models). `"none"` turns thinking off where the model has a switch for it (Claude Sonnet 5.5's `between_tools`, at effort `low`); Claude Opus 5.5 and the other 5.x models can't turn thinking off, so there it is effort `low` and the model still thinks. Models that only take a token budget (Claude 4.5 and older) get neither. A forced `toolChoice` works with adaptive thinking, on the models that take one.
@@ -9386,6 +9487,25 @@ Things to know:
 - Run tools aren't part of the agent's type, so `useChat` sees their parts by name, untyped.
 - A different tool list is a different request prefix, which the provider's prompt cache keys on. Keep the list stable across a conversation where you can.
 - A sub-agent started with `ctx.runAgent` gets its own agent's tools, not the parent run's.
+
+## Text after the conversation
+
+Some things the model should know change on every turn but aren't part of the conversation: the screen the person is on, the time, a small note on the app's state. In `instructions()` they change the prompt the provider caches, so every turn misses the cache. As a message they fill the thread up. `trailingContext()` sends them after the last message on every model call of the turn instead:
+
+```typescript
+protected trailingContext(req: HttpRequest, { body }: { body: Body }) {
+  return `The person is looking at the page "${body.pageTitle}". It is ${new Date().toUTCString()}.`;
+}
+```
+
+- It is never stored and `contextWindow` doesn't count it: a large one adds to every call and never triggers compaction. Keep it short.
+- It is outside the cached prefix. The OpenAI and Azure OpenAI providers send it as a last developer message. The Anthropic providers add it after the last message's blocks and keep the cache breakpoint on the block before it. A provider that doesn't declare `capabilities.trailingContext` (a custom one) is sent it as a last user message, in the current turn (its `turn` is the turn's id), so `splitTurns` and `turnOf` still find the person's message. The [scripted provider](./ai-scripted-provider.md) declares it, and a test reads it as `call.trailingContext`.
+- A [recording](./ai-recordings.md) matches it like the rest of the request, so one that holds the time replays as changed unless the test pins the clock (`pinClock`).
+- It is called once per turn, after `context()`, on turns from `useChat`, `startTurn` and voice. Answer nothing to send none. `prepareStep` sees it as `trailingContext` and can answer another one for one call (`""` sends none).
+- It isn't handed down to a sub-agent.
+- `body` is client-controlled, as in `instructions()`: it says what the client claims, not what is true.
+
+The same hook is on [`hooks`](./ai-controller-hooks.md) as `trailingContext`. Running the agent yourself, pass `trailingContext` to `agent.stream()`.
 
 ## Order of a step's tool calls
 
@@ -9690,7 +9810,7 @@ The options (`ContextWindowOptions`):
 
 How the cut is made:
 
-- **At a turn start.** A turn is a user message and everything after it up to the next one: the assistant's steps, their tool calls with their results, and any file a tool showed the model (a user-role message that is not a turn). A cut never separates a call from its result.
+- **At a turn start.** A turn is a user message and everything after it up to the next one: the assistant's steps, their tool calls with their results, and any file a tool showed the model (a user-role message that is not a turn). A cut never separates a call from its result. A message that names its turn (`message.turn`, written on everything a run writes) goes with that turn even when runs side by side stored other messages between, and a cut never keeps it without the message that started its turn (see [Which turn a message belongs to](./ai-server-turns.md#which-turn-a-message-belongs-to)).
 - **The latest turn is always sent**, even when it alone is over the budget.
 - **In steps, for the prompt cache.** Providers cache the request's prefix. A window that slid one turn per turn would change the first message on every turn and miss the cache every time. With `step: 10` the window starts at the thread's 0th, 10th, 20th, … turn, so consecutive turns send the same prefix until the window has to move again. `step: 1` slides one turn at a time.
 - **System messages** from before the cut stay at the front.
@@ -9799,7 +9919,7 @@ export const assistant = Agent.create({
 });
 ```
 
-It gets `step` (1, 2, …), `messages` (after `contextWindow`), `history` (before it), `instructions`, `reasoning` and `maxOutputTokens` (what the call would send), the run's `usage`, `lastStepUsage` and `lastFinishReason`, and `runId`, `threadId`, `agent`, `depth`, `context`, `body` (the request body fields, client-controlled as in `ToolContext.body`) and `signal`. It also gets `activeTools` and `toolChoice` (what an earlier hook answered, else `undefined`). It answers `{ messages?, instructions?, reasoning?, maxOutputTokens?, activeTools?, toolChoice? }`, or nothing to send the call unchanged. What it answers is never stored, and the next step starts from the whole history again. If it throws, the run fails with `finishReason: "error"`.
+It gets `step` (1, 2, …), `messages` (after `contextWindow`), `history` (before it), `instructions`, `reasoning` and `maxOutputTokens` (what the call would send), the run's `usage`, `lastStepUsage` and `lastFinishReason`, and `runId`, `threadId`, `agent`, `depth`, `context`, `body` (the request body fields, client-controlled as in `ToolContext.body`) and `signal`. It also gets `activeTools` and `toolChoice` (what an earlier hook answered, else `undefined`), and `trailingContext` (the run's, or an earlier hook's). It answers `{ messages?, instructions?, reasoning?, maxOutputTokens?, activeTools?, toolChoice?, trailingContext? }`, or nothing to send the call unchanged. What it answers is never stored, and the next step starts from the whole history again. If it throws, the run fails with `finishReason: "error"`.
 
 `Agent.stream({ prepareStep })` runs after the agent's own, on what that answered. On a controller, override the method; it gets the turn's hook context too:
 
@@ -9870,8 +9990,8 @@ export const siteAgent = Agent.create({
 
 - **`activeTools`** names the run's tools, run tools or namespaces (a namespace name offers all of it), like [`activeTools` on the run](./ai-agent-context.md#tools-per-turn), for one call. Skills and memory tools are always kept. A call the model makes to a tool left out is answered as a call to a tool that doesn't exist. A name the run doesn't offer fails the run.
 - **`toolChoice`** is `"auto"` (the model chooses, the default), `"required"` (some tool), `"none"` (text only) or `{ name }` (that tool, which has to be offered on this call). Forcing a tool the call doesn't offer, or `"required"` with no tools, fails the run before the call.
-- **Providers that can't force a tool.** Some models (Claude Opus 5.5, Sonnet 5.5, Fable 5.1) don't take a forced tool choice, and their provider sends it as `auto`; `provider.capabilities.supportsForcedToolChoice` is `false` there. gemi then emulates it: the call's system prompt ends with a line naming the tool (or asking for "one of your tools" for `"required"`), and a step that answers with text and no tool call is asked once more, as the next step, with the same choice and line. A hook that answers its own `toolChoice` for that step wins. If the second answer has no tool call either, the run ends as before. The second ask counts toward `maxSteps`, and isn't made on the last step. There is no need to check the model name or add the line yourself.
-- **Prompt cache.** The provider's prompt cache keys on the tool list, so a step with a different `activeTools` misses it. `toolChoice` keeps the tool list: `"none"` stops tool calls on one step without changing the prefix. To keep a tool off for a whole turn, prefer `activeTools` on the run (`runTools()` on a controller), which keeps the list the same across the turn's steps; to hide a tool on some steps only, choose between `activeTools` here and having the tool refuse in `execute`.
+- **Providers that can't force a tool.** Some models (Claude Opus 5.5, Sonnet 5.5, Fable 5.1) don't take a forced tool choice, and their provider sends it as `auto`; `provider.capabilities.supportsForcedToolChoice` is `false` there. gemi then emulates it: the call is sent a line naming the tool (or asking for "one of your tools" for `"required"`) after the conversation, with the [trailing context](./ai-agent-context.md#text-after-the-conversation), so the system prompt and the cached prefix stay as they are; and a step that answers with text and no tool call is asked once more, as the next step, with the same choice and line. A hook that answers its own `toolChoice` for that step wins. If the second answer has no tool call either, the run ends as before. The second ask counts toward `maxSteps`, and isn't made on the last step. There is no need to check the model name or add the line yourself.
+- **Prompt cache.** The provider's prompt cache keys on the tool list, so a step with a different `activeTools` misses it, except on a provider that declares `capabilities.allowedTools` (OpenAI and Azure OpenAI on gpt-5 models), which is sent the full list and told which tools the call may use. The Anthropic providers don't: a narrowed step there misses the cache from the tool list on. `toolChoice` keeps the tool list: `"none"` stops tool calls on one step without changing the prefix. To keep a tool off for a whole turn, prefer `activeTools` on the run (`runTools()` on a controller), which keeps the list the same across the turn's steps; to hide a tool on some steps only, choose between `activeTools` here and having the tool refuse in `execute`.
 
 ## Turns
 
@@ -9953,7 +10073,7 @@ On MySQL, add `@db.Text` to `title` and `@db.LongText` to `summaries` and `messa
 ## How it behaves
 
 - **The whole message is kept**, as JSON, one row per message id, in the order the thread first saw it. A message written again (a run writes its assistant message as it streams, and a turn that answers a pending call writes the earlier message again with the result) replaces its row in place.
-- **One writer per thread at a time.** An append runs in a transaction that locks the thread's row first (the database's write lock on SQLite), so two appends to one thread cannot interleave. On SQLite, one client's transactions take turns; several clients on one file need a busy timeout.
+- **One writer per thread at a time.** An append runs in a transaction that locks the thread's row first (the database's write lock on SQLite), so two appends to one thread cannot interleave. On SQLite, transactions on one connection take turns, and a transaction that meets another process's lock on the file is retried for up to 5 seconds, without blocking the event loop (see [orm.md](./orm.md#transactions)).
 - **An unknown thread is `null`** from `loadThread`, and the controller answers 404, as with `MemoryAgentStore`. An append to it throws.
 - **Regenerate** (`removeMessages`) and **compaction summaries** (`loadSummaries`, `saveSummary`, `lockSummary`) are supported. Summaries live on the thread's row and are deleted with it. `lockSummary` is a compare-and-set on that row, so several instances do not summarise the same thread at once.
 - **Joins the ORM transaction** on its connection, when a call is made inside one, and rolls back with it.
@@ -10899,12 +11019,15 @@ new Date(call.preview.expiresAt); // parse it back where a Date is needed
 {chat.error && <p>{chat.error.message}. Try again.</p>}
 ```
 
-- **While the request is in flight**, every held call has `answering: true` (the turn settles all of them: the server refuses the ones it leaves out). `status` stays `awaiting-input` until the server answers.
+- **One reply, several questions** (#1380). When a reply asks two things (two approvals, an approval and a form), each card stays open until it is answered. Answering one carries the reply on (the model sees that answer and is told the other is still waiting on the user) and leaves the other card in `pending`, to answer later, in any order. Answering both in the same tick sends them as one turn, as before. To close the rest, answer them (`approve(id, false)`) or send a new message, which refuses every open card as before.
+- **While the request is in flight**, the answered call has `answering: true` (plus the other questions of the same sub-agent run, if it came from one: that run's tool is re-entered once). The reply's other cards stay answerable. `status` stays `awaiting-input` while any card is held, a reply streaming included.
+- **Questions of other turns** (parallel turns, `ifBusy: "parallel"`) are not touched: each call carries the `turn` that asked it, and answering one turn's question leaves another turn's card as it is, to answer in any order. An answer given while another turn's answer streams goes out beside it (`ifBusy: "parallel"`), without cutting it. A failed run (`error`) keeps other turns' cards too. Calls without a `turn` (from an older server) settle together.
 - **When the server takes it** (a 2xx), the calls leave `pending` and the stream shows what happened to them, as before.
 - **When it fails** (a network error or a non-2xx), the calls are back to plain pending (`answering` absent), the failure is in `error` and `onError`, and calling `approve`/`answer` again sends the answer again, including from inside `onError`. No thread re-read or remount is needed. Since the calls are back, `status` is `awaiting-input`, not `"error"`: show the retry message from `chat.error`, not from `status === "error"`.
-- **When the server took it and the stream then fails** (the connection drops after the 2xx), the calls stay gone: the server has the answer and the run goes on there (`reattach` picks it up). `error` is set and `status` is `"error"`.
+- **When the server took it and the stream then fails** (the connection drops after the 2xx), the answered calls stay gone: the server has the answer and the run goes on there (`reattach` picks it up). `error` is set, and `status` is `"error"` unless other cards are still held.
 - **The same answer again while it is in flight** (a double click) sends nothing and resolves with the request already going out.
-- **A different answer while one is in flight** (another card, or the same card answered the other way) is not sent: the turn in flight settles every held call, and the server refuses the ones it leaves out. It is reported like an answer to a call the chat no longer holds: `error` and `onError` get `invalid_tool_result` with that `toolCallId`. Disabling the cards while `call.answering` avoids it.
+- **Another card answered while an earlier answer is going out or its reply streams** waits in the chat until that reply ends, then goes out with the history it left (#1380). It keeps `answering: true` meanwhile, also when the running reply asks something new and its `awaiting-input` frame restates the card. A second click on it is the answer already waiting, `stop()` puts it back to plain pending without sending it, and a new message sent meanwhile settles it: only cards still held and still marked go out. Nothing on the server overlaps and nothing is cut, in a stateless chat too. An answer to another turn's card doesn't wait: it goes out beside (#1355).
+- **The same card answered the other way while it is in flight** is not sent. It is reported like an answer to a call the chat no longer holds: `error` and `onError` get `invalid_tool_result` with that `toolCallId`. Disabling a card while `call.answering` avoids it.
 - Answers given in the same tick still go out as one turn, and the same call answered twice in that tick is sent once, with the first answer.
 - **`stop()`** while an answer is in flight puts the calls back to plain pending. If the answer had reached the server, answering again is refused like any stale answer (`invalid_tool_result`).
 - `answering` is client state: `initialPending` drops it, so a `pending` persisted mid-request does not mount stuck. The type is `ChatPendingToolCall` (from `gemi/ai/client`), a `PendingToolCall` with an optional `answering`.
@@ -11228,7 +11351,7 @@ Eval.create({
 });
 ```
 
-A key also prices the model ids it's a prefix of (`gpt-5.4` prices `gpt-5.4-2026-03-05`), and the longest matching key wins. Models without a price are listed in `totals.unpriced`. `imageInput` and `imageOutput` price image tokens; without them, image tokens are priced as text. Cache-write surcharges (some vendors bill writing to the prompt cache above the input rate) aren't modelled, because `Usage` doesn't report them.
+A key also prices the model ids it's a prefix of (`gpt-5.4` prices `gpt-5.4-2026-03-05`), and the longest matching key wins. Models without a price are listed in `totals.unpriced`. `imageInput` and `imageOutput` price image tokens; without them, image tokens are priced as text. Cache writes are priced at `cacheWriteInput`, else at `input`. An eval re-prices each model's usage after the run and has no provider at hand, so it doesn't apply a provider's cache-write rule (Anthropic's 1.25x), while a run's meter and `usage.costUsd` do. Set `cacheWriteInput` in the eval's pricing for Anthropic models to make the two agree.
 
 The same meter is available on its own:
 
@@ -11287,6 +11410,140 @@ The report keeps the samples in case order whatever the concurrency.
 ## What it doesn't do
 
 It has no CLI flags (read `--runs` and `--only` with `parseArgs` and pass them to `run`), and it doesn't store artifacts such as screenshots: write those from your task.
+
+---
+
+## AI Scripted Provider
+
+An agent test needs a model that answers what the test says, every time. `scriptedProvider`, from `gemi/ai/testing`, answers each model call with the next step of a script: a text reply, tool calls, structured output, an error, or a function of what was sent. Give it one script per agent, by name, and each agent takes its own steps, whatever order the calls come in.
+
+```ts
+import { expect, test } from "vitest";
+import { Agent, AgentTool, s } from "gemi/ai";
+import { scriptedProvider } from "gemi/ai/testing";
+
+test("the planner asks the researcher, then answers", async () => {
+  const provider = scriptedProvider({
+    planner: [{ toolCalls: [{ name: "research", input: { topic: "tea" } }] }, "Drink green tea in the morning."],
+    researcher: ["Green tea has less caffeine than coffee."],
+  });
+
+  const researcher = Agent.create({ name: "researcher", provider });
+  const research = AgentTool.create({
+    name: "research",
+    description: "Research a topic",
+    inputSchema: s.object({ topic: s.string() }),
+    execute: async ({ topic }, ctx) => {
+      const run = await ctx.runAgent(researcher, { prompt: topic });
+      return run.messages.at(-1)?.content;
+    },
+  });
+  const planner = Agent.create({ name: "planner", provider, tools: [research] });
+
+  const result = await planner.stream({ messages: [], turn: { text: "Plan my mornings" } }).result();
+
+  expect(result.finishReason).toBe("stop");
+  expect(provider.callsOf("researcher")[0]?.turn?.text).toBe("tea");
+  provider.assertDone();
+});
+```
+
+`scriptedProvider(steps)` with a plain list answers every call from that one list, whichever agent makes it.
+
+Calls no agent makes, such as `generate()` or a compaction summary through the run's provider, arrive without a name. In the per-agent form they take the script under `NO_AGENT`:
+
+```ts
+import { NO_AGENT, scriptedProvider } from "gemi/ai/testing";
+
+const provider = scriptedProvider({
+  writer: ["Here is the draft."],
+  [NO_AGENT]: ["The person asked for a draft; it was written."],
+});
+```
+
+## Steps
+
+| Step | The call answers |
+|---|---|
+| `"text"` | A text reply. |
+| `{ text?, reasoning?, output?, toolCalls?, finishReason?, usage? }` | A reply with any of these. `text` as a list streams each entry as its own delta, for a streaming UI. `output` is structured output (an agent with `output`), sent as its JSON. Each tool call is `{ name, input?, id? }`; `id` defaults to `call_<agent>_<call>_<n>`. Several tool calls in one step run as the model's parallel calls. `finishReason` defaults to `"stop"`, `usage` to one token in and one out; each step's `usage` adds up on the run's result. |
+| `{ events }` | These `ProviderEvent`s, for anything the shorthand doesn't cover, such as a `retry` event. |
+| `{ error }` | A failed call. An `Error` or a message ends the run with a `provider_error` that is not retryable. `{ code, message, retryable }` fails with exactly that error: a [`FallbackProvider`](./ai-providers.md) moves to its next provider on `retryable: true`, and a client sees the code and `retryable` it would get from a live model. |
+| `(call) => step` | The step this function answers, sync or async, from the call (below). |
+
+A tool call's result goes back to the model on the next call, and the agent's next step answers it. Tools run as they would with a live model: their schemas, approvals and errors all apply.
+
+### Sub-agents of the same name, in parallel
+
+A step with two calls to a sub-agent tool starts two runs of the same agent at once. Each takes the next step of that agent's script when it reaches the model, and which one gets there first depends on scheduling. So `researcher: ["about tea", "about coffee"]` can hand the coffee answer to the tea run. Answer from the call instead, with a function step:
+
+```ts
+import { scriptedProvider } from "gemi/ai/testing";
+
+const answer = ({ turn }: { turn?: { text: string } }) =>
+  turn?.text.includes("tea") ? "Green tea has less caffeine." : "Coffee has more.";
+
+const provider = scriptedProvider({
+  planner: [
+    { toolCalls: [{ name: "research", input: { topic: "tea" } }, { name: "research", input: { topic: "coffee" } }] },
+    "Tea in the morning, coffee after lunch.",
+  ],
+  researcher: [answer, answer],
+});
+```
+
+## Calls
+
+`provider.calls` lists every call in the order it was made; `provider.callsOf(name)` lists one agent's. A function step gets the same object:
+
+| | |
+|---|---|
+| `agent` | The agent's name. `undefined` for a call no agent made (`generate()`, a compaction summary); those take the `NO_AGENT` script. |
+| `depth` | 0 for the run, 1 for a sub-agent it called, and so on. |
+| `index` | Which of this agent's calls it is, from 0. |
+| `messages` | What the call sent. |
+| `turn` | The user turn it answers: `turnOf(messages)`. |
+| `trailingContext` | The text sent after the conversation ([`trailingContext`](./ai-agent-context.md)), if any. The scripted provider declares `capabilities.trailingContext`, so it is here and not a last message. |
+| `params` | The whole `ProviderStreamParams`: `systemPrompt`, `tools`, `toolChoice` and the rest. |
+
+```ts
+import { scriptedProvider } from "gemi/ai/testing";
+
+const provider = scriptedProvider([({ turn }) => (turn?.text.includes("refund") ? "Sent to billing." : "How can I help?")]);
+```
+
+## The user turn: `turnOf`
+
+`turnOf(messages)` answers the user turn the last message belongs to: `{ message, text, messages }`, where `message` is the user message that started it and `messages` the whole turn. It groups as [`splitTurns`](./ai-context-window.md) does, so a tool's results, the files it showed and a message that joined the turn all stay in it. Read it rather than `messages.at(-1)`, which is a tool result or an assistant step as often as the user's message. It is `undefined` when no user message started the last turn.
+
+Your own fake provider can use it too: it takes the `messages` of `ProviderStreamParams`.
+
+## When the script runs out
+
+A call with no step left fails with a `ScriptedProviderError` naming the agent, the call and its turn (`Agent "planner" made call 3, and its script has 2 step(s) (turn: "Plan my mornings").`). With one list for every call, it names the step and whose call it was (`The script ran out at step 3 (planner's call 2): ...`). `scriptedProvider(steps, { exhausted: "stop" })` answers an empty reply instead.
+
+`exhausted` can also be a step, used for every call past the script. A function step suits a provider shared by a whole test file, where the number of calls isn't known up front:
+
+```ts
+const provider = scriptedProvider({ planner: [], writer: [] }, {
+  exhausted: (call) => (call.agent === "planner" ? "Here is the plan." : `Draft for: ${call.turn?.text}`),
+});
+```
+
+A fixed reply is written `{ text: "..." }`: a bare string is a mode, so a misspelt `"thorw"` doesn't compile. These calls are in `calls` like any other, and `assertDone()` checks only the scripted steps.
+
+A call from an agent the scripts don't name fails whatever `exhausted` is: a misspelt or renamed agent is never what the test meant.
+
+`provider.assertDone()` throws when a step was never taken: a test that expected the agent to call a tool and saw it answer straight away fails there, not later.
+
+## The agent on each call
+
+Every call an agent makes carries `agent: { name, depth }` in `ProviderStreamParams`. A provider of your own can read it the same way. It is not sent to the model, and a [recording](./ai-recordings.md) neither keeps nor matches it.
+
+## Related
+
+- [AI Recordings](./ai-recordings.md): record a live model's calls once and replay them.
+- [Testing](./testing.md): what a test process does not do, including real model calls.
 
 ---
 
@@ -11435,7 +11692,7 @@ An agent run has a meter of its own (`ctx.meter` in its tools, `result.metered` 
 
 ## Prices
 
-Declare what you pay once, at boot. The table form is USD per million tokens, the same `ModelPrice` that `Eval.create({ pricing })` takes:
+Declare what you pay once, at boot. The table form (`ModelPrices`) is USD per million tokens, the same `ModelPrice` that `Eval.create({ pricing })` takes. gemi ships no prices of its own: they change and differ by contract.
 
 ```ts
 // app/config/ai.ts
@@ -11453,8 +11710,11 @@ Usage.configure({
 ```
 
 - A key also prices the model ids it's a prefix of (`gpt-5.4` prices `gpt-5.4-2026-03-05`), and the longest matching key wins.
-- `cachedInput` defaults to `input`. `imageInput` and `imageOutput` price image tokens; without them, image tokens are priced as text.
-- A model with no price costs 0 and is listed in `unpriced`.
+- **Set `cachedInput` for every model that reads the prompt cache.** A cache read is a fraction of `input` (Anthropic: a tenth or less, depending on the model), and an agent loop is mostly cache reads. Without it, `usage.costUsd` of a call with cache reads is `null`, and a meter prices them at `input`, an over-count.
+- `cacheWriteInput` defaults to `input` times the provider's published rule (`provider.cacheWriteFactor(model)`): 1.25 on Anthropic, for the 5-minute cache gemi asks for. A `FallbackProvider` asks the leg that served the call. Other providers state none: `costUsd` of a call that writes the cache is then `null` unless you set `cacheWriteInput`, and a meter prices writes at `input`. Set `cacheWriteInput` for a contract rate too.
+- `imageInput` and `imageOutput` price image tokens. Without them, `usage.costUsd` of a call with image tokens is `null`, and a meter prices them as text.
+- A table can't express long-context tiers, fast modes, regional premiums or batch discounts. Price those with a function, and read the meter's `cost`: a function gives no `costUsd`.
+- In a meter, a model with no price costs 0 and is listed in `unpriced`.
 
 Or give a function. It answers the cost in whatever unit you count in, and `undefined` for a model it doesn't price:
 
@@ -11480,6 +11740,22 @@ If the function throws or answers something that isn't a finite number, the call
 Every cost a meter holds is in the pricing's unit, including the ones you `add`. So with the function above, add micros too.
 
 A meter can override the pricing for itself with `Usage.meter(fn, { pricing })`. A meter without its own pricing uses the nearest enclosing meter's, then `Usage.configure`'s. The configured pricing is read when a call is recorded, so meters that are already open pick up a change.
+
+## `usage.costUsd`
+
+With a table in effect, every model call's usage gets `costUsd` when it finishes, and it's summed with the usage. So `result().usage.costUsd` is the run's cost in USD (its steps, its tools' `generate` calls, sub-runs and images), `generate`'s `result.usage.costUsd` is that call's, and `ImageModel`'s `image.usage.costUsd` that image's.
+
+```ts
+const result = await agent.stream(params).result();
+await log.insert({ runId: result.runId, costUsd: result.usage.costUsd });
+```
+
+- `null` when gemi can't price a call without guessing: its model isn't in the table, or it read the cache and the model has no `cachedInput`, or it wrote the cache with neither `cacheWriteInput` nor a provider rule, or it has image tokens and the model has no `imageInput` / `imageOutput`. A total with such a call in it is `null` too. The first one of each model and reason logs one warning, to the log of the run the call is in (a tool's `generate` or image included), or to the console outside a run.
+- `null` under a pricing function (its unit is yours, not necessarily USD), including a call inside a `Usage.meter(fn, { pricing })` with a function, so a run mixing the two isn't a partial sum. The meter's `cost` covers that case. Absent with no pricing at all.
+- A fallback chain prices each leg at its own model: the closing `finish` splits the usage by model (`byModel`) when abandoned legs spent something.
+- **Server-side only.** `costUsd` is on `result().usage`, `generate`'s result (its `usage` and its `messages`), `ImageModel`'s results, and `usageLimits.onUsage` (`report.costUsd.delta` / `.total`). An agent run strips it from every frame sent to a client (`usage`, `message-end`, tool calls' generated-image records) and from what it stores (its messages, a sub-run's transcript, compaction summaries), so end users never see what their work cost you.
+- **`result().usage` includes it**, and so does `AgentTurn.result()`. Pick the fields you return from a route or an MCP tool rather than returning the result whole. To show spend, send it yourself.
+- Video: gemi has no video model. Report what a video API costs with `Usage.add("video", cost)` in the run or meter.
 
 ## Metering work outside a run
 
@@ -11576,6 +11852,14 @@ result.metered?.byModel; // the chat model, the image model, a sub-agent's model
 
 Unlike `result.usage`, which is one sum across every model the run used, `result.metered` prices each call at its own model's prices. Price a run from `metered`, not from `usage`. `metered` is optional in the type so that results built by hand (stubs, replays) still typecheck, but every agent run sets it.
 
+## Calls that don't end normally
+
+A call is billed when it doesn't finish cleanly too, and its usage is counted (#1353):
+
+- **Cut or broken halfway.** A call cut at the output limit, or a stream that breaks after some output, ends with an `error` and a `finish` that both carry what the provider reported so far. OpenAI reports a cut response's usage (`response.incomplete`, `response.failed`); a stream that just breaks has no count from OpenAI, which reports usage only on its last frame. Anthropic reports usage as the answer streams, so its broken calls are counted.
+- **Retried.** An attempt dropped before its first content and asked again is on the `retry` event's `usage`, and added to the `finish` that closes the call, so summing `finish` usage counts it once.
+- **Stopped.** A run, `generate()` call or compaction summary stopped mid-call is billed what the call had used, on providers that report usage while they stream: the run's `usage`, the message's `usage` and the meter include it. The Anthropic providers do (their `message_start` already carries the whole input, so a stop before the first token bills it). **OpenAI and Azure OpenAI don't**: the Responses API reports usage only on its last frame, so a stopped OpenAI or Azure call still bills nothing. The provider events say it as `{ type: "usage", usage }` while the call streams: the whole call's count so far, which the closing `finish` replaces. A `FallbackProvider` adds the legs it fell back from, and a stop meters each leg at its own model.
+
 ## What a meter doesn't see
 
 - **Work `fn` started and didn't wait for** counts only if it finishes before `fn` returns (or before the run ends, for a run's meter). Once a meter's scope has settled, `add` on it does nothing.
@@ -11619,7 +11903,7 @@ How a limit is applied:
 
 - **Checked before what it limits.** `steps` and `tokens` before every model call, `toolCalls` before every tool call. Tokens are only known after a call, so a run stops once it has reached its token limit; the call that crossed it isn't undone.
 - **Over a limit,** the run ends with `finishReason: "error"` and the error code `"usage_limit"` (not retryable). The client is told which kind of limit, never a scope's key. `result().error.usageLimit` and the controller's `onError` get `{ scope, metric, limit, used }`, where `scope` is `"run"` or the key. A tool call refused by a limit gets a `usage_limit` result, and the run ends after that step. A scope that's already spent ends the turn before the model is called.
-- **`onUsage`** hears what was spent after each model call and each batch of tool calls, and once more as the run ends (`final: true`), with the `delta`, the run's `total` and the scope keys. A throw is logged and the run goes on.
+- **`onUsage`** hears what was spent after each model call and each batch of tool calls, and once more as the run ends (`final: true`), with the `delta`, the run's `total` and the scope keys, and `costUsd: { delta, total }` in USD once a call has been priced at a table. A throw is logged and the run goes on.
 - **The store.** The default `MemoryUsageLimitStore` counts per process and forgets on restart. Give a shared store when you run more than one instance: an object with `get(key)` and `add(key, delta)`, backed by a database row or Redis. A store whose `get` throws fails the run (code `unknown`, retryable) rather than letting it go on unmetered; an `add` that throws is logged.
 - **Concurrency.** Limits are soft under concurrency: two runs of one key can each take their next step before either has added what it spent.
 - **Sub-agents.** A sub-run started by `ctx.runAgent` has no limits of its own, but its tokens count toward the parent run's.
@@ -11858,14 +12142,14 @@ export class ChatEditJob extends Job {
 | `user` | Who the turn runs as. It is `req.ctx().user` in `authorizeRequest`, `runOwner`, `context()`, the hooks and every tool, and what `Auth.user()` answers there. Absent or `null` is an anonymous turn. |
 | `body` | The controller's `Body`, as `useChat`'s `body` option would send it. Typed the same way. |
 | `event` | Something that happened, in place of a person's message: `{ name, text?, data? }`. Not with `text` or `turn`. See [Event turns](#event-turns). |
-| `ifBusy` | What to do when the thread has a run going: `"supersede"` (the default), `"queue"` or `"skip"`. See [A thread that is busy](#a-thread-that-is-busy). |
+| `ifBusy` | What to do when the thread has a run going: `"supersede"` (the default), `"queue"`, `"join"`, `"parallel"` or `"skip"`. See [A thread that is busy](#a-thread-that-is-busy). |
 
 It answers once the run has started:
 
 - `runId` and `threadId`.
 - `run`: the `AgentRun`. Iterate it, or its `frames()`, to follow the turn as it goes.
 - `stop({ reason })`: what the chat's stop button does.
-- `result()`: settles when the run has ended, its transcript is stored and the controller's hooks have run (or `hookHoldMs` passed). It is the run's `AgentRunResult` (`messages`, `finishReason`, `usage`, `output`, `error`) plus `threadId`, `text` (the text of the run's last assistant message) and `pending`.
+- `result()`: settles when the run has ended, its transcript is stored and the controller's hooks have run (or `hookHoldMs` passed). It is the run's `AgentRunResult` (`messages`, `finishReason`, `usage`, `output`, `error`) plus `threadId`, `text` (the text of the run's last assistant message) and `pending`. Its `usage` carries the run's cost (`costUsd`, see [AI Usage and Cost](./ai-usage.md)), so pick the fields you return to a client or an MCP caller.
 
 ## What is the same as a browser turn, and what is not
 
@@ -11885,6 +12169,8 @@ By default a server turn on a thread whose run is still going stops that run and
 |---|---|
 | `"supersede"` | The default. Stops the running run, then starts. |
 | `"queue"` | Waits for the running run to end and its transcript to be stored, then starts, so the model sees that turn's messages. `startTurn` settles once the turn has started. |
+| `"join"` | Adds the message to the running turn. The run reads it at its next step. See [Joining the running turn](#joining-the-running-turn). |
+| `"parallel"` | Starts a second run beside the running one, with its own `runId` and stream. See [Runs side by side](#runs-side-by-side). |
 | `"skip"` | Starts nothing and answers `{ skipped: true, threadId }`. |
 
 ```typescript
@@ -11901,6 +12187,121 @@ A thread is busy while a run on it is going, or while another turn is setting up
 With `ifBusy: "skip"`, `startTurn` answers `AgentTurn | AgentTurnSkipped`; check `"skipped" in turn` first. Like the thread's lock, the policy is per process: a run going in another process does not make the thread busy here.
 
 To continue a thread when a background job settles, call `startTurn` with `ifBusy: "queue"` from an [`AgentJobs.onSettled`](./ai-background-jobs.md#continuing-the-thread-when-a-job-settles) listener.
+
+### Joining the running turn
+
+With `ifBusy: "join"` the message becomes part of the turn that is going. The run reads it at its next step: after the model call in flight, or after the tools of that step have run. A run that was about to finish makes one more model call for it. Nothing is stopped and no new run starts.
+
+```typescript
+const turn = await ChatController.startTurn({ threadId, user, text: "and make it blue", ifBusy: "join" });
+turn.joined;   // true: turn.runId is the running run's id
+await turn.result(); // that run's result
+```
+
+- The message is stored in the order it arrived, between the run's messages, with `message.turn` (and the older `message.joined`) set to the id of the message that started the turn. It is not a turn start: `splitTurns` puts it with that turn even when runs side by side stored other messages between, `contextWindow` never cuts between them, and a turn's files include the files of the messages that joined it.
+- The run sends a `message-id` frame (or a `message` frame for an event) when it takes the message, so a chat that sent it renames its copy there.
+- When the run ends before it reaches a step that reads the message (it was on its last step under `maxSteps`, it failed, it was superseded, it parked on an approval), the message starts a turn of its own after the run, as `"queue"` would. That turn goes through the busy rules again, so it can join the run that superseded. A message stored this way is a turn start, without `joined`. From the chat, the reply to it arrives on the same response stream; `startTurn`'s `result()` settles with the run that answered it.
+- **A stop drops it.** When a person stops the run (`/stop`, the chat's `stop()`, `AgentTurn.stop()`) before it read the message, no turn starts for it and it is not stored: a stop stops the conversation, messages sent into it included. The joined stream ends with the run, and `startTurn`'s `result()` is the stopped run's (`finishReason: "aborted"`).
+- **A refused second try is reported.** If the turn started for the message is refused (`429` from a limit, `403` for another user's run, `409` when `busyPolicy` answers `"skip"`), the message is stored, unanswered, as a turn start. The stream then carries a `message-id` frame renaming the chat's copy to the stored message, and an `error` frame saying it was not answered (`rate_limited` and retryable for a `429`). `startTurn`'s `result()` rejects with the refusal as an `AgentTurnError`.
+- A turn with `toolResults` (answering an approval) or with nothing in it is never joined. It waits for the run as `"queue"` would.
+- A join adds no run, so it does not count against `maxConcurrentRuns`. Only a run the caller may attach to is joined; another user's run answers `403`.
+
+### Runs side by side
+
+With `ifBusy: "parallel"` a second run starts while the first goes on. Each run has its own `runId`, stream and result.
+
+- Each run reads the thread as it was when it started, plus its own messages: the messages another run is still writing are left out. A parallel turn waits only until the runs already going have stored their opening messages.
+- Messages are stored in arrival order. Each run's messages are written by id, so runs writing at once don't overwrite each other.
+- Every message a run writes names its turn: `message.turn` is the id of the message that started it (see [Which turn a message belongs to](#which-turn-a-message-belongs-to)). A reply stored after another run's messages still goes with its own question in `splitTurns`, `contextWindow` and compaction.
+- Each run counts against `maxConcurrentRuns`. A thread takes at most `maxThreadRuns` runs at once (default `DEFAULT_MAX_THREAD_RUNS`, 3); one more answers `429` with code `too_many_runs`. Override it per thread, and answer `{ max, overflow: "queue" }` to hold the turn until one of the runs ends instead, as `"queue"` waits; it then starts as one more parallel run:
+
+```typescript
+protected maxThreadRuns(req: HttpRequest, { threadId, owner, body }) {
+  return { max: body.plan === "pro" ? 5 : 2, overflow: "queue" };
+}
+```
+
+- `max` is a positive whole number (or `Infinity`) and `overflow` is `"queue"` or `"reject"`. Any other answer fails the turn with a `TypeError`, so a typo can't turn the limit off.
+- A queued turn waits like `ifBusy: "queue"`. It has no time limit: it holds its request open until a run ends. When several are waiting, they look again in roughly the order they arrived, and each one that finds no free slot waits again. A client that disconnects while waiting still gets its run started, so its message is answered and stored; `useChat({ watch: true })` shows it when the chat comes back. The limit and the queue are per process, like `LiveRuns`: runs on another instance aren't counted.
+
+- `stop` with only a `threadId` stops every run on the thread the caller may stop. `attach` with a `runId` attaches to that run; without one, to the newest. `watch` announces each run going on the thread. `useChat`'s `reattach()` resumes the run the chat was following, one run. With `watch: true`, the watch stream announces every run going on the thread each time it connects, and the chat attaches to each.
+- `maxThreadRuns` counts every run on the thread, whoever started it. On a thread several users share, one of them can use up its limit; count per owner in `maxThreadRuns` (`owner`, and `this.liveRuns.running({ threadId })` with `this.liveRuns.ownerOf(runId)`) if that matters.
+- **Questions stay with their turn** (#1355). Two parallel turns can each wait on a question (an approval, a client tool). A request that answers one of them settles only the calls of the turn it answers: the other turn's question stays open, with its `pending`, until it is answered in turn, in any order. A stop ends the stopped run's turn and refuses its calls, not another turn's. A new message from a turn that asked `ifBusy: "parallel"` (or that started beside a running one) leaves the other turns' questions open as well, and so does every server turn (`startTurn`, with text or an `event`), queued or not (#1371): a scheduled report or a job's result isn't the person moving on. Any other new message from the person refuses every open call, as before: the person moved on.
+- **A reply's questions stay open until each is answered** (#1380). A request that only answers calls settles the calls it answers, not the other questions of the same turn, and the turn carries on with the answers it has. In the model's request, a question still waiting gets a placeholder result saying the user hasn't answered it yet, and when an answer arrives after the model has replied past its question, the first model call's input ends with a line saying the user has now answered it. Each question stays in its own message's `pending`, and a stop of that run doesn't refuse it. A run that ends while its turn still waits on one ends with an `awaiting-input` frame listing every open question of the turn, and its `finishReason` is `awaiting-input` (when the model's was `stop`), so `AgentTurnResult.pending` and `onAwaitingInput` see a turn that needs input, and a client keeps the cards. Sub-agent questions under one tool call still resolve together. `useChat` and the native sessions send a second answer only once the reply the first one carried on has ended. Answers sent another way at the same moment (a second tab, an app calling `startTurn`) are ordered by the thread's run queue, which, like the thread lock, is per process: on several instances, two answers of one reply that land at the same time can run side by side and amend the asking message twice, so the later write can drop the other's result.
+- **`useChat` lists the replies in progress** (#1344). `chat.runs` holds one entry per reply: the requests in flight, in the order they started, then the turns waiting on their questions. Each entry has a client-side `id` to key it by (a waiting turn's entry keeps its id when the answer to that turn alone goes out, so its row stays mounted; an answer covering several turns gets a new one), a `status` (`"submitted"`, `"streaming"` or `"awaiting-input"`), the `runId` once known and the `turn` once known. An attach (on mount, on focus, `watch`, `reattach`) is listed only once it has found a run, so a chat that is idle shows no reply. The pending calls with the same `turn` are that reply's questions, so a UI can show each running reply and its cards separately. A streamed message gets its `turn` from `message-start`, before it finishes.
+
+```tsx
+const chat = useChat("/chat", { ifBusy: "parallel" });
+
+chat.runs.map((run) => (
+  <Reply key={run.id} status={run.status}>
+    {chat.pending.filter((call) => call.turn === run.turn).map((call) => <Card key={call.toolCallId} call={call} />)}
+  </Reply>
+));
+```
+- A parallel run leaves out the answers other runs are still writing, but not their user messages, so the model can see a question that is not answered yet before its own message. It usually answers only its own; say so in the instructions if it should.
+- Starting waits until the runs already going have taken their own turns in, for at most five seconds, and outside the thread's lock: a supersede or another turn meanwhile is not held up.
+
+### Which turn a message belongs to
+
+Every message a run writes has `message.turn`: the id of the user message that started the turn it answers. That message has its own id as `turn`.
+
+- A new message (text, files or a server event) starts a turn: its id is the turn's.
+- A turn that only answers tool calls (approvals, client tools) carries on the turn that asked them, even when other turns were stored since. So does a turn with nothing in it (a continuation).
+- What the run reads while it works is part of its turn: a joined message, a message from its `inbox`, a file a tool showed.
+- A message stored before `turn` existed has none. `splitTurns` and `contextWindow` then read it as before: a turn starts at a user message that no tool injected and that joined nothing.
+
+The run's turn is `turn` on the `AgentRun` (`AgentTurn.run` from `startTurn`, or what `agent.stream` returns) and `ctx.turn` in the controller's hooks: `{ id, continues?, answers? }`, where `continues` is set when the request added no message of its own and `answers` lists the `toolCallId`s it answered. It is `undefined` until the run has taken its turn in.
+
+`message.joined` is still written on a joined message, with the same value as `turn`. It is deprecated: read `turn`. It goes in a later minor version.
+
+### Choosing per message: `busyPolicy`
+
+The controller's `busyPolicy` hook decides what happens to each message that arrives on a busy thread, from the chat or from `startTurn`. It is called only when a run is going, and it answers one of the `ifBusy` values. The default answers what the request asked for, `"supersede"` when it asked for nothing.
+
+```typescript
+protected busyPolicy(req: HttpRequest, { running, requested, turn, source }: BusyPolicyParams<Body>) {
+  if (source === "server") return requested ?? "queue";
+  // A short follow-up refines the answer in progress; anything else gets its own run.
+  if (turn?.text && turn.text.length < 80) return "join";
+  return "parallel";
+}
+```
+
+Its parameters:
+
+| | |
+|---|---|
+| `threadId`, `body`, `owner` | The request's thread, `Body` and run owner. |
+| `running` | The runs going on the thread, oldest first: `{ runId, startedAt, owner, turn, messageId, body, joined }`, where `turn` is the message that started the run and `joined` the messages that joined it (`{ text?, files?, event? }`), `messageId` the turn's id (`message.turn` on what the run writes; for a run that answers tool calls, the turn that asked them; `undefined` for a moment after the run starts), and `body` the `Body` the request that started it carried. |
+| `requested` | What the request asked for (`ifBusy` from `startTurn` or the chat), or `undefined`. |
+| `source` | `"client"` or `"server"`. |
+| `turn` | The new message. |
+
+`running` holds every run on the thread, other users' included, with their messages' text and files. It is for the server to decide with; don't send it to a client.
+
+`running[].messageId` is `undefined` for a moment after a run starts, before it has taken its turn in, so check for it:
+
+```typescript
+protected busyPolicy(req: HttpRequest, { running, body }: BusyPolicyParams<Body>) {
+  // Join only the run answering the same page, once it is known which turn it answers.
+  const same = running.find((run) => run.messageId !== undefined && (run.body as Body).pageId === body.pageId);
+  return same ? "join" : "parallel";
+}
+```
+
+An answer that isn't an `ifBusy` value fails the turn. `"skip"` answers a chat request `409` with code `thread_busy`. A regenerate always supersedes and does not ask. Like the other hooks, it can be passed in `defineAgentHooks`.
+
+### From the chat
+
+`useChat` sends `ifBusy` for the whole chat, or per message:
+
+```tsx
+const chat = useChat("/chat", { threadId, ifBusy: "parallel" });
+chat.sendMessage("and make it blue", { ifBusy: "join" });
+```
+
+A client can send `"supersede"`, `"queue"`, `"join"` or `"parallel"` (anything else answers `400`), and only on a thread. Without `ifBusy` a send cuts off the streaming reply, as before. With `"join"`, `"queue"` or `"parallel"` it does not: the chat follows each run on its own stream, each reply is built into its own message and finishes on its own, `status` stays `"streaming"` until the last one ends, `runId` names the oldest run going, and `stop()` stops them all.
 
 ## Event turns
 
@@ -11922,7 +12323,7 @@ await ChatController.startTurn({
 
 ## Showing a server turn in an open chat
 
-A chat that is open on the thread doesn't see a turn it didn't start unless it asks. `useChat({ threadId, watch: true })` follows the thread: it keeps a small SSE stream open to `POST /<path>/watch`, which announces each run that starts on the thread (from `startTurn`, another tab, voice), and the hook attaches to it as `reattach()` would. A run announced while the chat is streaming its own is attached once that ends.
+A chat that is open on the thread doesn't see a turn it didn't start unless it asks. `useChat({ threadId, watch: true })` follows the thread: it keeps a small SSE stream open to `POST /<path>/watch`, which announces each run that starts on the thread (from `startTurn`, another tab, voice), and the hook attaches to it as `reattach()` would. A run announced while the chat is streaming its own is attached at once, beside it.
 
 ```tsx
 const chat = useChat("/chat", { threadId, initialMessages, watch: true });
@@ -12055,7 +12456,8 @@ A hook has the same name, the same arguments and the same return type as the con
 | Hook | |
 |---|---|
 | `authorizeRequest`, `runOwner`, `runLimitKey` | Who may use the routes, who owns a run, who `maxConcurrentRuns` counts against. |
-| `instructions`, `reasoning`, `skills`, `runTools`, `usageLimits`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. `runTools` and `usageLimits` get `{ body, context }`; `runTools` answers `{ tools?, activeTools? }` (see [Tools per turn](./ai-agent-context.md#tools-per-turn)), `usageLimits` the run's budgets (see [Usage limits](./ai-usage.md#usage-limits)). |
+| `busyPolicy`, `maxThreadRuns` | What a message on a busy thread does (supersede, queue, join, parallel or skip), and how many runs a thread takes at once. See [A thread that is busy](./ai-server-turns.md#a-thread-that-is-busy). |
+| `instructions`, `reasoning`, `skills`, `runTools`, `usageLimits`, `trailingContext`, `context`, `memoryScopes`, `prepareStep` | What each turn's run is given. `runTools`, `usageLimits` and `trailingContext` get `{ body, context }`; `trailingContext` answers text sent after the conversation (see [Text after the conversation](./ai-agent-context.md#text-after-the-conversation)); `runTools` answers `{ tools?, activeTools? }` (see [Tools per turn](./ai-agent-context.md#tools-per-turn)), `usageLimits` the run's budgets (see [Usage limits](./ai-usage.md#usage-limits)). |
 | `attachmentScope`, `attachmentLimits`, `checkUpload`, `attachmentDestination`, `attachmentRetention` | Uploads, and how long they and the files tools make are kept (see [Short-lived attachments](#short-lived-attachments)). |
 | `onMessage`, `onToolCall`, `onToolResult`, `onAwaitingInput`, `onError`, `onProviderRetry`, `onStreamComplete` | The run's events. `onProviderRetry` fires for each model-call attempt the provider asks again; see [AI Providers](./ai-providers.md#watching-retries). `onToolResult` fires once for each tool result on the stream (`ok`, `error`, `denied`, `running`), with `result.approval` on a call a person approved or refused, and the call it answers as a third argument (`{ toolCallId, name, input }`, the input as the model sent it); see [AI Tool Approvals](./ai-tool-approvals.md#who-approved-a-call). |
 | `redactError`, `reportHookFailure` | Errors. |
@@ -12090,7 +12492,7 @@ export class PageChatController extends AgentController<typeof siteAgent, SiteBo
 
 ## State that passes between hooks
 
-Hooks are plain functions, so they have no `this` to keep a value on. To pass a value from one hook to a later one in the same turn, put it on `req.state` (see [Passing values to the handler](./middleware.md#passing-values-to-the-handler-reqstate)). In the example above, `context` saves the turn's charge and `onStreamComplete` reads it back. The event hooks reach the request as `ctx.req`. Every turn starts with empty state, including one that answers an approval. `ctx` also has the turn's `runId`, its `threadId`, and `denials`: the approvals the user refused in the run so far (see [Not asking again after a refusal](./ai-tool-approvals.md#not-asking-again-after-a-refusal)).
+Hooks are plain functions, so they have no `this` to keep a value on. To pass a value from one hook to a later one in the same turn, put it on `req.state` (see [Passing values to the handler](./middleware.md#passing-values-to-the-handler-reqstate)). In the example above, `context` saves the turn's charge and `onStreamComplete` reads it back. The event hooks reach the request as `ctx.req`. Every turn starts with empty state, including one that answers an approval. `ctx` also has the turn's `runId`, its `threadId`, `denials`: the approvals the user refused in the run so far (see [Not asking again after a refusal](./ai-tool-approvals.md#not-asking-again-after-a-refusal)), and `turn`: `{ id, continues?, answers? }`, the turn the run answers (see [Which turn a message belongs to](./ai-server-turns.md#which-turn-a-message-belongs-to)), `undefined` in a hook that runs before the run has taken its turn in.
 
 ## Variants
 
@@ -12623,7 +13025,7 @@ export async function voiceToken(req: HttpRequest) {
       type: "transcription",
       languages: ["en", "tr"],
       prompt: "Voice commands for a website builder.",
-      keywords: ["hero", "navbar", "fager"],
+      keywords: ["hero", "navbar", "footer"],
       delay: "low",
     },
   });
@@ -13651,9 +14053,9 @@ await User.findMany({ where: { metadata: [1, 2] } })                        // a
 ### JSON key filters
 
 ```ts
-await AsyncJob.findMany({ where: { payload: { has_key: "folioAiWorkspace" } } })
+await AsyncJob.findMany({ where: { payload: { has_key: "aiWorkspace" } } })
 await AsyncJob.findMany({
-  where: { payload: { has_some_keys: ["folioAiWorkspace", "folioAiReadiness"] } },
+  where: { payload: { has_some_keys: ["aiWorkspace", "aiReadiness"] } },
 })
 await AsyncJob.findMany({ where: { payload: { has_every_key: ["a", "b"] } } })
 await AsyncJob.findMany({ where: { payload: { path: ["meta"], has_key: "b" } } })   // postgres path
@@ -14369,6 +14771,81 @@ rollback on throw.
 
 Nesting is a **savepoint**: an inner failure rolls back to the savepoint and leaves the outer
 transaction usable.
+
+Work a transaction starts but doesn't wait for (a `setTimeout`, an un-awaited call, an emitter
+callback) carries its scope too. While the transaction is open, that work's queries and nested
+`transaction()` calls join it, as awaited ones do. Once the transaction's callback has returned or
+thrown (from the moment `COMMIT` or `ROLLBACK` is sent), they run outside it: a `transaction()` call
+opens a transaction of its own (on SQLite it waits its turn), and a plain query runs on its own.
+So that work's writes don't depend on how the transaction that started it ended. Its `afterCommit`
+calls inside a transaction of its own wait for that one. Outside one, they still go by the
+transaction that started the work, because they may announce that transaction's writes: they run
+once it commits, and never if it rolled back.
+
+**On SQLite, transactions queue.** Bun's SQLite client runs every statement on one connection,
+where a second `BEGIN` while a transaction is open fails ("cannot start a transaction within a
+transaction"). So a `Model.transaction` or `DB.transaction` that starts while another one is
+open on the same connection, from another request in the process, waits for it, and starts once
+it commits or rolls back. gemi's database stores on the same connection (locks and the database
+rate limiter, agent threads, agent jobs) take the same turns. SQLite allows one writer at a time anyway, so this changes the order,
+not the throughput. Savepoints don't queue, and the next transaction starts at the commit,
+before the after-commit callbacks run, so a callback can open a transaction of its own.
+
+- Several processes on one database file aren't queued against each other: SQLite's own locking
+  (`SQLITE_BUSY`) applies there.
+- A transaction started from inside an open one on the same connection, but outside its scope,
+  waits its turn like any other: it may be work the open transaction doesn't wait for (a
+  `setTimeout`, an un-awaited call). If it is still waiting on the transaction it started inside
+  5 seconds later, the open transaction must be waiting on it, so it fails with
+  `TransactionQueueDeadlockError` instead of waiting forever. That's a store's own `begin`, or an
+  in-process API call or channel message (which leave the caller's scope on purpose), awaited
+  inside a transaction. Run that work after the commit (`afterCommit`), or inside the transaction.
+- A transaction that waits on one started elsewhere that queued behind it (a shared promise
+  another request started outside any transaction) can't be told apart, and waits. In
+  development, a transaction that has waited in the queue for 5 seconds logs a warning with
+  where it was queued. The 5 seconds are fixed; `database.slowTransactionThreshold: false` turns
+  the warning off.
+
+**On a SQLite file, statements outside a transaction use a second connection** ([#1375](https://github.com/nstfkc/gemi/issues/1375)).
+A connection to a SQLite file opens two Bun clients on it: transactions run on one, and every
+statement outside a transaction (a `Model.create` outside `transaction()`, `DB.sql`, the stores'
+plain writes) runs on the other. So a plain statement never joins another request's open
+transaction: it doesn't see its uncommitted rows, and a rollback doesn't take it back.
+
+- The file is put in WAL mode, so a read never waits for a writer. WAL keeps two files next to the
+  database, `<name>-wal` and `<name>-shm`; copy or delete all three together. WAL doesn't work on
+  network filesystems (NFS, SMB): keep the file on a local disk.
+- A plain write that meets the open transaction's lock (`SQLITE_BUSY`) waits its turn in the
+  transaction queue and then runs, after that transaction commits or rolls back. The wait is in
+  JS, so the process keeps serving other requests. SQLite's own wait (`busy_timeout`) would block
+  the event loop, since Bun runs SQLite on the JavaScript thread, so gemi keeps it at 0 on both
+  connections; don't set it.
+- A statement that has its turn and still meets a lock (another process's) is retried with a short
+  backoff for up to 5 seconds, then fails with the `SQLITE_BUSY` error. So is a `BEGIN`.
+- Transactions start with `BEGIN IMMEDIATE`, so one that reads first can't fail at its first
+  write because a plain write landed in between.
+- A multi-statement string (`sql.unsafe("…; …")`, `sql.file(...)`; a `;` inside a string
+  literal, a quoted name or a comment, or a trailing one, doesn't count) waits its turn before it runs,
+  so it never meets this process's open transaction, and it is never run twice: if it still meets
+  another process's lock, it fails with `SqliteBusyError`, since the statements before the one
+  that failed may have committed. Because it waits for the open transaction even when it only
+  reads, one issued through the pool inside a transaction fails after 5 seconds like a write; run
+  it on the transaction's handle.
+- A write through the pool inside a transaction doesn't join the transaction. It waits for the
+  transaction, which is waiting for it, so after 5 seconds it fails with
+  `TransactionQueueDeadlockError`. The error's `stack` (and `callSite`) points at the call that
+  issued the write, and its message quotes the statement. That covers `DB.sql` and a raw client,
+  and also gemi stores that write through the pool on purpose: a lock or a rate-limit hit
+  (`DatabaseLockStore`), an OAuth connection (`DatabaseConnectionStore`), a run
+  (`DatabaseRunStore`) or an agent job (`DatabaseAgentJobStore`), called inside `transaction()`.
+  Call those before the transaction or from `afterCommit`. For your own SQL, use the ORM (which
+  joins the open transaction), `DB.query`, or the handle `transaction()` gives you. Reads through
+  the pool work, and see what was committed before the transaction. On Postgres the same code
+  runs on another connection and works.
+- `:memory:` databases keep one connection, since a second one would open a second, empty
+  database. Postgres and MySQL are unchanged.
+- If the file can't be switched to WAL (another process holds it, a network filesystem), gemi
+  warns once at startup. The mode is stored in the file, so it stays WAL under an older gemi too.
 
 ### Two things that will bite you
 
@@ -15335,17 +15812,18 @@ same applies to identifiers and sort directions, which cannot be parameters in S
 is the same for those, and it is about where the value came from, not what it is.
 
 `DB.sql` is unchanged and still Bun's own tagged template, for a single self-contained statement
-that needs none of this. **Whether it joins the ambient transaction depends on the dialect**, so use
-`DB.query` when that matters:
+that needs none of this. **It never joins the ambient transaction**, so use `DB.query` when that
+matters:
 
-- On **Postgres** it does not. The pool hands it a different connection, so a `Model.transaction`
-  that rolls back leaves a `DB.sql` write behind.
-- On **SQLite** it does, because `DatabaseManager` gives SQLite a single connection and the
-  statement is therefore inside the open transaction.
+- On **Postgres** the pool hands it a different connection, so a `Model.transaction` that rolls
+  back leaves a `DB.sql` write behind.
+- On a **SQLite** file it runs on the connection for statements outside transactions (#1375). A
+  read sees only committed rows. A write waits for the open transaction's lock, and when the
+  transaction is waiting for that write, it fails with `TransactionQueueDeadlockError` after 5
+  seconds. (A `:memory:` database has one connection, so there the statement is inside the open
+  transaction.)
 
-The direction is the awkward one: a `DB.sql` write inside a transaction rolls back correctly in
-development on SQLite and survives the rollback in production on Postgres. `DB.query` and
-`DB.execute` join the transaction on both.
+`DB.query` and `DB.execute` join the transaction on both.
 
 ### Reading the live schema
 
@@ -16290,8 +16768,8 @@ export default defineAuthConfig({
   never picked up the new cookie — deletes that session too. Once it no longer resolves to
   it, it no longer revokes it either: only the new token can then.
 - **A sign-out and a conversion never interleave.** Both run in one transaction under a lock
-  on the old token (`UserProvider.withLegacySessionLock`: an advisory lock on Postgres, a
-  queue in the process on SQLite), and a conversion writes the new session only if it is the
+  on the old token (`UserProvider.withLegacySessionLock`: an advisory lock on Postgres, the
+  transaction queue on SQLite), and a conversion writes the new session only if it is the
   one that deleted the old row. A sign-out that lands while a request is converting the same
   token either ends the session that request wrote or leaves it nothing to write.
 - **Concurrent requests share one session.** Requests converting the same token at once all
@@ -16862,6 +17340,12 @@ export default defineAuthConfig({
   `{ session, isNewUser }`, sets the `access_token` cookie, and fires `onSignIn` and
   `onAuthenticated`. A wrong, expired or missing code is a validation error on `code`
   (`"invalid_code"`); the guess past `maxAttempts` burns the code (`"too_many_attempts"`).
+  Two verifies at once for a new address (a double submit, a retry) create the user once:
+  with an issued code the second is `"invalid_code"` (the code is spent); with the fixed
+  development code it signs in to the same user, with `isNewUser: false`. `onUserCreated`
+  runs once. On SQLite, transactions queue one after another in the process, each releasing
+  the next at its commit ([Transactions](./orm.md#transactions)). The queue doesn't cover
+  several processes on one database file.
 
 Both answer 404 unless `enabled`. On the client:
 
@@ -16895,8 +17379,9 @@ request's own error (a 429, say), or `null` once it succeeds, not the old `inval
 | `allowFixedCodeInProduction` | `AUTH_FIXED_CODE_ALLOW_PRODUCTION=1`, else `false` | `true` accepts `fixedCode` under `NODE_ENV=production`, for a local production-build test server (`gemi start`). Logs a warning at boot: anyone who knows the code can sign in as any user. Never on a real deployment. |
 
 Codes come from `generateCode` when it returns one, else random digits. The per-IP limits
-key on `clientIp(req)`, which is only as good as the `GEMI_TRUST_PROXY` setting behind your
-proxy; the per-address limits and the attempt cap hold regardless. All of these counters
+key on `clientAddress(req)` (an IPv6 client counts by its /64, see
+[The client's address](./middleware.md#the-clients-address)), which is only as good as the
+`GEMI_TRUST_PROXY` setting behind your proxy; the per-address limits and the attempt cap hold regardless. All of these counters
 live in the rate limiter (`ratelimiter.driver`): with the default in-memory driver they are
 per process, so N instances allow N times the limits and a restart resets them. Bind
 `RedisRateLimiter` when you run more than one instance.
@@ -17415,6 +17900,13 @@ racing to sign up or link the same account both try to write the same identity; 
 the other fails on the constraint, and the loser then signs in **only if** the identity now
 resolves — the database error alone is never taken as proof of who the user is. Without the
 constraint the lookups still work, but a race can write two rows for one account.
+
+The same holds for two password sign-ups at once for one address (a double submit): one
+creates the account, and the other is answered the validation error on `email` ("Email
+address already exists") it would have got a moment later, not a 500, with or without an
+invitation (the loser of an invited sign-up fails on consuming the invitation the winner
+used). Only a failed insert or invitation delete is read that way, and only when the user now exists; an `onUserCreated` that throws fails
+the request as before.
 
 `username` is the provider's handle where it has one (X). Google has none, so it is left
 empty; it used to hold the display name.
@@ -20719,6 +21211,8 @@ interface ReadFileParams {
 
 Because `fetch` returns a `Response`, a controller can return it directly. See [Controllers](./controllers.md).
 
+On `FileSystemDriver`, `fetch` rejects with `FileNotFoundError` for a missing object, as `read` does, so the caller gets a 404 rather than a `200` whose body fails once it is read. The file is open from then on, so consume or cancel the body: returning the response from a route does that, but a response dropped unread holds the file open until it is garbage-collected.
+
 #### Cancelling a read
 
 Like `put`, `fetch` takes an optional second argument, `{ signal }`. Use it to give up on a slow backend, or to stop reading when the client disconnects:
@@ -20812,7 +21306,7 @@ It behaves the same on every built-in driver:
 - **Prefix, not folder.** Matching is plain string-prefix, as in S3: `pages/1` also matches `pages/10/…`. End the prefix with `/` to stay inside one folder. `""` lists everything.
 - **Recursive.** Objects in nested "folders" are included.
 - `S3Driver` follows `ListObjectsV2` continuation tokens (1000 keys a page). Zero-byte "folder marker" objects some tools create are listed like any other object.
-- `FileSystemDriver` walks its storage folder recursively, yields regular files only (symlinks are not followed), sorts by name, and refuses a prefix that resolves outside the folder (`../x`).
+- `FileSystemDriver` walks its storage folder recursively, yields regular files only (symbolic links are skipped, never followed), sorts by name, and refuses a prefix that resolves outside the folder (`../x`). A prefix whose directory is or passes through a link lists nothing. See [Symbolic links](#symbolic-links).
 - `AzureBlobDriver` uses `listBlobsFlat({ prefix })`.
 
 `options` takes `bucket` (ignored by the filesystem driver) and `signal`, which stops the listing between objects.
@@ -20828,7 +21322,7 @@ const removed = await Storage.deletePrefix(`pages/${page.publicId}/`);
 It refuses a prefix that would match the whole store: `""`, `"/"`, `"."`, `"./"`, whitespace, and on the filesystem driver anything that resolves to the storage folder itself (`"pages/../"`). Build prefixes from ids you have checked, and end them with `/`: `pages/${id}` with `id = "1"` also deletes `pages/10/…`.
 
 - `S3Driver` sends one `DeleteObjects` per listed page (up to 1000 keys), and rejects if S3 reports any key it could not delete. Objects already removed stay removed, and running it again finishes the job.
-- `FileSystemDriver` unlinks the files and then removes the directories that left empty inside the prefix.
+- `FileSystemDriver` unlinks the files and then removes the directories that left empty inside the prefix. Symbolic links inside the prefix are left in place, their targets are untouched, and a directory that still holds one is kept. A prefix whose directory is or passes through a link is refused.
 - `AzureBlobDriver` (and any custom driver, by default) deletes one object at a time with `delete()`.
 
 ### `list(folder)` (deprecated)
@@ -20844,7 +21338,7 @@ await Storage.delete("avatars/old.png");
 await Storage.delete({ name: "report.pdf", bucket: "exports" });
 ```
 
-Every built-in driver implements it: `FileSystemDriver` unlinks the file (and refuses a name that resolves outside its storage folder), `S3Driver` sends `DeleteObject`, and `AzureBlobDriver` deletes the blob.
+Every built-in driver implements it: `FileSystemDriver` unlinks the file (and refuses a name that resolves outside its storage folder or is or passes through a symbolic link), `S3Driver` sends `DeleteObject`, and `AzureBlobDriver` deletes the blob.
 
 ### `metadata(blob | file)`
 
@@ -20916,6 +21410,28 @@ export default defineFilesystemConfig({
 ```
 
 You can point it at a custom directory by passing a path to the constructor: `new FileSystemDriver("/var/data/uploads")`.
+
+#### Symbolic links
+
+The driver refuses object names that pass through a symbolic link below the storage folder. It does not follow links inside the store. That holds for a link at the object's own name and for a linked directory anywhere between the storage folder and the object. The link's target makes no difference: it may be inside the store, outside it, or missing.
+
+| Operation | A name that is or passes through a link |
+| --- | --- |
+| `read()`, `fetch()`, `size()` | Rejects with `FileNotFoundError`, as for a missing object. A stream route answers its usual 404. The object is opened with `O_NOFOLLOW`, so a link at the final name is refused even if it appeared after the check. |
+| `put()`, `putStream()` | Rejects with an error saying the name is or passes through a symbolic link. Nothing is written through the link, and neither the link nor its target changes. Both write a temporary file next to the target and rename it into place. They check the name before creating the temporary file and again just before the rename. |
+| `delete()` | Rejects with an error saying the name is or passes through a symbolic link. Neither the link nor its target is removed. |
+| `objects(prefix)` | Skips links found during the walk. A prefix whose directory is or passes through a link lists nothing. |
+| `deletePrefix(prefix)` | Deletes only the regular files that `objects()` lists. Links found during the walk stay, with their targets. A prefix whose directory is or passes through a link is refused. |
+
+The storage folder itself may be a link. The driver resolves it, and every link in its own path, to the real directory on each operation, and treats that directory as the store. This is the supported way to share uploads between releases: make `/srv/app/current/storage` a link to `/srv/app/shared/storage` and pass `new FileSystemDriver("/srv/app/current/storage")`. Links placed inside the store, such as `covers/latest.jpg` pointing at another image, are not served. Copy the object instead, or keep the alias in your own records. If the storage folder is a link to a directory that does not exist yet, writes fail with `The storage folder "…" is a symbolic link to a missing directory`. Create the shared directory before the first deploy.
+
+Missing parent directories are still created for a nested name. Writing `images/covers/front.jpg` into an empty store creates `images/covers/` first.
+
+The application is expected to own the storage tree. The driver checks for links when each operation starts. It does not guard against another process that adds, removes or replaces entries in the tree while an operation is running. A write never goes through a link at the final name, because the rename replaces whatever entry is there. `fetch()` and `size()` read from the file they opened with `O_NOFOLLOW`. `read()` checks the same way but hands Bun the path, which Bun opens again when it sends the body, so ranges keep a real `Content-Length`. A directory in the path that is replaced by a link after the check can still be followed by any operation. Do not give other users or untrusted processes write access to the storage folder.
+
+Hard links are treated as ordinary files. A hard link cannot point at a directory or cross filesystems, and it looks like any other regular file to the driver.
+
+These rules are verified on POSIX systems (Linux and macOS). On Windows, `lstat` reports NTFS junctions as symbolic links, so the same checks should apply to them, but that is not tested.
 
 ### `S3Driver` (S3 / S3-compatible)
 
@@ -21958,7 +22474,7 @@ export default defineQueueConfig({
 How it works:
 
 - **Claiming.** Each job is a row. Postgres and MySQL claim rows with `SELECT … FOR UPDATE SKIP LOCKED`, so replicas claiming at the same moment take different rows. On MySQL the claim runs at READ COMMITTED on a connection of its own, because MySQL's default REPEATABLE READ locks the gaps a range scan passes over as well as the rows it returns, and claimers then block or deadlock on each other instead of skipping past. The connection's isolation level is put back before it returns to the pool. SQLite runs one write at a time, so a single `UPDATE … RETURNING` claims atomically.
-- **SQLite and a second process.** Bun opens SQLite with a busy timeout of 0, so a write that finds another process holding the file's lock fails at once with `SQLITE_BUSY`. The driver raises that to one second the first time it touches a SQLite connection, so `gemi dev` and a script or seed dispatching into the same file wait for each other instead. The setting belongs to the connection, so with `driver: "database"` it applies to the app's default connection too. A connection you already gave a busy timeout keeps it, and `new DatabaseQueueDriver(connection, { busyTimeout })` picks another value (`0` leaves the connection alone). Bun waits for the lock on the JavaScript thread, so the process serves nothing else while it waits. That is why the default is short. For more than one server, use Postgres or MySQL.
+- **SQLite and a second process.** On a gemi connection to a SQLite file, a write that finds another process holding the file's lock (`gemi dev` and a script or seed dispatching into the same file) waits for it in JS, without blocking the event loop, and is retried for up to 5 seconds before it fails with `SQLITE_BUSY` (see [orm.md](./orm.md#transactions)). SQLite's own `busy_timeout` stays 0 there, because Bun waits for it on the JavaScript thread, and the process would serve nothing else meanwhile. So `new DatabaseQueueDriver(connection, { busyTimeout })` is ignored on such a connection, with a warning. It still applies to a `:memory:` database and to a client you built yourself: the driver raises a busy timeout of 0 to one second the first time it touches it, a client you already gave a busy timeout keeps it, and `busyTimeout: 0` leaves it alone. For more than one server, use Postgres or MySQL.
 - **Leases.** A claim leases the job for `visibilityTimeout` (default five minutes). The queue renews the lease every third of that while the job runs. A job whose process died without finishing becomes claimable again when its lease runs out, and that is the whole of crash recovery. A lower `visibilityTimeout` retries such a job sooner, at the cost of more lease renewals.
 - **Retries.** The attempt count and the last error are stored in the row, so `maxAttempts` and `backoff` hold across restarts. An attempt whose process died counts too.
 - **Dead letters.** A job that used up its attempts stays in the table with `status = 'dead'` and its `last_error`. `app(QueueManager).retryDead(id)` runs it again from attempt 1, with all its `maxAttempts`, and resolves `false` if `id` is not a dead job — one that is waiting, running or gone is left alone. There is no `gemi` command for it yet; a [console command](./commands.md) of your own is a few lines around that call. From a console command the job waits for a server or a worker to claim it, up to `pollInterval`. `driver.prune(olderThanMs)` deletes dead rows older than that, for example from a cron job. Nothing else removes them.
@@ -22185,7 +22701,7 @@ model GemiLock {
 }
 ```
 
-Without Prisma, `await app(QueueManager).locks.store.createTable()` (a `DatabaseLockStore`) creates it. Nothing reads or writes the table until a unique job, a `withoutOverlapping` or `onOneServer` cron job, or the `Lock` facade is used. Rows are kept after release so tokens keep growing; `store.prune(olderThanMs)` deletes idle ones.
+Without Prisma, `await app(QueueManager).locks.store.createTable()` (a `DatabaseLockStore`) creates it. Nothing reads or writes the table until a unique job, a `withoutOverlapping` or `onOneServer` cron job, the `Lock` facade or a [`DatabaseRateLimiter`](./middleware.md#the-database-driver) is used. Rows are kept after release so tokens keep growing; `store.prune(olderThanMs)` deletes idle ones.
 
 The queue slice's `locks` picks another store: `"auto"` (the default: the driver's own), `"memory"`, `"database"` (the default connection), a `LockStore`, or `(app) => LockStore`.
 
@@ -23193,6 +23709,10 @@ When a production server is told to stop (see [Graceful shutdown](./configuratio
 The cron drain and the [queue drain](./jobs-and-queues.md#stopping-the-queue) share that one deadline, and the cron drain goes first — deliberately, since a tick may dispatch jobs the queue should then wait for. A tick that runs long therefore spends the queue's time: with the default 5 seconds and a tick that needs 30, the queue is left about 100 milliseconds (or is skipped outright) for its own running jobs, and with the memory driver whatever is still pending is lost. Size `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` for the longest tick *plus* the longest job, or move long cron work onto the queue as below.
 
 An abandoned tick is not retried: the next one is whenever its expression next matches, on whichever replica is up. If a job regularly runs longer than the provider deadline, raise `GEMI_SHUTDOWN_PROVIDER_TIMEOUT` to fit the platform's grace period, or have the cron `callback` dispatch the work to the [database queue](./jobs-and-queues.md#the-database-driver), which another replica picks up.
+
+### In tests
+
+A vitest process (`VITEST` is set) does not start the schedule, so a test that boots the app does not run its cron jobs against the test database. Jobs are still discovered, and `app(Scheduler).jobs` answers as it does elsewhere, so a test can run a tick by hand. Set `GEMI_SCHEDULE=1` for a test that needs the real schedule. `GEMI_NO_SCHEDULE=1` still turns it off everywhere, and wins over `GEMI_SCHEDULE`. When there are jobs to skip, one line on stderr says so, once per test file that boots the app. A server a test spawns inherits `VITEST` and so skips the schedule too; see [What a test process does not do](./testing.md#what-a-test-process-does-not-do).
 
 ## Cron jobs vs. queued jobs
 
@@ -24768,7 +25288,7 @@ Authorization runs when a socket subscribes and when a `revoke` asks for it, not
 
 - **Backpressure.** A socket that falls `backpressureLimit` bytes behind is closed with `1013`, and its client reconnects and resyncs. No queue is kept per socket.
 - **Rate limits.** A socket may send `subscribeRate.limit` `sub` frames per window (`unsub` is not counted). Past it a `sub` is refused with `rate_limited`, which the client retries on the same socket; at twice the limit the socket is closed (`1008`). More than 120 `ping`s per window close it too.
-- **Per-IP cap behind a proxy.** `maxConnectionsPerIp` counts the client address, which is the TCP peer unless `GEMI_TRUST_PROXY` says which `X-Forwarded-For` entry to believe. Behind a proxy or load balancer without it, every client shares the proxy's address, so the cap applies to the whole app, per process. `gemi start` warns at boot when the app has channels and `GEMI_TRUST_PROXY` is not set. Set it, or raise the limit.
+- **Per-IP cap behind a proxy.** `maxConnectionsPerIp` counts the client address (an IPv6 client by its /64, as [rate limits](./middleware.md#the-clients-address) do), which is the TCP peer unless `GEMI_TRUST_PROXY` says which `X-Forwarded-For` entry to believe. Behind a proxy or load balancer without it, every client shares the proxy's address, so the cap applies to the whole app, per process. `gemi start` warns at boot when the app has channels and `GEMI_TRUST_PROXY` is not set. Set it, or raise the limit.
 - **Inbound frames** are JSON text up to `maxInboundMessageBytes`. Anything else, an unknown `op` included, closes the socket (`1003`). A new operation therefore comes with a new subprotocol version (`gemi.v2`), never inside `gemi.v1`.
 - **Idle sockets.** Bun pings them, and closes one that answers nothing for `idleTimeout` seconds.
 - **Shutdown.** When `gemi start` drains, it closes the listener, sends every socket `bye` with code `1012` and a `retryAfter` between 1 and 5 seconds (so a deploy's reconnects do not arrive at once), and closes them. That happens before the providers shut down. In development, the application a reload replaced closes its sockets the same way.

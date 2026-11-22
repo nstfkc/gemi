@@ -124,6 +124,7 @@ class AppKernel extends Kernel {
       allowedOrigins: ["https://partner.example", "*.wild.example"],
       maxChannelsPerSocket: 4,
       maxConnectionsPerUser: 3,
+      maxConnectionsPerIp: 8,
       subscribeRate: { limit: 10, windowMs: 60_000 },
       backpressureLimit: 64 * 1024,
       heartbeatMs: 10_000,
@@ -424,6 +425,19 @@ describe("authorization", () => {
     await connect({ cookie: "test_user=99" });
     await connect({ cookie: "test_user=99" });
     expect(await attempt({ Cookie: "test_user=99", Origin: `http://${base}` })).toBe(429);
+  });
+});
+
+describe("connections per IP", () => {
+  test("an IPv6 client is counted by its /64, so rotating addresses inside it opens no more", async () => {
+    for (let i = 1; i <= 8; i++) {
+      await connect({ headers: { "x-forwarded-for": `2001:db8:9:9::${i.toString(16)}` } });
+    }
+    expect(
+      await attempt({ "x-forwarded-for": "2001:db8:9:9:ffff::1", Origin: `http://${base}` }),
+    ).toBe(429);
+    // The next /64 is another client.
+    await connect({ headers: { "x-forwarded-for": "2001:db8:9:a::1" } });
   });
 });
 

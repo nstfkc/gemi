@@ -49,6 +49,7 @@ export {
   LiveRunNotFoundError,
   liveRuns,
   MemoryLiveRuns,
+  type LiveRunInfo,
   type RegisterParams,
 } from "./LiveRuns";
 export { encodeFrame, sseHeaders, sseResponse } from "./sse";

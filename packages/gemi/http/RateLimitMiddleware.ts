@@ -2,7 +2,7 @@ import { app } from "../foundation/app";
 import { RateLimiter } from "../services/rate-limiter/RateLimiter";
 import { RateLimitExceededError, rateLimitHeaders } from "./RateLimitExceededError";
 import type { HttpRequest } from "./HttpRequest";
-import { normalizeIpEntry } from "./clientAddress";
+import { addressBlock, normalizeIpEntry } from "./clientAddress";
 import { Middleware } from "./Middleware";
 import { dispatchedClientAddress, dispatchedGrant } from "./modelOriginated";
 
@@ -14,9 +14,10 @@ export interface RateLimitMiddlewareConfig {
   /** Window length in **seconds**. The DSL parameter wins over this. */
   window?: number;
   /**
-   * What counts as one client. Defaults to the caller's IP plus the route
-   * path, so a client's budget for `/api/search` is separate from its budget
-   * for `/api/upload`.
+   * What counts as one client. Defaults to the caller's address plus the
+   * route path, so a client's budget for `/api/search` is separate from its
+   * budget for `/api/upload`. The address is `clientAddress(req)`: an IPv6
+   * client is counted by its /64, which one host can rotate through.
    *
    * Override it to limit by something more trustworthy than a header —
    * a session, an API key, a tenant:
@@ -24,12 +25,12 @@ export interface RateLimitMiddlewareConfig {
    * ```ts
    * RateLimitMiddleware.configure({
    *   limit: 60,
-   *   key: (req) => `user:${req.ctx().user?.id ?? clientIp(req)}`,
+   *   key: (req) => `user:${req.ctx().user?.id ?? clientAddress(req)}`,
    * })
    * ```
    *
    * A model's tool call (`ApiRouteDispatcher.dispatchAs`) spends the same
-   * budget as the user's own requests by default: `clientIp` answers the
+   * budget as the user's own requests by default: `clientAddress` answers the
    * address of the request that started the run. A remote MCP client's tool
    * call is the exception: by default it spends a budget keyed on its
    * credential (`mcp:<via>:<id>:<route>`, see `req.mcpGrant()`), since
@@ -40,7 +41,7 @@ export interface RateLimitMiddlewareConfig {
    * ```ts
    * RateLimitMiddleware.configure({
    *   key: (req) =>
-   *     `${req.isModelOriginated() ? "model" : "direct"}:${clientIp(req)}:${req.routePath}`,
+   *     `${req.isModelOriginated() ? "model" : "direct"}:${clientAddress(req)}:${req.routePath}`,
    * })
    * ```
    */
@@ -106,7 +107,7 @@ export class RateLimitMiddleware extends Middleware<RateLimitMiddlewareConfig> {
     if (grant) {
       return `mcp:${grant.via}:${grant.id}:${this.req.routePath ?? "*"}`;
     }
-    return `${clientIp(this.req)}:${this.req.routePath ?? "*"}`;
+    return `${clientAddress(this.req)}:${this.req.routePath ?? "*"}`;
   }
 }
 
@@ -138,6 +139,9 @@ function resolveLimiter(): RateLimiter | null {
  * client-written here. Elsewhere (`gemi dev`, a custom server) both headers are
  * whatever the client sent. When you have something better (a session, an API
  * key), pass `key` in the config.
+ *
+ * This is the exact address, for logs. Key a limit on `clientAddress(req)`,
+ * which counts an IPv6 client by its /64.
  */
 export function clientIp(req: HttpRequest<any, any>): string {
   // A tool call's synthetic request has no forwarding headers; it spends the
@@ -155,6 +159,20 @@ export function clientIp(req: HttpRequest<any, any>): string {
   }
 
   return req.headers.get("x-real-ip")?.trim() || "unknown";
+}
+
+/**
+ * The client address to key a limit on: `clientIp(req)`, with an IPv6 address
+ * cut to its first `ipv6Prefix` bits (default 64, `2001:db8:1:2::/64`) and an
+ * IPv4-mapped one (`::ffff:203.0.113.7`) given as its IPv4 address.
+ *
+ * One host is usually handed a whole /64 and may use any address in it, so a
+ * budget keyed on the full IPv6 address is reset by changing address. This is
+ * the default key of `RateLimitMiddleware` and of the auth limits; keep
+ * `clientIp` for logs, where the exact address is the useful one.
+ */
+export function clientAddress(req: HttpRequest<any, any>, options?: { ipv6Prefix?: number }): string {
+  return addressBlock(clientIp(req), options);
 }
 
 function toPositiveNumber(value: string | number | undefined) {

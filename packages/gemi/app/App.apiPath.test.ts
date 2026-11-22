@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -120,6 +120,38 @@ describe("App.fetch routes by the /api segment", () => {
       const openFile = vi.spyOn(Bun, "file");
       for (const invalidName of ["../outside.txt", "a\0b"]) {
         const refused = await requestAsset(invalidName);
+        expect(refused.status).toBe(404);
+        expect((await refused.json()).error.kind).toBe("not_found");
+      }
+      expect(openFile).not.toHaveBeenCalled();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a stream route answers 404 for a name that is or passes through a symlink", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gemi-api-assets-"));
+    try {
+      const driver = new FileSystemDriver(join(root, "assets"));
+      class AssetKernel extends Kernel {
+        config = { route, filesystem: { driver } };
+      }
+      const assetApp = new App({ kernel: AssetKernel });
+      const requestAsset = (name: string) => assetApp.fetch(new Request("http://gemi.dev/api/assets/" + name));
+
+      await driver.put({ name: "covers/front.jpg", body: new Blob(["front"]) });
+      await writeFile(join(root, "secret.txt"), "secret");
+      await symlink(join(root, "assets", "covers", "front.jpg"), join(root, "assets", "covers", "latest.jpg"));
+      await symlink(join(root, "assets", "covers"), join(root, "assets", "linked"));
+      await symlink(join(root, "secret.txt"), join(root, "assets", "secret.txt"));
+
+      const valid = await requestAsset("covers/front.jpg");
+      expect(valid.status).toBe(200);
+      expect(await valid.text()).toBe("front");
+
+      const openFile = vi.spyOn(Bun, "file");
+      for (const linkedName of ["covers/latest.jpg", "linked/front.jpg", "secret.txt"]) {
+        const refused = await requestAsset(linkedName);
         expect(refused.status).toBe(404);
         expect((await refused.json()).error.kind).toBe("not_found");
       }

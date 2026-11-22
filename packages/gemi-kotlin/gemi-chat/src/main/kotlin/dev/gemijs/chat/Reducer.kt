@@ -115,7 +115,12 @@ public data class ChatState(
           usageJson = null,
         )
 
-      "message-start" -> withMessage(event.string("messageId") ?: "", now) { it.with("role", event["role"]) }
+      "message-start" ->
+        withMessage(event.string("messageId") ?: "", now) { message ->
+          val role = message.with("role", event["role"])
+          val turn = event.string("turn")
+          if (turn != null && message.string("turn") == null) role.with("turn", JsonPrimitive(turn)) else role
+        }
 
       "text-delta" -> {
         val id = event.string("messageId") ?: ""
@@ -276,11 +281,12 @@ public data class ChatState(
         }
       }
 
-      "awaiting-input" ->
-        copy(
-          runId = event.string("runId"),
-          pending = event["pending"].array().orEmpty().map { PendingToolCall(it.obj() ?: JsonObject(emptyMap())) },
-        )
+      "awaiting-input" -> {
+        // The questions of this run's turn: another turn's, still waiting
+        // beside it, are kept.
+        val next = event["pending"].array().orEmpty().map { PendingToolCall(it.obj() ?: JsonObject(emptyMap())) }
+        copy(runId = event.string("runId"), pending = othersTurns(messages, pending, next) + next)
+      }
 
       "message-end" ->
         withMessage(event.string("messageId") ?: "", now) { message ->
@@ -334,7 +340,9 @@ public data class ChatState(
       // from `message-end`.
       "usage" -> copy(usageJson = event["usage"])
 
-      "error" -> copy(error = event["error"].obj()?.let(::AgentError), pending = emptyList())
+      // Calls that name their turn are kept: other turns' questions, still
+      // open on the server. A run's own turn holds none by the time it fails.
+      "error" -> copy(error = event["error"].obj()?.let(::AgentError), pending = pending.filter { it.turn != null })
 
       "run-end" -> {
         val reason = event.string("finishReason")?.let(::FinishReason)
@@ -492,4 +500,48 @@ private fun appendReasoning(
 private fun upsert(content: List<JsonElement>, part: JsonObject, match: (JsonObject) -> Boolean): List<JsonElement> {
   val index = content.indexOfFirst { match(it.obj() ?: JsonObject(emptyMap())) }
   return if (index == -1) content + part else content.toMutableList().also { it[index] = part }
+}
+
+/** The turn each tool call in `messages` was asked in, by `toolCallId`. */
+private fun callTurns(messages: List<AgentMessage>): Map<String, String?> {
+  val turns = HashMap<String, String?>()
+  for (message in messages) {
+    for (part in message.json["content"].array().orEmpty()) {
+      val obj = part.obj() ?: continue
+      if (obj.string("type") == "tool-call") obj.string("toolCallId")?.let { turns[it] = message.turn }
+    }
+  }
+  return turns
+}
+
+/** The top-level call a pending one stands for: itself, or the call its sub-run is nested under. */
+private fun hostOf(call: PendingToolCall): String = call.path?.firstOrNull() ?: call.toolCallId
+
+/**
+ * The held calls in `pending` that belong to a turn none of `next` belongs
+ * to: what an `awaiting-input` for one turn leaves standing. None when a turn
+ * can't be told.
+ */
+internal fun othersTurns(messages: List<AgentMessage>, pending: List<PendingToolCall>, next: List<PendingToolCall>): List<PendingToolCall> {
+  if (pending.isEmpty()) return emptyList()
+  val turns = callTurns(messages)
+  val turnOf = { call: PendingToolCall -> call.turn ?: turns[hostOf(call)] }
+  val asking = next.map(turnOf).toSet()
+  if (asking.isEmpty() || null in asking) return emptyList()
+  val replaced = next.map { it.toolCallId }.toSet()
+  return pending.filter { call -> turnOf(call).let { it != null && it !in asking } && call.toolCallId !in replaced }
+}
+
+/**
+ * The held calls an answer to the calls in `ids` settles: those calls, and
+ * the other questions of a sub-agent run one of them was asked in (its tool
+ * is re-entered once). Every other held call stays open: another turn's
+ * question (gemi #1355), and another question of the same reply (gemi #1380).
+ */
+internal fun settledBy(pending: List<PendingToolCall>, ids: Set<String>): Set<String> {
+  val runs = pending.filter { it.toolCallId in ids && !it.path.isNullOrEmpty() }.map(::hostOf).toSet()
+  return pending
+    .filter { call -> call.toolCallId in ids || (!call.path.isNullOrEmpty() && hostOf(call) in runs) }
+    .map { it.toolCallId }
+    .toSet()
 }

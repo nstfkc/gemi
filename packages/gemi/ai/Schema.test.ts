@@ -399,8 +399,8 @@ describe("json()", () => {
   });
 
   test("carries a description, the only thing the model is told about it", () => {
-    expect(s.json().describe("A kyte ApplicationDefinition").toJSONSchema()).toEqual({
-      description: "A kyte ApplicationDefinition",
+    expect(s.json().describe("An app's ApplicationDefinition").toJSONSchema()).toEqual({
+      description: "An app's ApplicationDefinition",
     });
   });
 

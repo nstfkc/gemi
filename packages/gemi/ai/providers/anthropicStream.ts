@@ -71,6 +71,7 @@ export async function* parseMessagesStream(
         if (typeof start.model === "string" && start.model) model = start.model;
         usage = mergeUsage(usage, start.usage);
         options.onUsage?.(toAnthropicUsage(usage));
+        yield { type: "usage", usage: toAnthropicUsage(usage) };
         break;
       }
 
@@ -160,6 +161,7 @@ export async function* parseMessagesStream(
         if (payload.delta?.stop_details) stopDetails = payload.delta.stop_details;
         usage = mergeUsage(usage, payload.usage);
         options.onUsage?.(toAnthropicUsage(usage));
+        yield { type: "usage", usage: toAnthropicUsage(usage) };
         break;
       }
 

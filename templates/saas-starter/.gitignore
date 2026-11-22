@@ -60,3 +60,11 @@ app/models/prisma-client/
 prisma/dev.db-journal
 prisma/dev.db-wal
 prisma/dev.db-shm
+
+# WAL sidecars of any other SQLite database the app opens (#1375: gemi puts
+# every SQLite file it connects to in WAL mode). Only the sidecars: a `*.db`
+# pattern would also catch the committed fixture above.
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm

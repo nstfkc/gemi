@@ -65,6 +65,15 @@ const ANSWER: AgentStreamFrame[] = [
   { seq: 4, event: { type: "run-end", runId: "run_1", finishReason: "stop" } },
 ];
 
+/** The reply a second answer carries on, after the first. */
+const BOTH_DONE: AgentStreamFrame[] = [
+  { seq: 0, event: { type: "run-start", runId: "run_q", threadId: "th_9" } },
+  { seq: 1, event: { type: "message-start", messageId: "mq", role: "assistant" } },
+  { seq: 2, event: { type: "text-delta", messageId: "mq", delta: "Both done." } },
+  { seq: 3, event: { type: "message-end", messageId: "mq", finishReason: "stop" } },
+  { seq: 4, event: { type: "run-end", runId: "run_q", finishReason: "stop" } },
+];
+
 const ASKING: AgentStreamFrame[] = [
   { seq: 0, event: { type: "run-start", runId: "run_2", threadId: "th_9" } },
   { seq: 1, event: { type: "message-start", messageId: "m2", role: "assistant" } },
@@ -471,6 +480,540 @@ describe("awaiting input", () => {
   });
 });
 
+describe("runs (#1344)", () => {
+  const start = (runId: string): AgentStreamFrame => ({ seq: 0, event: { type: "run-start", runId, threadId: "th_r" } });
+  const message = (messageId: string, turn: string): AgentStreamFrame => ({
+    seq: 1,
+    event: { type: "message-start", messageId, role: "assistant", turn },
+  });
+  const finish = (runId: string, messageId: string): AgentStreamFrame[] => [
+    { seq: 2, event: { type: "message-end", messageId, finishReason: "stop" } },
+    { seq: 3, event: { type: "run-end", runId, finishReason: "stop" } },
+  ];
+  const settle = () => act(async () => void (await new Promise((resolve) => setTimeout(resolve, 0))));
+  // Without the client ids, checked on their own below.
+  const shape = (runs: { id: string }[]) => runs.map(({ id: _id, ...run }) => run);
+
+  test("one reply: submitted, then streaming under its run and turn, then gone", async () => {
+    const { box } = mount({ threadId: "th_r", attach: false });
+    expect(shape(box.api.runs)).toEqual([]);
+    const a = controlled();
+    fetchMock.mockResolvedValueOnce(a.response);
+    let done!: Promise<void>;
+    await act(async () => {
+      done = box.api.sendMessage("hi");
+      await Promise.resolve();
+    });
+    expect(shape(box.api.runs)).toEqual([{ status: "submitted" }]);
+    const id = box.api.runs[0]!.id;
+    await act(async () => {
+      a.push(start("run_a"), message("ma", "turn_a"));
+    });
+    await settle();
+    expect(shape(box.api.runs)).toEqual([{ runId: "run_a", turn: "turn_a", status: "streaming" }]);
+    // One reply all along: a key that holds.
+    expect(box.api.runs[0]!.id).toBe(id);
+    // The streamed message carries its turn too.
+    expect(box.api.messages.find((m) => m.id === "ma")?.turn).toBe("turn_a");
+    await act(async () => {
+      a.push(...finish("run_a", "ma"));
+      a.close();
+      await done;
+    });
+    expect(shape(box.api.runs)).toEqual([]);
+  });
+
+  test("two replies side by side, each with its own run and turn", async () => {
+    const { box } = mount({ threadId: "th_r", attach: false, ifBusy: "parallel" });
+    const a = controlled();
+    const b = controlled();
+    fetchMock.mockResolvedValueOnce(a.response).mockResolvedValueOnce(b.response);
+    let aDone!: Promise<void>;
+    let bDone!: Promise<void>;
+    await act(async () => {
+      aDone = box.api.sendMessage("one");
+      bDone = box.api.sendMessage("two");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      a.push(start("run_a"), message("ma", "turn_a"));
+      b.push(start("run_b"), message("mb", "turn_b"));
+    });
+    await settle();
+    expect(shape(box.api.runs)).toEqual([
+      { runId: "run_a", turn: "turn_a", status: "streaming" },
+      { runId: "run_b", turn: "turn_b", status: "streaming" },
+    ]);
+    await act(async () => {
+      a.push(...finish("run_a", "ma"));
+      a.close();
+      await aDone;
+    });
+    expect(shape(box.api.runs)).toEqual([{ runId: "run_b", turn: "turn_b", status: "streaming" }]);
+    await act(async () => {
+      b.push(...finish("run_b", "mb"));
+      b.close();
+      await bDone;
+    });
+    expect(shape(box.api.runs)).toEqual([]);
+  });
+
+  test("a turn that ended asking waits under its turn; its answer streams as it", async () => {
+    const { box } = mount({ threadId: "th_r", attach: false });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        start("run_a"),
+        message("ma", "turn_a"),
+        {
+          seq: 2,
+          event: {
+            type: "awaiting-input",
+            runId: "run_a",
+            pending: [{ toolCallId: "tc_a", name: "publish", input: {}, kind: "approval", signature: "sig", turn: "turn_a" }],
+          },
+        },
+        { seq: 3, event: { type: "message-end", messageId: "ma", finishReason: "awaiting-input" } },
+        { seq: 4, event: { type: "run-end", runId: "run_a", finishReason: "awaiting-input" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("publish");
+    });
+    expect(shape(box.api.runs)).toEqual([{ turn: "turn_a", status: "awaiting-input" }]);
+    const waitingId = box.api.runs[0]!.id;
+
+    const answer = controlled();
+    fetchMock.mockResolvedValueOnce(answer.response);
+    let done!: Promise<void>;
+    await act(async () => {
+      done = box.api.approve("tc_a", true);
+      await Promise.resolve();
+    });
+    // One reply, not two: the answer going out is that turn's, under the
+    // same id, so a row keyed by it stays mounted.
+    expect(shape(box.api.runs)).toEqual([{ turn: "turn_a", status: "submitted" }]);
+    expect(box.api.runs[0]!.id).toBe(waitingId);
+    await act(async () => {
+      answer.push(start("run_a2"), message("ma2", "turn_a"), ...finish("run_a2", "ma2"));
+      answer.close();
+      await done;
+    });
+    expect(shape(box.api.runs)).toEqual([]);
+  });
+  test("a mount probe that finds nothing lists no reply", async () => {
+    let answer!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (answer = resolve)));
+    const { box } = mount({ threadId: "th_r" });
+    await settle();
+    expect(box.api.runs).toEqual([]);
+    await act(async () => {
+      answer(new Response(null, { status: 204 }));
+    });
+    await settle();
+    expect(box.api.runs).toEqual([]);
+  });
+
+  test("a reload mid-run: the tail has no run-start or message-start, and the reply still streams under its run and turn", async () => {
+    const tail = controlled();
+    fetchMock.mockResolvedValueOnce(tail.response);
+    const { box } = mount({
+      threadId: "th_r",
+      initialMessages: [
+        { id: "u1", role: "user", content: [{ type: "text", text: "hi" }], createdAt: "", turn: "u1" },
+        { id: "ma", role: "assistant", content: [{ type: "text", text: "Hel" }], createdAt: "", turn: "u1" },
+      ],
+      cursor: { runId: "run_a", seq: 2 },
+    });
+    await settle();
+    expect(box.api.runs).toEqual([]);
+    await act(async () => {
+      tail.push({ seq: 3, event: { type: "text-delta", messageId: "ma", delta: "lo" } });
+    });
+    await settle();
+    expect(shape(box.api.runs)).toEqual([{ runId: "run_a", turn: "u1", status: "streaming" }]);
+    await act(async () => {
+      tail.push(
+        { seq: 4, event: { type: "message-end", messageId: "ma", finishReason: "stop" } },
+        { seq: 5, event: { type: "run-end", runId: "run_a", finishReason: "stop" } },
+      );
+      tail.close();
+    });
+    await settle();
+    expect(box.api.runs).toEqual([]);
+  });
+
+  test("answering two turns' cards in one go shows one reply", async () => {
+    const { box } = mount({ threadId: "th_r", attach: false });
+    const ask = (toolCallId: string, turn: string) => ({
+      toolCallId,
+      name: "publish",
+      input: {},
+      kind: "approval" as const,
+      signature: `sig_${toolCallId}`,
+      turn,
+    });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        start("run_a"),
+        { seq: 1, event: { type: "awaiting-input", runId: "run_a", pending: [ask("tc_a", "turn_a"), ask("tc_b", "turn_b")] } },
+        { seq: 2, event: { type: "run-end", runId: "run_a", finishReason: "awaiting-input" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("publish");
+    });
+    expect(shape(box.api.runs)).toEqual([
+      { turn: "turn_a", status: "awaiting-input" },
+      { turn: "turn_b", status: "awaiting-input" },
+    ]);
+    const answer = controlled();
+    // Held open: the cards being answered are still in `pending` until the
+    // server answers, which is when they would show as waiting turns too.
+    let release!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (release = resolve)));
+    let done!: Promise<void>;
+    await act(async () => {
+      done = Promise.all(box.api.pending.map((call) => box.api.approve(call.toolCallId, true))).then(() => {});
+      await Promise.resolve();
+    });
+    await settle();
+    expect(shape(box.api.runs)).toEqual([{ status: "submitted" }]);
+    await act(async () => {
+      release(answer.response);
+      answer.push(start("run_a2"), ...finish("run_a2", "ma2"));
+      answer.close();
+      await done;
+    });
+  });
+});
+
+describe("questions of parallel turns (#1355)", () => {
+  /** A run of turn `turn` that ends asking one approval, `toolCallId`. */
+  const parks = (runId: string, messageId: string, turn: string, toolCallId: string): AgentStreamFrame[] => [
+    { seq: 0, event: { type: "run-start", runId, threadId: "th_9" } },
+    { seq: 1, event: { type: "message-start", messageId, role: "assistant" } },
+    {
+      seq: 2,
+      event: {
+        type: "awaiting-input",
+        runId,
+        pending: [{ toolCallId, name: "publish", input: {}, kind: "approval", signature: `sig_${toolCallId}`, turn }],
+      },
+    },
+    { seq: 3, event: { type: "message-end", messageId, finishReason: "awaiting-input" } },
+    { seq: 4, event: { type: "run-end", runId, finishReason: "awaiting-input" } },
+  ];
+
+  async function twoParked(params: Record<string, unknown> = { ifBusy: "parallel" }) {
+    const mounted = mount({ threadId: "th_9", attach: false, ...params });
+    fetchMock.mockResolvedValueOnce(streamed(parks("run_a", "ma", "turn_a", "tc_a")));
+    await act(async () => {
+      await mounted.box.api.sendMessage("publish home");
+    });
+    fetchMock.mockResolvedValueOnce(streamed(parks("run_b", "mb", "turn_b", "tc_b")));
+    await act(async () => {
+      // Parallel on the hook, or for this message alone.
+      await mounted.box.api.sendMessage("publish about", { ifBusy: "parallel" });
+    });
+    return mounted;
+  }
+
+  test("a second turn asking leaves the first turn's card, and a new parallel message keeps both", async () => {
+    const { box } = await twoParked();
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a", "tc_b"]);
+    await act(async () => {
+      await box.api.sendMessage("and the footer");
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a", "tc_b"]);
+  });
+
+  test("answering B marks and settles only B's card; A's stays to be answered", async () => {
+    const { box } = await twoParked();
+    let respond!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (respond = resolve)));
+    let done!: Promise<void>;
+    await act(async () => {
+      done = box.api.approve("tc_b", true);
+    });
+    expect(box.api.pending.map((call) => [call.toolCallId, call.answering])).toEqual([
+      ["tc_a", undefined],
+      ["tc_b", true],
+    ]);
+    await act(async () => {
+      respond(streamed(ANSWER));
+      await done;
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a"]);
+    expect(box.api.status).toBe("awaiting-input");
+
+    // A's card answers as usual.
+    await act(async () => {
+      await box.api.approve("tc_a", true);
+    });
+    expect(bodyOf(3).turn).toEqual({ toolResults: [{ toolCallId: "tc_a", signature: "sig_tc_a", approve: true }] });
+    expect(box.api.pending).toEqual([]);
+  });
+
+  test("answering A while B's answer streams runs beside it: B is not cut or stopped", async () => {
+    // A default chat: no `ifBusy` on the hook.
+    const { box } = await twoParked({});
+    const b = controlled();
+    fetchMock.mockResolvedValueOnce(b.response);
+    let bDone!: Promise<void>;
+    await act(async () => {
+      bDone = box.api.approve("tc_b", true);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      b.push({ seq: 0, event: { type: "run-start", runId: "run_b2", threadId: "th_9" } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const before = calls().length;
+
+    await act(async () => {
+      await box.api.approve("tc_a", true);
+    });
+    const sent = calls().slice(before);
+    expect(sent.map(([url]) => url).some((url) => String(url).includes("stop"))).toBe(false);
+    expect(rawBodyOf(before).ifBusy).toBe("parallel");
+    expect(rawBodyOf(before).turn.toolResults.map((result: { toolCallId: string }) => result.toolCallId)).toEqual(["tc_a"]);
+
+    // B's stream is still read to its end.
+    await act(async () => {
+      b.push(
+        { seq: 1, event: { type: "message-start", messageId: "mb2", role: "assistant" } },
+        { seq: 2, event: { type: "text-delta", messageId: "mb2", delta: "about is live" } },
+        { seq: 3, event: { type: "message-end", messageId: "mb2", finishReason: "stop" } },
+        { seq: 4, event: { type: "run-end", runId: "run_b2", finishReason: "stop" } },
+      );
+      b.close();
+      await bDone;
+    });
+    expect(box.api.messages.some((message) => message.id === "mb2")).toBe(true);
+    expect(box.api.pending).toEqual([]);
+  });
+
+  test.each([
+    ["refuses them", true, []],
+    ["runs the message beside them (busyPolicy)", false, ["tc_a", "tc_b"]],
+  ])("a plain new message: the cards stay until the server %s", async (_name, refuses, left) => {
+    const { box } = await twoParked({});
+    const refusal = (seq: number, toolCallId: string): AgentStreamFrame => ({
+      seq,
+      event: {
+        type: "tool-result",
+        messageId: toolCallId === "tc_a" ? "ma" : "mb",
+        part: { type: "tool-result", toolCallId, name: "publish", status: "denied", cause: "refused" },
+      },
+    });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_c", threadId: "th_9" } },
+        ...(refuses ? [refusal(1, "tc_a"), refusal(2, "tc_b")] : []),
+        { seq: 3, event: { type: "message-start", messageId: "mc", role: "assistant" } },
+        { seq: 4, event: { type: "text-delta", messageId: "mc", delta: "Footer done." } },
+        { seq: 5, event: { type: "message-end", messageId: "mc", finishReason: "stop" } },
+        { seq: 6, event: { type: "run-end", runId: "run_c", finishReason: "stop" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("and the footer");
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(left);
+  });
+
+  test("a single-turn chat: a new message drops the card at once and says submitted, as before", async () => {
+    const { box } = mount({ threadId: "th_9", attach: false });
+    fetchMock.mockResolvedValueOnce(streamed(parks("run_a", "ma", "turn_a", "tc_a")));
+    await act(async () => {
+      await box.api.sendMessage("publish home");
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a"]);
+    const run = controlled();
+    fetchMock.mockResolvedValueOnce(run.response);
+    let sent!: Promise<void>;
+    await act(async () => {
+      sent = box.api.sendMessage("something else");
+      await Promise.resolve();
+    });
+    expect(box.api.pending).toEqual([]);
+    expect(box.api.status).toBe("submitted");
+    await act(async () => {
+      run.push(
+        { seq: 0, event: { type: "run-start", runId: "run_c", threadId: "th_9" } },
+        {
+          seq: 1,
+          event: {
+            type: "tool-result",
+            messageId: "ma",
+            part: { type: "tool-result", toolCallId: "tc_a", name: "publish", status: "denied", cause: "refused" },
+          },
+        },
+        { seq: 2, event: { type: "run-end", runId: "run_c", finishReason: "stop" } },
+      );
+      run.close();
+      await sent;
+    });
+    expect(box.api.pending).toEqual([]);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("answering A while the chat is attached to B's run cuts nothing and stops nothing", async () => {
+    const { box } = await twoParked({});
+    // B answered elsewhere (another tab): this chat attaches to its run.
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => run.abort());
+      return run.response;
+    });
+    let attached!: Promise<boolean>;
+    await act(async () => {
+      attached = box.api.reattach();
+    });
+    await act(async () => {
+      run.push({ seq: 0, event: { type: "run-start", runId: "run_b2", threadId: "th_9" } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const before = calls().length;
+    await act(async () => {
+      await box.api.approve("tc_a", true);
+    });
+    expect(calls().slice(before).some(([url]) => String(url).includes("stop"))).toBe(false);
+    expect(rawBodyOf(before).ifBusy).toBe("parallel");
+    await act(async () => {
+      run.push({ seq: 1, event: { type: "run-end", runId: "run_b2", finishReason: "stop" } });
+      run.close();
+      expect(await attached).toBe(true);
+    });
+  });
+
+  test("a card being answered when a new message goes out does not come back", async () => {
+    const { box } = await twoParked({});
+    let respond!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (respond = resolve)));
+    let answered!: Promise<void>;
+    await act(async () => {
+      answered = box.api.approve("tc_a", true);
+      await Promise.resolve();
+    });
+    // The message's run leaves the questions open (a busyPolicy ran it beside them).
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_c", threadId: "th_9" } },
+        { seq: 1, event: { type: "run-end", runId: "run_c", finishReason: "stop" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("and the footer");
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_b"]);
+    await act(async () => {
+      respond(streamed(ANSWER));
+      await answered.catch(() => {});
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).not.toContain("tc_a");
+  });
+
+  test("restored cards come back ahead of the ones the message's own run asked", async () => {
+    const { box } = await twoParked({});
+    fetchMock.mockResolvedValueOnce(streamed(parks("run_c", "mc", "turn_c", "tc_c")));
+    await act(async () => {
+      await box.api.sendMessage("publish the footer");
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a", "tc_b", "tc_c"]);
+  });
+
+  test("an error frame keeps other turns' cards", async () => {
+    const { box } = await twoParked();
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_b2", threadId: "th_9" } },
+        { seq: 1, event: { type: "error", error: { code: "provider_error", message: "down", retryable: true } } },
+        { seq: 2, event: { type: "run-end", runId: "run_b2", finishReason: "error" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.approve("tc_b", true);
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_a"]);
+  });
+
+  test("a stateless chat posts the questions it still holds on the message that asked them (#1380)", async () => {
+    const { box } = mount({ attach: false });
+    const call = (toolCallId: string, page: number) => ({
+      type: "tool-call" as const,
+      toolCallId,
+      name: "publish",
+      input: { page },
+    });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_s" } },
+        {
+          seq: 1,
+          event: { type: "message-start", messageId: "ms", role: "assistant", turn: "u1" },
+        },
+        { seq: 2, event: { type: "tool-call", messageId: "ms", part: call("q1", 1) } },
+        { seq: 3, event: { type: "tool-call", messageId: "ms", part: call("q2", 2) } },
+        {
+          seq: 4,
+          event: {
+            type: "awaiting-input",
+            runId: "run_s",
+            pending: [
+              {
+                toolCallId: "q1",
+                name: "publish",
+                input: { page: 1 },
+                kind: "approval",
+                signature: "s1",
+                turn: "u1",
+              },
+              {
+                toolCallId: "q2",
+                name: "publish",
+                input: { page: 2 },
+                kind: "approval",
+                signature: "s2",
+                turn: "u1",
+              },
+            ],
+          },
+        },
+        { seq: 5, event: { type: "message-end", messageId: "ms", finishReason: "awaiting-input" } },
+        { seq: 6, event: { type: "run-end", runId: "run_s", finishReason: "awaiting-input" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("publish both");
+    });
+    fetchMock.mockResolvedValueOnce(streamed(ANSWER));
+    await act(async () => {
+      await box.api.approve("q1", true);
+    });
+    const posted = rawBodyOf(1).messages as AgentMessage[];
+    const asking = posted.find((message) => message.id === "ms")!;
+    expect(asking.pending?.map((held) => [held.toolCallId, held.signature])).toEqual([
+      ["q1", "s1"],
+      ["q2", "s2"],
+    ]);
+    expect(asking.pending?.some((held) => "answering" in held)).toBe(false);
+    expect(box.api.pending.map((held) => held.toolCallId)).toEqual(["q2"]);
+  });
+
+  test("calls without a turn settle one at a time too (#1380)", async () => {
+    const { box } = mount({ attach: false });
+    fetchMock.mockResolvedValueOnce(streamed(ASKING));
+    await act(async () => {
+      await box.api.sendMessage("refund me");
+    });
+    await act(async () => {
+      await box.api.approve("tc_1", true);
+    });
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
+  });
+});
+
 describe("answering a pending call (#1106)", () => {
   async function asked(params: Record<string, unknown> = {}) {
     fetchMock.mockResolvedValueOnce(streamed(ASKING));
@@ -491,11 +1034,11 @@ describe("answering a pending call (#1106)", () => {
       done = box.api.approve("tc_1", true);
     });
 
-    // Both: the turn resolves every held call, so neither card should take a
-    // second answer while this one flies.
+    // Only the answered card: the reply's other question stays open on the
+    // server, and answerable here (#1380).
     expect(box.api.pending.map((call) => [call.toolCallId, call.answering])).toEqual([
       ["tc_1", true],
-      ["tc_2", true],
+      ["tc_2", undefined],
     ]);
     expect(box.api.status).toBe("awaiting-input");
 
@@ -504,8 +1047,8 @@ describe("answering a pending call (#1106)", () => {
       await done;
     });
 
-    expect(box.api.pending).toEqual([]);
-    expect(box.api.status).toBe("idle");
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
+    expect(box.api.status).toBe("awaiting-input");
   });
 
   test("a failed answer leaves the call pending with the error, and a second answer succeeds", async () => {
@@ -532,9 +1075,9 @@ describe("answering a pending call (#1106)", () => {
     expect(bodyOf(2).turn.toolResults).toEqual([
       { toolCallId: "tc_1", signature: "sig_one", approve: true },
     ]);
-    expect(box.api.pending).toEqual([]);
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
     expect(box.api.error).toBeNull();
-    expect(box.api.status).toBe("idle");
+    expect(box.api.status).toBe("awaiting-input");
   });
 
   test("a 5xx answer restores the call the same way", async () => {
@@ -581,10 +1124,7 @@ describe("answering a pending call (#1106)", () => {
     expect(box.api.error).toBeNull();
   });
 
-  test("answering another held call, or the same one differently, while one flies is reported, not sent", async () => {
-    // The turn in flight settles every held call, and the server refuses the
-    // ones it leaves out, so resolving as if `tc_2` had been approved would
-    // be a lie.
+  test("the same call answered differently while it flies is reported, not sent", async () => {
     let respond!: (response: Response) => void;
     const onError = vi.fn();
     const { box } = await asked({ onError });
@@ -595,31 +1135,340 @@ describe("answering a pending call (#1106)", () => {
       first = box.api.approve("tc_1", true);
     });
     await act(async () => {
-      await box.api.approve("tc_2", true);
+      await box.api.approve("tc_1", false);
     });
 
     expect(calls()).toHaveLength(2);
     expect(onError).toHaveBeenCalledTimes(1);
     expect(box.api.error).toMatchObject({
       code: "invalid_tool_result",
-      toolCallId: "tc_2",
+      toolCallId: "tc_1",
       retryable: false,
     });
-
-    await act(async () => {
-      await box.api.approve("tc_1", false);
-    });
-
-    expect(calls()).toHaveLength(2);
-    expect(onError).toHaveBeenCalledTimes(2);
-    expect(box.api.error).toMatchObject({ code: "invalid_tool_result", toolCallId: "tc_1" });
 
     await act(async () => {
       respond(streamed(ANSWER));
       await first;
     });
     expect(calls()).toHaveLength(2);
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
+  });
+
+  test("the reply's other question answered while the first answer streams waits for it, then goes out, cutting nothing (#1380)", async () => {
+    const onError = vi.fn();
+    const { box } = await asked({ onError });
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async () => run.response);
+    fetchMock.mockResolvedValueOnce(streamed(BOTH_DONE));
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    await act(async () => {
+      first = box.api.approve("tc_1", true);
+    });
+    await act(async () => {
+      run.push(ANSWER[0]!, ANSWER[1]!);
+    });
+    await act(async () => {
+      second = box.api.approve("tc_2", true);
+    });
+
+    // Held: nothing posted, no stop, the card marked as being answered.
+    expect(calls()).toHaveLength(2);
+    expect(box.api.pending.map((call) => [call.toolCallId, call.answering])).toEqual([
+      ["tc_2", true],
+    ]);
+
+    await act(async () => {
+      run.push(ANSWER[2]!, ANSWER[3]!, ANSWER[4]!);
+      run.close();
+      await first;
+      await second;
+    });
+    expect(onError).not.toHaveBeenCalled();
+    expect(calls()).toHaveLength(3);
+    expect(
+      calls()
+        .map(([url]) => String(url))
+        .some((url) => url.includes("/stop")),
+    ).toBe(false);
+    expect(bodyOf(2).turn.toolResults).toEqual([
+      { toolCallId: "tc_2", signature: "sig_two", approve: true },
+    ]);
+    expect(rawBodyOf(2).ifBusy).toBeUndefined();
     expect(box.api.pending).toEqual([]);
+    expect(box.api.error).toBeNull();
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("a card waiting to go out stays marked when the running reply restates it with a new question, and a second click sends nothing (#1380)", async () => {
+    const onError = vi.fn();
+    const { box } = await asked({ onError });
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async () => run.response);
+    fetchMock.mockResolvedValueOnce(streamed(BOTH_DONE));
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    await act(async () => {
+      first = box.api.approve("tc_1", true);
+    });
+    await act(async () => {
+      run.push(ANSWER[0]!, ANSWER[1]!);
+    });
+    await act(async () => {
+      second = box.api.approve("tc_2", true);
+    });
+    // The first answer's reply asks something new; its frame lists every open
+    // question of the turn, the held card included.
+    const q3 = {
+      toolCallId: "tc_3",
+      name: "charge",
+      input: { amountCents: 100 },
+      kind: "approval",
+      signature: "sig_three",
+    };
+    const held = {
+      toolCallId: "tc_2",
+      name: "refundOrder",
+      input: { orderId: "o_1" },
+      kind: "approval",
+      signature: "sig_two",
+    };
+    await act(async () => {
+      run.push(
+        { seq: 2, event: { type: "message-end", messageId: "m1", finishReason: "awaiting-input" } },
+        {
+          seq: 3,
+          event: {
+            type: "awaiting-input",
+            runId: "run_1",
+            pending: [held, q3] as PendingToolCall[],
+          },
+        },
+      );
+    });
+    expect(box.api.pending.map((call) => [call.toolCallId, call.answering])).toEqual([
+      ["tc_2", true],
+      ["tc_3", undefined],
+    ]);
+
+    // A second click on the held card is the answer already waiting.
+    let again!: Promise<void>;
+    await act(async () => {
+      again = box.api.approve("tc_2", true);
+    });
+    expect(calls()).toHaveLength(2);
+
+    await act(async () => {
+      run.push({
+        seq: 4,
+        event: { type: "run-end", runId: "run_1", finishReason: "awaiting-input" },
+      });
+      run.close();
+      await Promise.all([first, second, again]);
+    });
+    expect(onError).not.toHaveBeenCalled();
+    expect(calls()).toHaveLength(3);
+    expect(bodyOf(2).turn.toolResults).toEqual([
+      { toolCallId: "tc_2", signature: "sig_two", approve: true },
+    ]);
+    expect(box.api.pending.map((call) => [call.toolCallId, call.answering])).toEqual([
+      ["tc_3", undefined],
+    ]);
+  });
+
+  test("a stateless chat holds the second answer until the first lands, then posts the first one's result (#1380)", async () => {
+    const onError = vi.fn();
+    const { box } = mount({ attach: false, onError });
+    const call = (toolCallId: string, page: number) => ({
+      type: "tool-call" as const,
+      toolCallId,
+      name: "publish",
+      input: { page },
+    });
+    const question = (toolCallId: string, signature: string, page: number) => ({
+      toolCallId,
+      name: "publish",
+      input: { page },
+      kind: "approval" as const,
+      signature,
+      turn: "u1",
+    });
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_s" } },
+        {
+          seq: 1,
+          event: { type: "message-start", messageId: "ms", role: "assistant", turn: "u1" },
+        },
+        { seq: 2, event: { type: "tool-call", messageId: "ms", part: call("q1", 1) } },
+        { seq: 3, event: { type: "tool-call", messageId: "ms", part: call("q2", 2) } },
+        {
+          seq: 4,
+          event: {
+            type: "awaiting-input",
+            runId: "run_s",
+            pending: [question("q1", "s1", 1), question("q2", "s2", 2)],
+          },
+        },
+        { seq: 5, event: { type: "message-end", messageId: "ms", finishReason: "awaiting-input" } },
+        { seq: 6, event: { type: "run-end", runId: "run_s", finishReason: "awaiting-input" } },
+      ]),
+    );
+    await act(async () => {
+      await box.api.sendMessage("publish both");
+    });
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async () => run.response);
+    fetchMock.mockResolvedValueOnce(streamed(BOTH_DONE));
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    await act(async () => {
+      first = box.api.approve("q1", true);
+    });
+    await act(async () => {
+      run.push({ seq: 0, event: { type: "run-start", runId: "run_t" } });
+    });
+    await act(async () => {
+      second = box.api.approve("q2", true);
+    });
+    expect(calls()).toHaveLength(2);
+
+    await act(async () => {
+      run.push(
+        {
+          seq: 1,
+          event: {
+            type: "tool-result",
+            messageId: "ms",
+            part: {
+              type: "tool-result",
+              toolCallId: "q1",
+              name: "publish",
+              status: "ok",
+              output: "up",
+            },
+          },
+        },
+        {
+          seq: 2,
+          event: { type: "message-start", messageId: "mt", role: "assistant", turn: "u1" },
+        },
+        { seq: 3, event: { type: "text-delta", messageId: "mt", delta: "Page 1 is up." } },
+        { seq: 4, event: { type: "message-end", messageId: "mt", finishReason: "stop" } },
+        {
+          seq: 5,
+          event: { type: "awaiting-input", runId: "run_t", pending: [question("q2", "s2", 2)] },
+        },
+        { seq: 6, event: { type: "run-end", runId: "run_t", finishReason: "awaiting-input" } },
+      );
+      run.close();
+      await Promise.all([first, second]);
+    });
+    expect(onError).not.toHaveBeenCalled();
+    expect(calls()).toHaveLength(3);
+    expect(
+      calls()
+        .map(([url]) => String(url))
+        .some((url) => url.includes("/stop")),
+    ).toBe(false);
+    const posted = rawBodyOf(2).messages as AgentMessage[];
+    const asking = posted.find((message) => message.id === "ms")!;
+    expect(
+      asking.content.some((part) => part.type === "tool-result" && part.toolCallId === "q1"),
+    ).toBe(true);
+    expect(asking.pending?.map((held) => held.toolCallId)).toEqual(["q2"]);
+    expect(bodyOf(2).turn.toolResults).toEqual([
+      { toolCallId: "q2", signature: "s2", approve: true },
+    ]);
+  });
+
+  test("a new message while a second answer is held settles the card, and the held answer is never sent (#1380)", async () => {
+    const onError = vi.fn();
+    const { box } = await asked({ onError });
+    const run = controlled();
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes("/stop"))
+        return new Response(JSON.stringify({ stopped: true }), { status: 200 });
+      const body = JSON.parse(String(init?.body));
+      if (body.turn?.toolResults?.[0]?.toolCallId === "tc_1") return run.response;
+      return streamed(BOTH_DONE);
+    });
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    await act(async () => {
+      first = box.api.approve("tc_1", true);
+    });
+    await act(async () => {
+      run.push(ANSWER[0]!, ANSWER[1]!);
+    });
+    await act(async () => {
+      second = box.api.approve("tc_2", true);
+    });
+    await act(async () => {
+      await box.api.sendMessage("never mind");
+      run.abort();
+      await Promise.allSettled([first, second]);
+    });
+
+    const answered = calls().filter(([, init]) => {
+      try {
+        return Boolean(
+          JSON.parse(String(init?.body)).turn?.toolResults?.some(
+            (r: { toolCallId: string }) => r.toolCallId === "tc_2",
+          ),
+        );
+      } catch {
+        return false;
+      }
+    });
+    expect(answered).toHaveLength(0);
+    expect(calls().filter(([, init]) => String(init?.body).includes('"never mind"'))).toHaveLength(
+      1,
+    );
+    expect(onError).not.toHaveBeenCalled();
+    expect(box.api.error).toBeNull();
+    expect(box.api.pending).toEqual([]);
+  });
+
+  test("stop() while a second answer is held puts it back and never sends it (#1380)", async () => {
+    const { box } = await asked();
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async () => run.response);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ stopped: true }), { status: 200 }));
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    await act(async () => {
+      first = box.api.approve("tc_1", true);
+    });
+    await act(async () => {
+      run.push(ANSWER[0]!, ANSWER[1]!);
+    });
+    await act(async () => {
+      second = box.api.approve("tc_2", true);
+    });
+    await act(async () => {
+      await box.api.stop();
+      run.abort();
+      await Promise.allSettled([first, second]);
+    });
+    const answers = calls().filter(([, init]) => {
+      try {
+        return Boolean(
+          JSON.parse(String(init?.body)).turn?.toolResults?.some(
+            (r: { toolCallId: string }) => r.toolCallId === "tc_2",
+          ),
+        );
+      } catch {
+        return false;
+      }
+    });
+    expect(answers).toHaveLength(0);
+    expect(box.api.pending.find((call) => call.toolCallId === "tc_2")?.answering).toBeUndefined();
   });
 
   test("retrying from inside onError sends the answer again", async () => {
@@ -646,9 +1495,9 @@ describe("answering a pending call (#1106)", () => {
     expect(bodyOf(2).turn.toolResults).toEqual([
       { toolCallId: "tc_1", signature: "sig_one", approve: true },
     ]);
-    expect(mounted.box.api.pending).toEqual([]);
+    expect(mounted.box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
     expect(mounted.box.api.error).toBeNull();
-    expect(mounted.box.api.status).toBe("idle");
+    expect(mounted.box.api.status).toBe("awaiting-input");
   });
 
   test("a 2xx whose stream then fails does not restore the calls", async () => {
@@ -671,9 +1520,11 @@ describe("answering a pending call (#1106)", () => {
       await done;
     });
 
-    expect(box.api.pending).toEqual([]);
+    // The reply's other question is still open (#1380), so the status is
+    // `awaiting-input`, with the failure in `error`.
+    expect(box.api.pending.map((call) => call.toolCallId)).toEqual(["tc_2"]);
     expect(box.api.error).toMatchObject({ code: "unknown", message: "network lost" });
-    expect(box.api.status).toBe("error");
+    expect(box.api.status).toBe("awaiting-input");
   });
 
   test("the same call answered twice in one tick is sent once", async () => {
@@ -3123,7 +3974,7 @@ describe("reattach()", () => {
   });
 
   test("a thread re-read halfway is rebuilt by the replay, not appended to", async () => {
-    // What kyte does: its change feed re-reads the thread, the chat shows it,
+    // What an app does: its change feed re-reads the thread, the chat shows it,
     // then attaches. The read holds the answer so far as a stored copy.
     const { box } = mount({ threadId: "th_9", attach: false });
     act(() => {
@@ -3587,7 +4438,7 @@ describe("watch (#1180)", () => {
     expect(box.api.status).toBe("idle");
   });
 
-  test("a run announced mid-stream is attached once the chat's own run ends", async () => {
+  test("a run announced mid-stream is attached beside the chat's own run", async () => {
     const watch = controlled();
     const own = controlled();
     fetchMock.mockImplementation(async (url: string) => {
@@ -3607,8 +4458,13 @@ describe("watch (#1180)", () => {
       watch.push({ seq: 1, event: { type: "run-start", runId: "run_1", threadId: "th_9" } });
       watch.push({ seq: 2, event: { type: "run-start", runId: "run_9", threadId: "th_9" } });
       await settle();
+      await settle();
     });
-    expect(urls()).not.toContain("/api/chat/attach");
+    // Runs on one thread can go at once, so the other one streams in now,
+    // beside this chat's own, which is not attached again.
+    expect(urls().filter((url) => url === "/api/chat/attach")).toHaveLength(1);
+    expect(box.api.status).toBe("streaming");
+    expect(box.api.runId).toBe("run_1");
 
     await act(async () => {
       own.push(...ANSWER.slice(2));
@@ -3616,9 +4472,11 @@ describe("watch (#1180)", () => {
       await new Promise((resolve) => setTimeout(resolve, 250));
     });
     expect(urls().filter((url) => url === "/api/chat/attach")).toHaveLength(1);
-    expect(box.api.messages.at(-1)!.content).toEqual([
+    expect(box.api.messages.map((message) => message.content)).toContainEqual([
       { type: "text", text: "The export is ready." },
     ]);
+    expect(box.api.messages.every((message) => message.role === "user" || message.finishReason)).toBe(true);
+    expect(box.api.status).toBe("idle");
   });
 
   test("does not attach again to the run it started itself", async () => {
@@ -3696,5 +4554,217 @@ describe("event messages (#1181)", () => {
     cleanup();
     const restored = mount({ threadId: "th_9", attach: false, initialMessages: [eventMessage] });
     expect(restored.box.api.messages[0]!.event?.name).toBe("job-settled");
+  });
+});
+
+describe("ifBusy: messages sent while a reply streams", () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const urls = () => calls().map((c) => c[0]);
+  const SECOND: AgentStreamFrame[] = [
+    { seq: 0, event: { type: "run-start", runId: "run_2", threadId: "th_9" } },
+    { seq: 1, event: { type: "message-start", messageId: "m2", role: "assistant" } },
+    { seq: 2, event: { type: "text-delta", messageId: "m2", delta: "It is noon." } },
+    { seq: 3, event: { type: "message-end", messageId: "m2", finishReason: "stop" } },
+    { seq: 4, event: { type: "run-end", runId: "run_2", finishReason: "stop" } },
+  ];
+  const text = (message: { content: { type: string; text?: string }[] }) =>
+    message.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+
+  test("parallel: two replies stream at once, each into its own message, each finishing on its own", async () => {
+    const first = controlled();
+    const second = controlled();
+    const answered: string[] = [];
+    let posts = 0;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/chat") return posts++ === 0 ? first.response : second.response;
+      throw new Error(`unexpected ${url}`);
+    });
+    const { box } = mount({
+      threadId: "th_9",
+      attach: false,
+      ifBusy: "parallel",
+      onFinish: (message: { id: string }) => answered.push(message.id),
+    });
+
+    await act(async () => {
+      void box.api.sendMessage("write the hero");
+      await settle();
+      first.push(ANSWER[0]!, ANSWER[1]!);
+      await settle();
+    });
+    await act(async () => {
+      void box.api.sendMessage("what time is it");
+      await settle();
+      second.push(SECOND[0]!, SECOND[1]!, SECOND[2]!);
+      await settle();
+    });
+    // Nothing was cut: no stop, and the first reply is still streaming.
+    expect(urls()).toEqual(["/api/chat", "/api/chat"]);
+    expect(rawBodyOf(1).ifBusy).toBe("parallel");
+    expect(box.api.status).toBe("streaming");
+    expect(box.api.runId).toBe("run_1");
+
+    // The second finishes first; the first is still going.
+    await act(async () => {
+      second.push(SECOND[3]!, SECOND[4]!);
+      second.close();
+      await settle();
+    });
+    expect(answered).toEqual(["m2"]);
+    expect(box.api.status).toBe("streaming");
+    expect(box.api.messages.find((m) => m.id === "m1")!.finishReason).toBeUndefined();
+
+    await act(async () => {
+      first.push(ANSWER[2]!, ANSWER[3]!, ANSWER[4]!);
+      first.close();
+      await settle();
+    });
+    expect(answered).toEqual(["m2", "m1"]);
+    expect(box.api.status).toBe("idle");
+    expect(box.api.messages.map((m) => [m.role, text(m)])).toEqual([
+      ["user", "write the hero"],
+      ["assistant", "Hi there."],
+      ["user", "what time is it"],
+      ["assistant", "It is noon."],
+    ]);
+    expect(box.api.messages.every((m) => m.role === "user" || m.finishReason === "stop")).toBe(true);
+  });
+
+  test("join: the reply keeps streaming, takes the message, and is not shown twice", async () => {
+    const first = controlled();
+    let posts = 0;
+    // The join's answer is the same run's stream, from its first frame.
+    const joinedFrames = (localId: string): AgentStreamFrame[] => [
+      ANSWER[0]!,
+      ANSWER[1]!,
+      ANSWER[2]!,
+      ANSWER[3]!,
+      {
+        seq: 5,
+        event: {
+          type: "message-id",
+          localId,
+          messageId: "msg_joined",
+          message: {
+            id: "msg_joined",
+            role: "user",
+            content: [{ type: "text", text: "and make it blue" }],
+            createdAt: new Date(0).toISOString(),
+            finishReason: "stop",
+            joined: "msg_hero",
+          },
+        },
+      },
+      { seq: 6, event: { type: "message-start", messageId: "m5", role: "assistant" } },
+      { seq: 7, event: { type: "text-delta", messageId: "m5", delta: "Blue it is." } },
+      { seq: 8, event: { type: "message-end", messageId: "m5", finishReason: "stop" } },
+      { seq: 9, event: { type: "run-end", runId: "run_1", finishReason: "stop" } },
+    ];
+    const joined = controlled();
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/chat") return posts++ === 0 ? first.response : joined.response;
+      throw new Error(`unexpected ${url}`);
+    });
+    const { box } = mount({ threadId: "th_9", attach: false });
+
+    await act(async () => {
+      void box.api.sendMessage("write the hero");
+      await settle();
+      first.push(ANSWER[0]!, ANSWER[1]!, ANSWER[2]!);
+      await settle();
+    });
+    await act(async () => {
+      // Per message, over the hook's default.
+      void box.api.sendMessage("and make it blue", { ifBusy: "join" });
+      await settle();
+    });
+    const localId = rawBodyOf(1).turn.localId as string;
+    expect(rawBodyOf(1).ifBusy).toBe("join");
+    expect(urls()).toEqual(["/api/chat", "/api/chat"]);
+
+    await act(async () => {
+      const frames = joinedFrames(localId);
+      // Both connections carry the run: the first goes on, the join's replays it.
+      joined.push(...frames);
+      first.push(...frames.slice(3));
+      joined.close();
+      first.close();
+      await settle();
+    });
+    expect(box.api.status).toBe("idle");
+    expect(box.api.messages.map((m) => [m.role, text(m)])).toEqual([
+      ["user", "write the hero"],
+      ["assistant", "Hi there."],
+      ["user", "and make it blue"],
+      ["assistant", "Blue it is."],
+    ]);
+    expect(box.api.messages[2]!.id).toBe("msg_joined");
+    expect(box.api.messages[2]!.localId).toBe(localId);
+  });
+
+  test("without ifBusy a send still cuts the reply off, as before", async () => {
+    const first = controlled();
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url === "/api/chat/stop") return new Response(JSON.stringify({ stopped: true }));
+      if (url === "/api/chat") {
+        if (calls().filter((c) => c[0] === "/api/chat").length === 1) {
+          init?.signal?.addEventListener("abort", () => first.abort());
+          return first.response;
+        }
+        return streamed(SECOND);
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const { box } = mount({ threadId: "th_9", attach: false });
+    await act(async () => {
+      void box.api.sendMessage("one");
+      await settle();
+      first.push(ANSWER[0]!, ANSWER[1]!);
+      await settle();
+    });
+    await act(async () => {
+      await box.api.sendMessage("two");
+    });
+    expect(urls()).toContain("/api/chat/stop");
+    expect(rawBodyOf(2).ifBusy).toBeUndefined();
+    expect(box.api.messages.find((m) => m.id === "m1")!.finishReason).toBe("aborted");
+  });
+
+  test("stop() stops every reply streaming", async () => {
+    const first = controlled();
+    const second = controlled();
+    let posts = 0;
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url === "/api/chat/stop") return new Response(JSON.stringify({ stopped: true }));
+      if (url === "/api/chat") {
+        const stream = posts++ === 0 ? first : second;
+        init?.signal?.addEventListener("abort", () => stream.abort());
+        return stream.response;
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const { box } = mount({ threadId: "th_9", attach: false, ifBusy: "parallel" });
+    await act(async () => {
+      void box.api.sendMessage("one");
+      await settle();
+      first.push(ANSWER[0]!, ANSWER[1]!);
+      void box.api.sendMessage("two");
+      await settle();
+      second.push(SECOND[0]!, SECOND[1]!);
+      await settle();
+    });
+    await act(async () => {
+      await box.api.stop();
+    });
+    const stops = calls()
+      .map((call, index) => [call[0], index] as const)
+      .filter(([url]) => url === "/api/chat/stop")
+      .map(([, index]) => rawBodyOf(index).runId);
+    expect(stops.sort()).toEqual(["run_1", "run_2"]);
+    expect(box.api.status).toBe("idle");
+    expect(box.api.messages.filter((m) => m.role === "assistant").map((m) => m.finishReason)).toEqual([
+      "aborted",
+      "aborted",
+    ]);
   });
 });

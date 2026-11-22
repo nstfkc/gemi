@@ -98,7 +98,7 @@ declare const provider: AgentProvider;
 declare const untyped: McpRegistry;
 const registry = untyped as McpRegistry<SiteMcpRouter>;
 
-/** A native tool that yields progress, as kyte's `buildPage` does. */
+/** A native tool that yields progress, as an app's `buildPage` does. */
 const buildPage = AgentTool.create({
   name: "buildPage",
   description: "Build the page",

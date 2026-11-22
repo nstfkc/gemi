@@ -326,6 +326,15 @@ describe("the queue registry", () => {
 });
 
 describe("the schedule", () => {
+  // These tests are about what gets scheduled, so they opt back in to the
+  // schedule a vitest process does not start by default (#1342).
+  beforeEach(() => {
+    vi.stubEnv("GEMI_SCHEDULE", "1");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   test("is filled from app/cron when the slice leaves `jobs` out", async () => {
     const root = project({
       "app/cron/DailyDigest.ts": cron("DailyDigest"),
@@ -453,7 +462,38 @@ describe("the schedule", () => {
     }
   });
 
-  test("without it, the same schedule does start", async () => {
+  test("under vitest the schedule does not start unless GEMI_SCHEDULE=1 (#1342)", async () => {
+    const root = project({
+      "app/cron/EveryMinute.ts": cron("EveryMinute", "* * * * *"),
+    });
+    vi.stubEnv("GEMI_SCHEDULE", undefined);
+    expect(process.env.VITEST).toBeTruthy();
+
+    const application = await boot(
+      { schedule: { jobsDir: join(root, "app/cron") } },
+      ScheduleServiceProvider,
+    );
+
+    expect(names(application.make(Scheduler).jobs)).toEqual(["EveryMinute"]);
+    expect(globalThis.__gemiCronJobs?.size ?? 0).toBe(0);
+  });
+
+  test("outside a test process it starts without asking", async () => {
+    const root = project({
+      "app/cron/EveryMinute.ts": cron("EveryMinute", "* * * * *"),
+    });
+    vi.stubEnv("GEMI_SCHEDULE", undefined);
+    vi.stubEnv("VITEST", undefined);
+
+    const application = await boot(
+      { schedule: { jobsDir: join(root, "app/cron") } },
+      ScheduleServiceProvider,
+    );
+
+    expect(globalThis.__gemiCronJobs?.size ?? 0).toBe(1);
+  });
+
+  test("with GEMI_SCHEDULE=1, the same schedule does start", async () => {
     const root = project({
       "app/cron/EveryMinute.ts": cron("EveryMinute", "* * * * *"),
     });

@@ -108,10 +108,17 @@ public class ChatSession(
   /** The request in flight and the id `stop()` names it by. */
   private var inFlight: InFlight? = null
 
-  private class InFlight(val id: Any, val job: Job, val clientRunId: String?)
+  /** `answers`: a turn of answers alone, which another answer waits behind (gemi #1380). */
+  private class InFlight(val id: Any, val job: Job, val clientRunId: String?, val answers: Boolean = false)
 
   /** Answers queued in one turn of the thread, sent as one turn. */
   private var queued: Pair<MutableList<ClientToolResult>, Job>? = null
+
+  /** Answers waiting to go out, by call: a second tap on one is that answer. */
+  private val holding = mutableMapOf<String, Job>()
+
+  /** Bumped by `stop()`, so an answer waiting behind another is not sent after it. */
+  private var stops = 0
 
   init {
     if (attach && threadId != null) attachToRun(threadId)
@@ -197,9 +204,17 @@ public class ChatSession(
           )
         )
       } else emptyList()
-    // The error belonged to the attempt being retried, and every pending call
-    // is settled by this turn — the server denies whatever it left out.
-    chat = chat.copy(messages = history + authored, error = null, pending = emptyList())
+    // The error belonged to the attempt being retried, and the pending calls
+    // this turn settles go: the server denies whatever it left out. Answers
+    // alone settle only the answered calls (gemi #1380); the reply's other
+    // questions and other turns' stay open, and if the server refuses them
+    // after all, their results take them off. A new message settles them
+    // all, as before.
+    val answered = turn.toolResults.map { it.toolCallId }.toSet()
+    val settled =
+      if (authored.isEmpty() && answered.isNotEmpty()) settledBy(chat.pending, answered)
+      else chat.pending.map { it.toolCallId }.toSet()
+    chat = chat.copy(messages = history + authored, error = null, pending = chat.pending.filter { it.toolCallId !in settled })
     phase = Phase.Submitted
     publish()
 
@@ -243,7 +258,8 @@ public class ChatSession(
           finish(id)
         }
       }
-    inFlight = InFlight(id, job, clientRunId)
+    val answersOnly = turn.toolResults.isNotEmpty() && turn.text.isNullOrEmpty() && turn.files.isEmpty()
+    inFlight = InFlight(id, job, clientRunId, answers = answersOnly)
     job.start()
     return job
   }
@@ -340,8 +356,10 @@ public class ChatSession(
   }
 
   private fun queue(result: ClientToolResult): Job {
+    holding[result.toolCallId]?.let { return it }
     queued?.let { (results, flush) ->
       results.add(result)
+      holding[result.toolCallId] = flush
       return flush
     }
     val results = mutableListOf(result)
@@ -351,8 +369,26 @@ public class ChatSession(
         // web hook's microtask lands.
         yield()
         queued = null
-        send(ClientTurn(toolResults = results))
+        // Another card of a reply whose earlier answer is still going out or
+        // streaming (gemi #1380) waits for it, then goes out: cutting that
+        // answer would stop its approved tool and close it as `stopped`.
+        val stopped = stops
+        try {
+          while (true) {
+            val ahead = inFlight?.takeIf { it.answers } ?: break
+            ahead.job.join()
+          }
+        } finally {
+          results.forEach { holding.remove(it.toolCallId) }
+        }
+        if (stops != stopped) return@launch
+        // Only the cards still held: a new message sent meanwhile settled the
+        // others, and answering them now would cut its reply for nothing.
+        val sending = results.filter { result -> chat.pending.any { it.toolCallId == result.toolCallId } }
+        if (sending.isEmpty()) return@launch
+        send(ClientTurn(toolResults = sending))
       }
+    holding[result.toolCallId] = flush
     queued = results to flush
     return flush
   }
@@ -370,6 +406,7 @@ public class ChatSession(
     val current = inFlight
     current?.job?.cancel()
     inFlight = null
+    stops++
     chat = chat.markAborted()
     phase = Phase.Idle
     publish()

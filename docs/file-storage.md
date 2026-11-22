@@ -127,6 +127,8 @@ interface ReadFileParams {
 
 Because `fetch` returns a `Response`, a controller can return it directly. See [Controllers](./controllers.md).
 
+On `FileSystemDriver`, `fetch` rejects with `FileNotFoundError` for a missing object, as `read` does, so the caller gets a 404 rather than a `200` whose body fails once it is read. The file is open from then on, so consume or cancel the body: returning the response from a route does that, but a response dropped unread holds the file open until it is garbage-collected.
+
 #### Cancelling a read
 
 Like `put`, `fetch` takes an optional second argument, `{ signal }`. Use it to give up on a slow backend, or to stop reading when the client disconnects:
@@ -220,7 +222,7 @@ It behaves the same on every built-in driver:
 - **Prefix, not folder.** Matching is plain string-prefix, as in S3: `pages/1` also matches `pages/10/…`. End the prefix with `/` to stay inside one folder. `""` lists everything.
 - **Recursive.** Objects in nested "folders" are included.
 - `S3Driver` follows `ListObjectsV2` continuation tokens (1000 keys a page). Zero-byte "folder marker" objects some tools create are listed like any other object.
-- `FileSystemDriver` walks its storage folder recursively, yields regular files only (symlinks are not followed), sorts by name, and refuses a prefix that resolves outside the folder (`../x`).
+- `FileSystemDriver` walks its storage folder recursively, yields regular files only (symbolic links are skipped, never followed), sorts by name, and refuses a prefix that resolves outside the folder (`../x`). A prefix whose directory is or passes through a link lists nothing. See [Symbolic links](#symbolic-links).
 - `AzureBlobDriver` uses `listBlobsFlat({ prefix })`.
 
 `options` takes `bucket` (ignored by the filesystem driver) and `signal`, which stops the listing between objects.
@@ -236,7 +238,7 @@ const removed = await Storage.deletePrefix(`pages/${page.publicId}/`);
 It refuses a prefix that would match the whole store: `""`, `"/"`, `"."`, `"./"`, whitespace, and on the filesystem driver anything that resolves to the storage folder itself (`"pages/../"`). Build prefixes from ids you have checked, and end them with `/`: `pages/${id}` with `id = "1"` also deletes `pages/10/…`.
 
 - `S3Driver` sends one `DeleteObjects` per listed page (up to 1000 keys), and rejects if S3 reports any key it could not delete. Objects already removed stay removed, and running it again finishes the job.
-- `FileSystemDriver` unlinks the files and then removes the directories that left empty inside the prefix.
+- `FileSystemDriver` unlinks the files and then removes the directories that left empty inside the prefix. Symbolic links inside the prefix are left in place, their targets are untouched, and a directory that still holds one is kept. A prefix whose directory is or passes through a link is refused.
 - `AzureBlobDriver` (and any custom driver, by default) deletes one object at a time with `delete()`.
 
 ### `list(folder)` (deprecated)
@@ -252,7 +254,7 @@ await Storage.delete("avatars/old.png");
 await Storage.delete({ name: "report.pdf", bucket: "exports" });
 ```
 
-Every built-in driver implements it: `FileSystemDriver` unlinks the file (and refuses a name that resolves outside its storage folder), `S3Driver` sends `DeleteObject`, and `AzureBlobDriver` deletes the blob.
+Every built-in driver implements it: `FileSystemDriver` unlinks the file (and refuses a name that resolves outside its storage folder or is or passes through a symbolic link), `S3Driver` sends `DeleteObject`, and `AzureBlobDriver` deletes the blob.
 
 ### `metadata(blob | file)`
 
@@ -324,6 +326,28 @@ export default defineFilesystemConfig({
 ```
 
 You can point it at a custom directory by passing a path to the constructor: `new FileSystemDriver("/var/data/uploads")`.
+
+#### Symbolic links
+
+The driver refuses object names that pass through a symbolic link below the storage folder. It does not follow links inside the store. That holds for a link at the object's own name and for a linked directory anywhere between the storage folder and the object. The link's target makes no difference: it may be inside the store, outside it, or missing.
+
+| Operation | A name that is or passes through a link |
+| --- | --- |
+| `read()`, `fetch()`, `size()` | Rejects with `FileNotFoundError`, as for a missing object. A stream route answers its usual 404. The object is opened with `O_NOFOLLOW`, so a link at the final name is refused even if it appeared after the check. |
+| `put()`, `putStream()` | Rejects with an error saying the name is or passes through a symbolic link. Nothing is written through the link, and neither the link nor its target changes. Both write a temporary file next to the target and rename it into place. They check the name before creating the temporary file and again just before the rename. |
+| `delete()` | Rejects with an error saying the name is or passes through a symbolic link. Neither the link nor its target is removed. |
+| `objects(prefix)` | Skips links found during the walk. A prefix whose directory is or passes through a link lists nothing. |
+| `deletePrefix(prefix)` | Deletes only the regular files that `objects()` lists. Links found during the walk stay, with their targets. A prefix whose directory is or passes through a link is refused. |
+
+The storage folder itself may be a link. The driver resolves it, and every link in its own path, to the real directory on each operation, and treats that directory as the store. This is the supported way to share uploads between releases: make `/srv/app/current/storage` a link to `/srv/app/shared/storage` and pass `new FileSystemDriver("/srv/app/current/storage")`. Links placed inside the store, such as `covers/latest.jpg` pointing at another image, are not served. Copy the object instead, or keep the alias in your own records. If the storage folder is a link to a directory that does not exist yet, writes fail with `The storage folder "…" is a symbolic link to a missing directory`. Create the shared directory before the first deploy.
+
+Missing parent directories are still created for a nested name. Writing `images/covers/front.jpg` into an empty store creates `images/covers/` first.
+
+The application is expected to own the storage tree. The driver checks for links when each operation starts. It does not guard against another process that adds, removes or replaces entries in the tree while an operation is running. A write never goes through a link at the final name, because the rename replaces whatever entry is there. `fetch()` and `size()` read from the file they opened with `O_NOFOLLOW`. `read()` checks the same way but hands Bun the path, which Bun opens again when it sends the body, so ranges keep a real `Content-Length`. A directory in the path that is replaced by a link after the check can still be followed by any operation. Do not give other users or untrusted processes write access to the storage folder.
+
+Hard links are treated as ordinary files. A hard link cannot point at a directory or cross filesystems, and it looks like any other regular file to the driver.
+
+These rules are verified on POSIX systems (Linux and macOS). On Windows, `lstat` reports NTFS junctions as symbolic links, so the same checks should apply to them, but that is not tested.
 
 ### `S3Driver` (S3 / S3-compatible)
 

@@ -1,12 +1,12 @@
 import { describe, expect, test } from "vitest";
 import { join } from "node:path";
-import type { AgentMessage, AgentStreamFrame, NestedRun } from "../types";
+import type { AgentMessage, AgentStreamFrame, NestedRun, PendingToolCall } from "../types";
 import { recordReducer } from "./conformance";
 import type { ChatState } from "./reducer";
 
 // Every call below is recorded into `__fixtures__/reducer.json`, which the
 // Swift and Kotlin clients replay — see `conformance.ts`.
-const { applyFrame, initialChatState, markAborted } = recordReducer(
+const { applyFrame, initialChatState, markAborted, settledBy } = recordReducer(
   join(import.meta.dirname, "__fixtures__/reducer.json"),
 );
 
@@ -1818,5 +1818,102 @@ describe("a run another client started (#778)", () => {
     const messages = [earlier, otherRun];
     const state = applyFrame(initialChatState({ messages }), RUN[0]!, NOW);
     expect(state.messages).toEqual(messages);
+  });
+});
+
+describe("turns side by side (#1344, #1355)", () => {
+  const call = (toolCallId: string, turn?: string): PendingToolCall => ({
+    toolCallId,
+    name: "publish",
+    input: {},
+    kind: "approval",
+    signature: `sig_${toolCallId}`,
+    ...(turn ? { turn } : {}),
+  });
+  const asking = (seq: number, runId: string, pending: PendingToolCall[]): AgentStreamFrame => ({
+    seq,
+    event: { type: "awaiting-input", runId, pending },
+  });
+
+  test("message-start stamps the message with its turn", () => {
+    const state = applyFrame(
+      initialChatState(),
+      { seq: 0, event: { type: "message-start", messageId: "ma", role: "assistant", turn: "turn_a" } },
+      NOW,
+    );
+    expect(state.messages).toEqual([{ id: "ma", role: "assistant", content: [], createdAt: NOW, turn: "turn_a" }]);
+  });
+
+  test("a turn asking keeps another turn's questions, and replaces its own", () => {
+    const parked = initialChatState({ pending: [call("tc_a", "turn_a"), call("tc_b", "turn_b")] });
+    const state = applyFrame(parked, asking(0, "run_b", [call("tc_b2", "turn_b")]), NOW);
+    expect(state.pending.map((p) => p.toolCallId)).toEqual(["tc_a", "tc_b2"]);
+  });
+
+  test("questions without a turn replace every held one, as before", () => {
+    const parked = initialChatState({ pending: [call("tc_a", "turn_a")] });
+    const state = applyFrame(parked, asking(0, "run_x", [call("tc_x")]), NOW);
+    expect(state.pending.map((p) => p.toolCallId)).toEqual(["tc_x"]);
+  });
+
+  test("an error keeps the questions that name their turn, and drops the rest", () => {
+    const parked = initialChatState({ pending: [call("tc_a", "turn_a"), call("tc_x")] });
+    const state = applyFrame(
+      parked,
+      { seq: 0, event: { type: "error", error: { code: "provider_error", message: "boom", retryable: true } } },
+      NOW,
+    );
+    expect(state.pending.map((p) => p.toolCallId)).toEqual(["tc_a"]);
+  });
+});
+
+describe("settledBy (#1355, #1380)", () => {
+  const call = (toolCallId: string, extra: Partial<PendingToolCall> = {}): PendingToolCall => ({
+    toolCallId,
+    name: "publish",
+    input: {},
+    kind: "approval",
+    signature: `sig_${toolCallId}`,
+    ...extra,
+  });
+  const asked = (id: string, turn: string | undefined, ...toolCallIds: string[]): AgentMessage => ({
+    id,
+    role: "assistant",
+    createdAt: NOW,
+    ...(turn ? { turn } : {}),
+    content: toolCallIds.map((toolCallId) => ({ type: "tool-call", toolCallId, name: "publish", input: {} })),
+  });
+  const settled = (_messages: AgentMessage[], pending: PendingToolCall[], ids: string[]) =>
+    [...settledBy(pending, new Set(ids))].sort();
+
+  test("only the answered call: the reply's other question stays open (#1380)", () => {
+    expect(settled([], [call("a1", { turn: "A" }), call("a2", { turn: "A" }), call("b1", { turn: "B" })], ["a1"])).toEqual([
+      "a1",
+    ]);
+  });
+
+  test("another turn's question stays open", () => {
+    const messages = [asked("ma", "A", "a1"), asked("mb", "B", "b1")];
+    expect(settled(messages, [call("a1"), call("b1")], ["b1"])).toEqual(["b1"]);
+  });
+
+  test("a nested call settles the other questions of its sub-agent run, and nothing else", () => {
+    const messages = [asked("ma", "A", "host_a", "a2"), asked("mb", "B", "b1")];
+    expect(
+      settled(
+        messages,
+        [
+          call("sub_1", { path: ["host_a"] }),
+          call("sub_2", { path: ["host_a"] }),
+          call("a2"),
+          call("b1"),
+        ],
+        ["sub_1"],
+      ),
+    ).toEqual(["sub_1", "sub_2"]);
+  });
+
+  test("calls without a turn (an older transcript) settle one at a time too", () => {
+    expect(settled([], [call("x"), call("y")], ["x"])).toEqual(["x"]);
   });
 });
