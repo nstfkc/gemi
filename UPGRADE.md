@@ -1,3 +1,13 @@
+# 0.237.1
+
+## SQLite transactions queue instead of failing at `BEGIN` (#1362)
+
+**Fix (patch version).** On SQLite, a `Model.transaction` or `DB.transaction` that started while another one was open on the same connection (another request in the process) failed with `SQLiteError: cannot start a transaction within a transaction`. Now it waits and starts once the open one commits or rolls back. The next one starts at the commit, before the after-commit callbacks, so a callback can open a transaction of its own. Savepoints (nested transactions) don't queue. Postgres and MySQL are unchanged.
+
+`UserProvider.transaction` and `withLegacySessionLock` used their own queue for this (#1356). They now use the ORM's.
+
+What to check: on SQLite, a transaction that awaits a *separate* top-level transaction on the same connection, one started outside its scope, now waits forever instead of failing at `BEGIN`. Nest it, or start it after the transaction.
+
 # 0.236.2
 
 ## A server turn no longer refuses other turns' open questions (#1371)

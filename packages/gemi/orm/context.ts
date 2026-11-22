@@ -744,6 +744,12 @@ export function withTransaction<T>(
      * (`SET TRANSACTION READ ONLY`).
      */
     deferSettings?: boolean;
+    /**
+     * The connection's dialect. On `"sqlite"` an outermost transaction
+     * queues behind the one already open on the same pool (#1362); see
+     * `queuedOnSqlite`.
+     */
+    dialect?: string;
   },
 ): Promise<T> {
   const current = ormContext.getStore();
@@ -822,6 +828,55 @@ export function withTransaction<T>(
       }) as Promise<T>;
   }
 
+  if (options?.dialect === "sqlite") {
+    return queuedOnSqlite(pool, (release) => openTransaction(pool, fn, options, current, name, release));
+  }
+  return openTransaction(pool, fn, options, current, name);
+}
+
+/**
+ * The transactions waiting on each SQLite pool, as the promise the last one
+ * queued settles (#1362). Bun's SQLite client runs every statement on one
+ * connection, where a second `BEGIN` while a transaction is open fails with
+ * "cannot start a transaction within a transaction". SQLite allows one writer
+ * at a time anyway, so queueing changes the order, not the throughput.
+ */
+const sqliteQueues = new WeakMap<SQL, Promise<void>>();
+
+/**
+ * `begin` once the transactions queued on `pool` before it have let it go.
+ *
+ * The next one goes at COMMIT, not when `begin` resolves: `release` is the
+ * first after-commit callback. `begin` resolves only after every callback
+ * deferred until the commit has run (a sync event listener, say), and one of
+ * those that opened a transaction would otherwise wait on the very
+ * transaction that waits on it. A rollback runs no callbacks; settling lets
+ * it go then.
+ *
+ * Savepoints never come here: they run inside the open transaction. A
+ * transaction that waits for *another* top-level transaction on the same
+ * pool, started outside its scope (a detached task it then awaits), waits
+ * forever, where before it failed at `BEGIN`.
+ */
+function queuedOnSqlite<T>(pool: SQL, begin: (release: () => void) => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const previous = sqliteQueues.get(pool) ?? Promise.resolve();
+  sqliteQueues.set(pool, released);
+  const result = previous.then(() => begin(release));
+  result.then(release, release);
+  return result;
+}
+
+/** The outermost half of `withTransaction`: `BEGIN` on `pool`, `fn`, `COMMIT`, then the after-commit list. */
+function openTransaction<T>(
+  pool: SQL,
+  fn: (tx: TransactionSQL) => Promise<T>,
+  options: { slowTransactionThreshold?: number | false; deferSettings?: boolean } | undefined,
+  current: OrmScope | undefined,
+  name: string,
+  release?: () => void,
+): Promise<T> {
   // Only the outermost scope is watched. A savepoint reserves no connection of
   // its own — its lifetime is bounded by the transaction it sits in, which is
   // already being timed — so warning per depth would report one slow block as
@@ -834,7 +889,9 @@ export function withTransaction<T>(
   // Built out here rather than inside the `begin` callback, because the drain
   // below needs it *after* that callback's scope is gone, and reading it off
   // the store then is exactly what is no longer possible.
-  const deferred: AfterCommitCallback[] = [];
+  // A queued SQLite transaction lets the next one go first thing after its
+  // commit, before the app's callbacks (`queuedOnSqlite`).
+  const deferred: AfterCommitCallback[] = release ? [release] : [];
   const dependencies: Promise<unknown>[] = [];
   const applied = new Map<string, string>();
   const statementFailed = { value: false };

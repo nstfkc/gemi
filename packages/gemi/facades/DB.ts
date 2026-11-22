@@ -236,6 +236,8 @@ export class ConnectionQueries {
       {
         slowTransactionThreshold: connection.config.slowTransactionThreshold,
         connection: name,
+        // Queued per pool on SQLite, like `Model.transaction` (#1362).
+        dialect: connection.dialect,
       },
     );
   }

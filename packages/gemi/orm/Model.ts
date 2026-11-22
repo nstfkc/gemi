@@ -168,6 +168,8 @@ function transact<T>(
   return withTransaction(connection.sql, fn, {
     slowTransactionThreshold: connection.config.slowTransactionThreshold,
     connection: connection.name,
+    // Queued per pool on SQLite (#1362).
+    dialect: connection.dialect,
   });
 }
 

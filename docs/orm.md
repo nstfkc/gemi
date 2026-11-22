@@ -1620,6 +1620,20 @@ rollback on throw.
 Nesting is a **savepoint**: an inner failure rolls back to the savepoint and leaves the outer
 transaction usable.
 
+**On SQLite, transactions queue.** Bun's SQLite client runs every statement on one connection,
+where a second `BEGIN` while a transaction is open fails ("cannot start a transaction within a
+transaction"). So a `Model.transaction` or `DB.transaction` that starts while another one is
+open on the same connection, from another request in the process, waits for it, and starts once
+it commits or rolls back. SQLite allows one writer at a time anyway, so this changes the order,
+not the throughput. Savepoints don't queue, and the next transaction starts at the commit,
+before the after-commit callbacks run, so a callback can open a transaction of its own.
+
+- Several processes on one database file aren't queued against each other: SQLite's own locking
+  (`SQLITE_BUSY`) applies there.
+- A transaction that waits for a *separate* top-level transaction on the same connection, one
+  started outside its scope (a detached task it then awaits), waits forever, where it used to
+  fail at `BEGIN`. Start that work after the transaction, or nest it.
+
 ### Two things that will bite you
 
 **Catching an error inside a transaction, on Postgres.** Any failed statement aborts the whole
