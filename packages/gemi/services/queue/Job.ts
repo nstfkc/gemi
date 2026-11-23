@@ -33,6 +33,17 @@ export class Job {
   maxAttempts = 3;
 
   /**
+   * For a `worker = true` job: the longest, in milliseconds, its `run` may
+   * take in its thread. Past it the thread is terminated (a thread cannot be
+   * interrupted halfway through `run` otherwise), the attempt fails with a
+   * `WorkerTimeoutError` and retries or dead-letters as usual, and the pool
+   * boots a new thread for the next worker job. Default ten minutes;
+   * `Infinity` waits for good. Measured from when the thread is handed the
+   * job, so a thread's first boot is not counted: see `workerBootTimeout`.
+   */
+  workerTimeout = 10 * 60_000;
+
+  /**
    * Milliseconds to wait before each retry. A number is used for every retry;
    * an array gives the delay before the first retry, the second, and so on,
    * repeating its last entry. `0`, the default, retries as soon as a slot is

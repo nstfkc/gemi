@@ -1,4 +1,4 @@
-import { useContext } from "react";
+import { useContext, useInsertionEffect, useRef, useState } from "react";
 import { ClientRouterContext } from "./ClientRouterContext";
 import type { IsViewPath, UrlParser, ViewPaths } from "./types";
 import { applyParams } from "../utils/applyParams";
@@ -55,17 +55,39 @@ type NavigateArgs<P extends string> = IsViewPath<P> extends true
     : [options: Options<P>]
   : [options?: RuntimeOptions];
 
+/**
+ * `push` and `replace` keep their identity for the component's lifetime, so an
+ * effect can list them as dependencies, and the router's own subscription to
+ * the history is not re-made on every navigation (#1383). They read the
+ * current locale and router through a ref, which is updated in an insertion
+ * effect: before any layout or passive effect of the commit runs, so a
+ * navigation sent from one sees the route that commit rendered.
+ */
 export function useNavigate() {
   const { history, setNavigationAbortController } =
     useContext(ClientRouterContext);
   const { defaultLocale } = useContext(I18nContext);
   const location = useLocation();
 
+  const current = { history, setNavigationAbortController, defaultLocale, location };
+  const currentRef = useRef(current);
+  useInsertionEffect(() => {
+    currentRef.current = current;
+  });
+
+  const [navigate] = useState(() => ({
+    push: action("push"),
+    replace: action("replace"),
+  }));
+  return navigate;
+
   function action(pushOrReplace: "push" | "replace") {
     return async <P extends ViewPaths | (string & {})>(
       path: P,
       ...args: NavigateArgs<P>
     ) => {
+      const { history, setNavigationAbortController, defaultLocale, location } =
+        currentRef.current;
       const navigationAbortController = new AbortController();
       if (setNavigationAbortController) {
         setNavigationAbortController(navigationAbortController);
@@ -121,9 +143,4 @@ export function useNavigate() {
       history?.[pushOrReplace](finalPath);
     };
   }
-
-  return {
-    push: action("push"),
-    replace: action("replace"),
-  };
 }

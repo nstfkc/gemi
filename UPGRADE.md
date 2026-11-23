@@ -1,33 +1,4 @@
-# 0.241.0
-
-## The local storage driver refuses symbolic links inside the store (#1324)
-
-**Behaviour change (minor version).** See [File Storage: symbolic links](docs/file-storage.md#symbolic-links).
-
-`FileSystemDriver` now checks every existing entry between its storage folder
-and the object. A link at the object's name or in any parent directory is
-refused, whether its target is inside the store, outside it, or missing.
-
-- `read()`, `fetch()` and `size()` reject with `FileNotFoundError`, so a stream
-  route answers 404. Before, a link such as `covers/latest.jpg` was served even
-  though `objects()` never listed it.
-- `put()`, `putStream()` and `delete()` reject. Nothing is written or removed
-  through the link, and the link itself is left in place.
-- `put()` now writes a temporary file next to the target and renames it into
-  place, as `putStream()` already did. A failed or aborted `put()` leaves the
-  previous version untouched, and replacing an object gives it a new inode.
-- A storage folder that is a link to a missing directory now fails writes with
-  `The storage folder "…" is a symbolic link to a missing directory` instead
-  of `EEXIST`.
-- `objects()` still skips links. A prefix whose directory is or passes through
-  a link now lists nothing, and `deletePrefix()` refuses it. Links found inside a
-  prefix are left in place, with their targets.
-- The storage folder itself may still be a link, for example a `storage` link to
-  a directory shared between releases. Use that layout instead of links inside
-  the store. Replace aliases inside the store with copies.
-- `fetch()` of a missing object now rejects with `FileNotFoundError`. Before, it
-  answered `200` and the body failed once it was read.
-  The file is open once `fetch()` resolves, so consume or cancel the body.
+# 0.243.0
 
 ## View route parameters are decoded once (#1322)
 
@@ -59,6 +30,94 @@ status 404 on a page load, and on an in-app navigation too.
   server filed it, not under one rebuilt from the params. A page such as
   `/u/john@x.com` or `/u/c++` keeps its loader data, and a `:` in the path
   (`/u/a:b`) no longer throws `Missing parameter` on the first render.
+
+# 0.242.1
+
+## sharp 0.35 is allowed (#1323)
+
+The `sharp` peer range is now `^0.34.2 || ^0.35.5`. sharp 0.34 still works, but
+the libvips (0.35.0), libheif (0.35.4) and librsvg (0.35.5) security fixes are
+only on 0.35, so move to it: `bun add sharp@^0.35.5`. The scaffolded templates
+now start on `^0.35.5`.
+
+gemi's own use of sharp (the `Sharp` image driver, `Storage.metadata()` and OG
+images) behaves the same on both versions. Things that changed in sharp 0.35
+and may matter to your own sharp code:
+
+- **Node.js 20.9 or later** when the app runs on Node. Bun is unaffected.
+- **`Storage.metadata()` results:** `paletteBitDepth` is gone, and a new
+  `mediaType` field holds the MIME type.
+- **`limitInputChannels` defaults to 5:** images with more than 5 channels are
+  rejected unless you pass a higher limit.
+- **Removed or renamed:** the `failOnError` constructor option (use `failOn`),
+  the deprecated `sharpen` parameters, and `sharp.format.jp2k` (now
+  `sharp.format.jp2`).
+- **Lossy AVIF output** is tuned differently, so file sizes and quality at the
+  same `quality` value change.
+- **Types:** under ESM, use named type imports (`import type { Metadata } from
+  "sharp"`); `sharp.Metadata` through a default import no longer resolves.
+- **No install script:** prebuilt `@img/sharp-*` binaries are used as before;
+  compiling from source is now opt-in.
+
+libvips error text is the same in 0.34.5 and 0.35.5 (checked for `tiff2vips:`
+read errors and "Warning treated as error due to failOn setting"), so code that
+matches on it keeps working.
+
+# 0.242.0
+
+## Worker jobs reuse booted threads (#1325)
+
+**Behaviour change (minor version).** See [Jobs and queues](docs/jobs-and-queues.md).
+
+A Job with `worker = true` used to start a new thread that booted the whole app for each job (seconds of CPU and hundreds of MB per job). Worker jobs now run on a small pool of threads that boot the app once and stay up for the life of the process.
+
+- **Shared app per thread.** Jobs on the same thread share its booted app, the same way main-thread jobs share the server's. A job's module-level state, unfinished transactions and floating rejections stay on the thread for the jobs after it. A job that relied on a fresh app each run must reset its own state.
+- **New `Job.workerTimeout`**, default 10 minutes (`Infinity` turns it off). Before, there was no limit. Past the limit, the thread is terminated and the attempt fails through the normal retry/dead-letter path.
+- **New queue config keys.** `workerThreads` sets the pool size (default `min(2, max(1, cores - 1))`). `workerBootTimeout` limits a thread's boot (default 2 minutes). Each pool thread keeps a booted app in memory; on small replicas, `workerThreads: 1` caps that.
+- **No scheduler or queue claim loop in a job thread.** You no longer need `GEMI_NO_SCHEDULE` for worker threads.
+- **Crashes.** A crashed thread fails only the job it held and is replaced.
+
+# 0.241.0
+
+## `useNavigate()` returns the same `push` and `replace` on every render (#1383)
+
+`push` and `replace` now keep their identity for the component's lifetime. An
+effect that lists them as dependencies runs once instead of after every render.
+They still navigate from the route on screen (its locale) when called.
+
+A `navigate.replace()` or `push()` sent from a view's effect in the commit that
+mounts it after a client navigation is now followed by the router: before, the
+address bar changed but the page kept the old route state. Apps that deferred
+that call (`queueMicrotask`, `setTimeout`) as a workaround can call it directly.
+
+## The local storage driver refuses symbolic links inside the store (#1324)
+
+**Behaviour change (minor version).** See [File Storage: symbolic links](docs/file-storage.md#symbolic-links).
+
+`FileSystemDriver` now checks every existing entry between its storage folder
+and the object. A link at the object's name or in any parent directory is
+refused, whether its target is inside the store, outside it, or missing.
+
+- `read()`, `fetch()` and `size()` reject with `FileNotFoundError`, so a stream
+  route answers 404. Before, a link such as `covers/latest.jpg` was served even
+  though `objects()` never listed it.
+- `put()`, `putStream()` and `delete()` reject. Nothing is written or removed
+  through the link, and the link itself is left in place.
+- `put()` now writes a temporary file next to the target and renames it into
+  place, as `putStream()` already did. A failed or aborted `put()` leaves the
+  previous version untouched, and replacing an object gives it a new inode.
+- A storage folder that is a link to a missing directory now fails writes with
+  `The storage folder "…" is a symbolic link to a missing directory` instead
+  of `EEXIST`.
+- `objects()` still skips links. A prefix whose directory is or passes through
+  a link now lists nothing, and `deletePrefix()` refuses it. Links found inside a
+  prefix are left in place, with their targets.
+- The storage folder itself may still be a link, for example a `storage` link to
+  a directory shared between releases. Use that layout instead of links inside
+  the store. Replace aliases inside the store with copies.
+- `fetch()` of a missing object now rejects with `FileNotFoundError`. Before, it
+  answered `200` and the body failed once it was read.
+  The file is open once `fetch()` resolves, so consume or cancel the body.
 
 # 0.240.0
 

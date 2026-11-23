@@ -253,25 +253,24 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     appId: currentAppId,
   });
 
+  // Stable for the router's lifetime (#1383).
   const { replace } = useNavigate();
 
   // `onAuthenticationError`'s `redirect()` navigates through the router, and
   // its sign-in URL carries the page on screen without the locale segment, as
-  // the server's redirect does (#1119). `replace` is rebuilt every render.
-  const replaceRef = useRef(replace);
-  replaceRef.current = replace;
+  // the server's redirect does (#1119).
   useEffect(
     () =>
       setAuthenticationNavigator({
         replace: (path) => {
-          void replaceRef.current(path);
+          void replace(path);
         },
         current: () => {
           const state = routerSubject?.getValue();
           return state ? { pathname: state.pathname, search: state.search ?? "" } : null;
         },
       }),
-    [routerSubject],
+    [routerSubject, replace],
   );
   // Once per navigation, after it has committed: by the history entry, so two
   // navigations that render the same views each get their scroll (#1215).
@@ -316,8 +315,32 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     committedViewsRef.current = routeState.views;
   }, [routeState.views]);
 
+  // What the subscriber below calls, read at call time. The subscription
+  // itself depends on nothing that changes between navigations (#1383): one
+  // that is torn down and re-made in a navigation's commit misses whatever a
+  // view's effect sends in that commit — the effects run child-first, between
+  // the unsubscribe and the new subscribe, and `Subject` does not replay.
+  const subscriberDepsRef = useRef({
+    fetchRouteCSS,
+    preloadRouteModules,
+    takePrefetched,
+    hydrate,
+    buildId,
+  });
+  useInsertionEffect(() => {
+    subscriberDepsRef.current = {
+      fetchRouteCSS,
+      preloadRouteModules,
+      takePrefetched,
+      hydrate,
+      buildId,
+    };
+  });
+
   useEffect(() => {
     return routerSubject?.subscribe(async (routerState) => {
+      const { fetchRouteCSS, preloadRouteModules, takePrefetched, hydrate, buildId } =
+        subscriberDepsRef.current;
       const { pathname, search, state, views } = routerState;
       // A full load an earlier navigation started and the page is still here
       // for was cancelled ("Stay" on a dirty editor's prompt): this navigation
@@ -488,7 +511,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       }
       setIsFetching(false);
     });
-  }, [routerSubject, fetchRouteCSS, preloadRouteModules, takePrefetched, replace, hydrate, buildId]);
+  }, [routerSubject, replace]);
 
   return (
     <RouteTransitionProvider

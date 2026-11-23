@@ -1,5 +1,4 @@
 import { AsyncResource } from "node:async_hooks";
-import { existsSync } from "node:fs";
 import { isMainThread } from "node:worker_threads";
 
 import type { Application } from "../../foundation/Application";
@@ -22,145 +21,10 @@ import { backoffFor } from "./backoff";
 import { type SlotLimit, slotLimits } from "./slots";
 import type { WorkflowClass } from "./workflow/Workflow";
 import { WorkflowRuntime } from "./workflow/WorkflowRuntime";
+import { adoptPool, isJobThread, WorkerPool } from "./WorkerPool";
 
 export { backoffFor };
-
-/**
- * The thread a `worker = true` job runs in.
- *
- * The `await` on `dispatchJob` is load-bearing and its absence was a hang.
- * `postMessage` structured-clones its argument and a Promise is not cloneable,
- * so an un-awaited `dispatchJob` posted the pending promise, threw
- * `DataCloneError` inside this handler, and posted nothing at all. `runInWorker`
- * then never settled: `run` below never returned, its concurrency slot was
- * never decremented, and neither the retry path nor `onDeadletter` ever fired —
- * after `concurrency` such jobs the queue sits at its limit forever, with no
- * error anywhere. Any job whose `run` is `async` hit it, which is every job
- * that touches IO; a queued listener hits it unconditionally, because the
- * synthetic job's `run` awaits `handle`.
- *
- * The await earns two more things. A rejecting job now reaches the `catch` and
- * comes back as `{error}`, where the queue's ordinary retry-then-dead-letter
- * path can have it, instead of being lost with the promise. And `destroy()` now
- * runs after the job rather than under it, so the cloned kernel — its database
- * connections included — outlives the work it was cloned for.
- *
- * ### Where the thread finds the application (#1318)
- *
- * The thread boots its own copy of the application. It used to import it from
- * `app/bootstrap.ts` (`dist/server/bootstrap.mjs` in production), a file no
- * template has and no build had emitted since the server moved to `Bun.build`,
- * so the import failed inside the thread and the job hung. Now an app's own
- * bootstrap is used when it exists, and otherwise the thread does what
- * `gemi queue:work` does: `new App({ kernel })` from `app/kernel/Kernel.ts`,
- * with `App` resolved from the application's own gemi, the copy its kernel
- * extends.
- */
-export function workerEntry(env: Record<string, string | undefined> = process.env): {
-  bootstrap: string | undefined;
-  kernel: string;
-  app: string;
-} {
-  const rootDir = env.ROOT_DIR ?? process.cwd();
-  const appDir = env.APP_DIR ?? `${rootDir}/app`;
-  const bootstrap =
-    env.NODE_ENV === "production"
-      ? `${rootDir}/dist/server/bootstrap.mjs`
-      : `${appDir}/bootstrap.ts`;
-  let app: string;
-  try {
-    app = Bun.resolveSync("gemi/app", rootDir);
-  } catch {
-    // Run from outside a project (a test, a script): this copy's own,
-    // through the package's reference to itself.
-    app = Bun.resolveSync("gemi/app", __dirname);
-  }
-  return {
-    bootstrap: existsSync(bootstrap) ? bootstrap : undefined,
-    kernel: `${appDir}/kernel/Kernel.ts`,
-    app,
-  };
-}
-
-function createWorker() {
-  const entry = workerEntry();
-  const load = entry.bootstrap
-    ? `const { app } = await import(${JSON.stringify(entry.bootstrap)});`
-    : `const { App } = await import(${JSON.stringify(entry.app)});
-      const { default: Kernel } = await import(${JSON.stringify(entry.kernel)});
-      const app = new App({ kernel: Kernel });
-      await app.waitForBoot();`;
-
-  const file = new File(
-    [
-      `
-      ${load}
-      self.onmessage = async (event) => {
-        const clone = app.clone()
-        let result = null;
-        let error = null;
-        try {
-          result = await clone.dispatchJob(event.data.jobName, event.data.args)
-        } catch (err) {
-          error = err
-        }
-        clone.destroy()
-        if(error) {
-          self.postMessage({error});
-        } else {
-          self.postMessage({result});
-        }
-      };
-      self.postMessage({ ready: true });
-    `,
-    ],
-    "worker.ts",
-  );
-  const url = URL.createObjectURL(file);
-  return new Worker(url);
-}
-
-/**
- * Runs one job in a thread of its own, and ends the thread after it.
- *
- * The thread posts `ready` once it has loaded the application, and only then
- * is it handed the job: a message posted earlier would reach a thread whose
- * top-level `await` has not set `onmessage` yet. A thread that fails to load
- * (a missing kernel, a syntax error in the app) or throws outside the job
- * rejects with that error, so the job fails and retries like any other one.
- * It used to listen for `message` alone, and a thread that never posted left
- * the job unsettled, holding its slot for good (#1318).
- */
-async function runInWorker(jobName: string, args: string) {
-  const worker = createWorker();
-  try {
-    return await new Promise((resolve, reject) => {
-      worker.onmessage = (e) => {
-        const data = e.data;
-        if (data && "ready" in data) {
-          worker.postMessage({ jobName, args });
-        } else if ("error" in data) {
-          reject(data.error);
-        } else {
-          resolve(data.result);
-        }
-      };
-      worker.onerror = (event) => {
-        const error = (event as ErrorEvent).error ?? (event as ErrorEvent).message ?? event;
-        reject(
-          error instanceof Error
-            ? error
-            : new Error(`The worker thread for ${jobName} failed: ${String(error)}`),
-        );
-      };
-      worker.addEventListener("close", () => {
-        reject(new Error(`The worker thread for ${jobName} exited before the job finished.`));
-      });
-    });
-  } finally {
-    worker.terminate();
-  }
-}
+export { workerEntry } from "./WorkerPool";
 
 /**
  * The async context every job runs in: the one this module was evaluated in,
@@ -276,6 +140,7 @@ export class QueueManager {
   private readonly releasedNames = new Set<string>();
   private lockManager: LockManager | undefined;
   private workflowRuntime: WorkflowRuntime | undefined;
+  private pool: WorkerPool | undefined;
 
   /**
    * `application` is entered around every job, so `app()` inside one resolves
@@ -997,6 +862,12 @@ export class QueueManager {
     })();
     await Promise.race([settled, deadline]);
     clearTimeout(timer);
+    // The job threads go with the loop, unless a job still runs in one. A
+    // later `start()` boots new ones when a worker job next runs.
+    if (this.inFlight.size === 0 && this.pool) {
+      this.pool.close();
+      this.pool = undefined;
+    }
 
     return {
       unfinished: [...this.inFlight.values()].map((e) => ({ ...e.job })),
@@ -1006,6 +877,21 @@ export class QueueManager {
   /** `drain(0)`: stop claiming, and report what is running without waiting. */
   stop(): Promise<DrainResult> {
     return this.drain(0);
+  }
+
+  /**
+   * The threads `worker = true` jobs run in, made at the first such job and
+   * kept: see `WorkerPool`.
+   */
+  get workerPool(): WorkerPool {
+    if (!this.pool) {
+      this.pool = new WorkerPool({
+        size: this.config.workerThreads,
+        bootTimeoutMs: this.config.workerBootTimeout,
+      });
+      adoptPool(this.pool);
+    }
+    return this.pool;
   }
 
   /** How many jobs this process is running right now. */
@@ -1381,7 +1267,7 @@ export class QueueManager {
     if (admitted) {
       try {
         result = await (job.worker
-          ? runInWorker(claimed.name, claimed.args)
+          ? this.workerPool.run(claimed.name, claimed.args, job.workerTimeout)
           : job.run(...args));
       } catch (err) {
         error = err as Error;
@@ -1582,14 +1468,15 @@ function isProduction() {
  * `GEMI_QUEUE_CLAIM=off` hands its jobs to workers. `ROOT_DIR` is set only by
  * a starting server or worker, so a console command, a seed
  * or a migration — which boot the same providers — is not one, and neither is
- * a `worker` job's thread, which clones the application and exits after it.
+ * a `worker` job's thread, which boots the application to run jobs it is
+ * handed, never to claim them (#1325).
  *
  * A worker claims whatever `GEMI_QUEUE_CLAIM` says, because the variable is
  * for the web process, and a deploy that sets it once for every container
  * would otherwise leave nothing claiming at all.
  */
 export function claimsInThisProcess() {
-  if (!isMainThread) return false;
+  if (!isMainThread || isJobThread()) return false;
   if (isQueueWorker()) return true;
   return process.env.ROOT_DIR !== undefined && !claimingTurnedOff();
 }
