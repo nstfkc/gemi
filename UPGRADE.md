@@ -1,3 +1,16 @@
+# 0.242.2
+
+## Redirects and refusals answered to `.json` navigations are never cached (#1388)
+
+A `Redirect.to(...)` (or any other request breaker) thrown during a client
+navigation's `.json` request now answers with
+`Cache-Control: private, no-cache, no-store, max-age=0, must-revalidate`, the
+same header the full page load's 307 carries. Before, the 200 redirect
+directive left with no `Cache-Control`, so a CDN caching by path could serve one
+user's redirect to everyone. A breaker that sets its own `Cache-Control` keeps
+it. Nothing to change in your app; if you disabled caching for `.json` view
+data at the edge as a workaround, you can keep or drop it.
+
 # 0.242.1
 
 ## sharp 0.35 is allowed (#1323)
