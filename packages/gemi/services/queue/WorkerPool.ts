@@ -171,8 +171,11 @@ export class WorkerPool {
   private readonly waiting: Task[] = [];
   private nextId = 0;
   private closed = false;
-  /** Set by `retireWhenIdle`: threads end once nothing is waiting for them. */
-  private retiring = false;
+  /**
+   * Set by `retireWhenIdle`: the pool that takes this one's waiting jobs, and
+   * its threads end as their jobs finish.
+   */
+  private successor: { run: WorkerPool["run"] } | undefined;
 
   constructor(private readonly options: WorkerPoolOptions) {}
 
@@ -182,6 +185,7 @@ export class WorkerPool {
   }
 
   run(jobName: string, args: string, timeoutMs: number): Promise<unknown> {
+    if (this.successor) return this.successor.run(jobName, args, timeoutMs);
     if (this.closed) {
       return Promise.reject(new Error(`The worker pool was closed, so ${jobName} did not run.`));
     }
@@ -206,17 +210,32 @@ export class WorkerPool {
   }
 
   /**
-   * Ends idle threads now and busy ones once their job is done, so a job
-   * already running finishes rather than failing. See `adoptPool`.
+   * Hands this pool over to `successor`: jobs waiting here, and any run
+   * later, go to it; idle threads end now, and busy ones once their job is
+   * done, so a job already running finishes rather than failing. A thread
+   * still booting ends too, its job going to the successor. See `adoptPool`.
    */
-  retireWhenIdle() {
-    this.retiring = true;
+  retireWhenIdle(successor: { run: WorkerPool["run"] }) {
+    this.successor = successor;
+    for (const task of this.waiting.splice(0)) this.forward(task);
     for (const slot of this.slots) {
-      if (slot.state === "idle") this.retire(slot, undefined);
+      if (slot.state === "busy") continue;
+      const task = slot.task;
+      slot.task = undefined;
+      this.retire(slot, undefined);
+      if (task) this.forward(task);
     }
   }
 
+  private forward(task: Task) {
+    this.successor!.run(task.jobName, task.args, task.timeoutMs).then(task.resolve, task.reject);
+  }
+
   private pump() {
+    if (this.successor) {
+      for (const task of this.waiting.splice(0)) this.forward(task);
+      return;
+    }
     while (this.waiting.length > 0) {
       const idle = [...this.slots].find((slot) => slot.state === "idle");
       if (idle) {
@@ -254,6 +273,9 @@ export class WorkerPool {
         | { ready: true }
         | { id: number; result?: unknown; error?: { name: string; message: string; stack?: string } };
       if ("ready" in data) {
+        // Retired while it booted (its boot timed out, say): the job it was
+        // started for has been failed or handed on already.
+        if (!this.slots.has(slot)) return;
         clearTimeout(slot.timer);
         slot.timer = undefined;
         URL.revokeObjectURL(url);
@@ -268,9 +290,12 @@ export class WorkerPool {
       slot.task = undefined;
       if (data.error) current.reject(revive(data.error));
       else current.resolve(data.result);
+      if (this.successor) {
+        this.retire(slot, undefined);
+        return;
+      }
       this.idle(slot);
       this.pump();
-      if (this.retiring && slot.state === "idle") this.retire(slot, undefined);
     };
     worker.onerror = (event) => {
       const error = (event as ErrorEvent).error ?? (event as ErrorEvent).message ?? event;
@@ -357,10 +382,23 @@ const POOL = Symbol.for("gemi.queue.workerPool");
  * left alone.
  */
 export function adoptPool(pool: WorkerPool) {
-  const store = globalThis as {
-    [POOL]?: { pool: { retireWhenIdle(): void }; owner: unknown };
+  const previous = poolStore()[POOL];
+  if (previous && previous.owner !== WorkerPool) previous.pool.retireWhenIdle(pool);
+  poolStore()[POOL] = { pool, owner: WorkerPool };
+}
+
+/**
+ * Whether the process holds a pool from before a `bun --hot` reload. The dev
+ * boot asks, so the stale threads are let go as soon as the new application
+ * is up rather than at its first worker job.
+ */
+export function hasStalePool() {
+  const previous = poolStore()[POOL];
+  return previous !== undefined && previous.owner !== WorkerPool;
+}
+
+function poolStore() {
+  return globalThis as {
+    [POOL]?: { pool: { retireWhenIdle(successor: { run: WorkerPool["run"] }): void }; owner: unknown };
   };
-  const previous = store[POOL];
-  if (previous && previous.owner !== WorkerPool) previous.pool.retireWhenIdle();
-  store[POOL] = { pool, owner: WorkerPool };
 }
