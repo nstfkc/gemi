@@ -194,3 +194,54 @@ describe("useNavigate to the root route (#1257)", () => {
     expect(pushed).toEqual([["/users/7?tab=posts#bio", undefined]]);
   });
 });
+
+describe("useNavigate identity (#1383)", () => {
+  test("push and replace are the same functions across renders, and use the route on screen", async () => {
+    const seen: Array<ReturnType<typeof useNavigate>> = [];
+    function Probe() {
+      seen.push(useNavigate());
+      return null;
+    }
+    const history = {
+      push: (path: string, options?: unknown) => pushed.push([path, options]),
+      replace: (path: string, options?: unknown) => replaced.push([path, options]),
+    };
+    const render = (locale: string) =>
+      createElement(
+        ClientRouterContext.Provider,
+        { value: { history, setNavigationAbortController: () => {} } as any },
+        createElement(
+          I18nContext.Provider,
+          { value: { defaultLocale: "en-US" } as any },
+          createElement(
+            RouteStateProvider,
+            {
+              state: {
+                pathname: "/",
+                search: "",
+                hash: "",
+                params: {},
+                locale,
+              } as RouteState & PageData,
+            },
+            createElement(Probe),
+          ),
+        ),
+      );
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    act(() => root.render(render("en-US")));
+    act(() => root.render(render("tr-TR")));
+
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen.at(-1)!.push).toBe(seen[0].push);
+    expect(seen.at(-1)!.replace).toBe(seen[0].replace);
+
+    await act(async () => {
+      await seen[0].push("/users");
+    });
+    expect(pushed).toEqual([["/tr-TR/users", undefined]]);
+    act(() => root.unmount());
+  });
+});
