@@ -7,6 +7,7 @@ import { withDefaults } from "../../support/withDefaults";
 import { queueConfigDefaults, type QueueConfig } from "./config";
 import { LockManager } from "../lock/LockManager";
 import { MemoryQueueDriver } from "./MemoryQueueDriver";
+import { hasStalePool } from "./WorkerPool";
 import {
   claimingTurnedOff,
   claimsInThisProcess,
@@ -238,6 +239,12 @@ function warnAboutClaimSwitch(application: Application) {
  * the stale loop.
  */
 function takeOverDevQueue(application: Application) {
+  // The previous application's worker-job threads, if any, end now (busy ones
+  // once their job is done), and whatever they had waiting moves to this
+  // application's pool. The pool itself starts no thread until a job needs one.
+  if (hasStalePool() && application.bound(QueueManager)) {
+    void application.make(QueueManager).workerPool;
+  }
   const previous = globalThis.__gemiDevQueue;
   if (!previous) return;
   globalThis.__gemiDevQueue = undefined;

@@ -3,6 +3,7 @@ import type { Job } from "./Job";
 import type { LockStore } from "../lock/LockStore";
 import type { QueueDriver } from "./QueueDriver";
 import type { WorkflowClass } from "./workflow/Workflow";
+import { defaultWorkerThreads } from "./WorkerPool";
 
 // Config key: `queue`. Derived from `QueueServiceProvider`.
 export interface QueueConfig {
@@ -131,6 +132,24 @@ export interface QueueConfig {
   unknownJobGrace?: number;
 
   /**
+   * How many threads `worker = true` jobs run in, at most, in this process.
+   * Each boots its own copy of the application once, the first time a worker
+   * job needs it, and then runs one job at a time for as long as the process
+   * lives; worker jobs beyond this many wait for a free one. Default: the
+   * number of cores less one, between 1 and 2. Each thread holds a booted
+   * application in memory, so raise it with that in mind.
+   */
+  workerThreads?: number;
+
+  /**
+   * How long, in milliseconds, a new job thread may take to boot the
+   * application before the job it was started for fails and the thread is
+   * ended. Default two minutes. A job's own time limit is `workerTimeout` on
+   * the job.
+   */
+  workerBootTimeout?: number;
+
+  /**
    * Where locks are kept: the ones unique jobs, a cron job's
    * `withoutOverlapping` and `onOneServer`, and the `Lock` facade take.
    *
@@ -165,5 +184,7 @@ export function queueConfigDefaults(): Required<QueueConfig> {
     pollInterval: 1000,
     unknownJobGrace: 60 * 60_000,
     locks: "auto",
+    workerThreads: defaultWorkerThreads(),
+    workerBootTimeout: 2 * 60_000,
   };
 }

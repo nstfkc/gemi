@@ -22196,15 +22196,22 @@ An attempt whose process died before it finished still counts. With a driver tha
 | `static name` | `string` | `"unset"` | Unique job identifier. Required. |
 | `maxAttempts` | `number` | `3` | Total attempts before dead-lettering. |
 | `backoff` | `number \| number[]` | `0` | Milliseconds before a retry. An array gives one per retry, its last entry repeating. |
-| `worker` | `boolean` | `false` | When `true`, `run` executes in a separate Worker thread (a fresh cloned app instance) instead of the main event loop — use for CPU-bound work you want off the main thread. |
+| `worker` | `boolean` | `false` | When `true`, `run` executes in a pooled Worker thread with its own booted copy of the app, instead of the main event loop — use for CPU-bound work you want off the main thread. |
+| `workerTimeout` | `number` | `600000` | For a `worker` job: milliseconds `run` may take in its thread before the thread is terminated and the attempt fails with `WorkerTimeoutError`. `Infinity` waits for good. |
 
 ### Worker-thread jobs — `worker = true`
 
-A job with `worker = true` runs `run` in a Worker thread of its own, which boots its own copy of the application and is ended after the job. Use it for CPU-bound work you want off the main event loop.
+A job with `worker = true` runs `run` in a Worker thread, which boots its own copy of the application. Use it for CPU-bound work you want off the main event loop.
 
+- **Threads are pooled.** The first worker job starts a thread, which boots the application once and then stays, running one job at a time, for every later worker job. Booting costs what loading the server does (seconds of CPU and a few hundred megabytes for a large app), so it is paid once per thread rather than once per job. The pool grows to `workerThreads` threads (queue config; default the number of cores less one, between 1 and 2) and further worker jobs wait for a free one. Idle threads do not keep the process alive, and `drain` ends them. Under `gemi dev`, a reload ends the previous code's threads (a busy one after its job) and moves its waiting worker jobs to the new pool.
+- **Jobs share the thread's application**, as jobs on the main thread share the server's: `app()`, facades and database connections work as usual. Until gemi 0.241 every job had a fresh thread; now whatever a job leaves behind stays on its thread for the jobs after it: module-level state (caches, counters, globals it changes), a transaction it opened and did not end, and a promise it left rejecting with nobody awaiting it (a floating rejection can crash the thread, failing whichever job runs in it then). Reset what you change, end what you open, and await what you start.
+- **A thread starts no cron schedule and claims no queued jobs**, whatever `GEMI_NO_SCHEDULE` says. It only runs the jobs it is handed.
+- **`workerTimeout`** (default ten minutes; there was no limit before) bounds each job's `run`. Past it, the thread is terminated, the attempt fails with `WorkerTimeoutError` and retries or dead-letters as usual, and the next worker job boots a fresh thread. A new thread's boot is bounded separately by `workerBootTimeout` (queue config, two minutes).
+- **A thread that crashes** (an error thrown outside `run`'s promise, say) fails only the job it was running, and is replaced.
 - **The thread boots from `app/kernel/Kernel.ts`**, as `gemi queue:work` does, so the job needs nothing beyond the kernel the server uses. If the app has an `app/bootstrap.ts` that exports `app` (an `App` from `gemi/app`), the thread uses that instead: from source under `gemi dev`, and from `dist/server/bootstrap.mjs` in production, which `gemi build` emits when `app/bootstrap.ts` exists.
 - **`run` gets its arguments spread**, as for any other job.
 - **A thread that cannot load the application**, or a job name the thread's registry doesn't have, fails the attempt with the error. The job then retries and dead-letters like any other.
+- **`onSuccess`, `onFail` and `onDeadletter` run on the main thread**, with the value `run` returned (which must be structured-cloneable) or its error.
 - `release`, `fail` and batches are not available, because `run` happens in another thread.
 
 ## Dispatching
@@ -22299,6 +22306,8 @@ export default defineQueueConfig({
 | `driver` | `"memory" \| "database" \| QueueDriver \| (app) => QueueDriver` | `"memory"` | Where queued jobs are kept. See [Drivers](#drivers--where-queued-jobs-live). |
 | `visibilityTimeout` | `number` | `300000` | Milliseconds a claimed job is leased for before a driver shared between processes may hand it to another. Running jobs are heartbeated at a third of this. |
 | `pollInterval` | `number` | `1000` | Milliseconds between claims for a driver that cannot announce new work. The memory driver is never polled. Also the delay before retrying a claim that failed — for any driver, doubling per consecutive failure up to a minute. |
+| `workerThreads` | `number` | cores − 1, between 1 and 2 | At most this many threads run `worker = true` jobs in this process. Each holds a booted copy of the app. See [Worker-thread jobs](#worker-thread-jobs--worker--true). |
+| `workerBootTimeout` | `number` | `120000` | Milliseconds a new worker-job thread may take to boot the app before the job it was started for fails. |
 | `unknownJobGrace` | `number` | `3600000` | Milliseconds a job under a name this replica has no class for is left for another replica before it is dead-lettered. Only for a driver other processes share; see [Deploys and unknown job names](#deploys-and-unknown-job-names). The memory driver dead-letters an unknown name at once. |
 
 The slice is wired into the kernel by name:

@@ -1,5 +1,6 @@
 import { kernelContext } from "../../kernel/context";
 import { LockManager } from "../lock/LockManager";
+import { isJobThread } from "../queue/WorkerPool";
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { withDefaults } from "../../support/withDefaults";
 import { discoverCronJobs } from "../discovery";
@@ -84,6 +85,10 @@ export class ScheduleServiceProvider extends ServiceProvider {
     // is how a deploy runs one cron dyno beside several web ones, and a config
     // slice would have to know which command started it.
     if (process.env.GEMI_NO_SCHEDULE === "1") return;
+    // Nor in a `worker = true` job's thread (#1325), which boots the whole
+    // application to run jobs and would otherwise fire every cron job a
+    // second time, from inside a thread meant for one job's CPU work.
+    if (isJobThread()) return;
     // Nor in a test process (#1342), unless it asks with `GEMI_SCHEDULE=1`:
     // every vitest worker that boots the app would otherwise run the whole
     // schedule against whatever database the tests share.
