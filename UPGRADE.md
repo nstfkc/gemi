@@ -1,4 +1,4 @@
-# Unreleased
+# 0.241.0
 
 ## `useNavigate()` returns the same `push` and `replace` on every render (#1383)
 
@@ -10,8 +10,6 @@ A `navigate.replace()` or `push()` sent from a view's effect in the commit that
 mounts it after a client navigation is now followed by the router: before, the
 address bar changed but the page kept the old route state. Apps that deferred
 that call (`queueMicrotask`, `setTimeout`) as a workaround can call it directly.
-
-# 0.241.0
 
 ## The local storage driver refuses symbolic links inside the store (#1324)
 
