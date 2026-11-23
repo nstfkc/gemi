@@ -231,9 +231,19 @@ export function viewBreakResponse(view: Record<string, any>) {
 /**
  * The same break for a `.json` navigation, from its `payload.api`: the client
  * router reads `data` and `directive` out of the body.
+ *
+ * Never cacheable unless the breaker says otherwise (#1388). A redirect or a
+ * refusal depends on who asks — a signed-out user sent to sign-in, a
+ * non-member sent to their own workspace — and a redirect answers with a 200,
+ * so a CDN that caches by path served one user's directive to everyone after.
+ * The same header the full page load's 307 carries.
  */
 export function viewDataBreakResponse(api: Record<string, any>) {
-  const { status = 400, data, directive, headers } = api;
+  const { status = 400, data, directive, headers: own } = api;
+  const headers = new Headers(own);
+  if (!headers.has("Cache-Control")) {
+    headers.set("Cache-Control", "private, no-cache, no-store, max-age=0, must-revalidate");
+  }
   return new Response(JSON.stringify({ data, directive }), {
     headers,
     status,
