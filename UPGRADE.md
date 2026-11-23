@@ -1,3 +1,35 @@
+# 0.242.1
+
+## sharp 0.35 is allowed (#1323)
+
+The `sharp` peer range is now `^0.34.2 || ^0.35.5`. sharp 0.34 still works, but
+the libvips (0.35.0), libheif (0.35.4) and librsvg (0.35.5) security fixes are
+only on 0.35, so move to it: `bun add sharp@^0.35.5`. The scaffolded templates
+now start on `^0.35.5`.
+
+gemi's own use of sharp (the `Sharp` image driver, `Storage.metadata()` and OG
+images) behaves the same on both versions. Things that changed in sharp 0.35
+and may matter to your own sharp code:
+
+- **Node.js 20.9 or later** when the app runs on Node. Bun is unaffected.
+- **`Storage.metadata()` results:** `paletteBitDepth` is gone, and a new
+  `mediaType` field holds the MIME type.
+- **`limitInputChannels` defaults to 5:** images with more than 5 channels are
+  rejected unless you pass a higher limit.
+- **Removed or renamed:** the `failOnError` constructor option (use `failOn`),
+  the deprecated `sharpen` parameters, and `sharp.format.jp2k` (now
+  `sharp.format.jp2`).
+- **Lossy AVIF output** is tuned differently, so file sizes and quality at the
+  same `quality` value change.
+- **Types:** under ESM, use named type imports (`import type { Metadata } from
+  "sharp"`); `sharp.Metadata` through a default import no longer resolves.
+- **No install script:** prebuilt `@img/sharp-*` binaries are used as before;
+  compiling from source is now opt-in.
+
+libvips error text is the same in 0.34.5 and 0.35.5 (checked for `tiff2vips:`
+read errors and "Warning treated as error due to failOn setting"), so code that
+matches on it keeps working.
+
 # 0.242.0
 
 ## Worker jobs reuse booted threads (#1325)
