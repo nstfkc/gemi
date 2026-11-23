@@ -1,3 +1,17 @@
+# 0.242.0
+
+## Worker jobs reuse booted threads (#1325)
+
+**Behaviour change (minor version).** See [Jobs and queues](docs/jobs-and-queues.md).
+
+A Job with `worker = true` used to start a new thread that booted the whole app for each job (seconds of CPU and hundreds of MB per job). Worker jobs now run on a small pool of threads that boot the app once and stay up for the life of the process.
+
+- **Shared app per thread.** Jobs on the same thread share its booted app, the same way main-thread jobs share the server's. A job's module-level state, unfinished transactions and floating rejections stay on the thread for the jobs after it. A job that relied on a fresh app each run must reset its own state.
+- **New `Job.workerTimeout`**, default 10 minutes (`Infinity` turns it off). Before, there was no limit. Past the limit, the thread is terminated and the attempt fails through the normal retry/dead-letter path.
+- **New queue config keys.** `workerThreads` sets the pool size (default `min(2, max(1, cores - 1))`). `workerBootTimeout` limits a thread's boot (default 2 minutes). Each pool thread keeps a booted app in memory; on small replicas, `workerThreads: 1` caps that.
+- **No scheduler or queue claim loop in a job thread.** You no longer need `GEMI_NO_SCHEDULE` for worker threads.
+- **Crashes.** A crashed thread fails only the job it held and is replaced.
+
 # 0.241.0
 
 ## `useNavigate()` returns the same `push` and `replace` on every render (#1383)
