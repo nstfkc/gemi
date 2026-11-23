@@ -1,5 +1,5 @@
 //@ts-ignore - type-only; the module itself is loaded on first use by `metadata()`.
-import type sharp from "sharp";
+import type { Metadata as SharpMetadata } from "sharp";
 
 import { Buffer } from "node:buffer";
 import { loadSharp } from "../support/sharp";
@@ -28,7 +28,7 @@ import {
 } from "../services/file-storage/putFromUrl";
 import { Facade } from "./Facade";
 
-type Metadata = Prettify<sharp.Metadata>;
+type Metadata = Prettify<SharpMetadata>;
 
 export class Storage extends Facade {
   static getFacadeAccessor() {
