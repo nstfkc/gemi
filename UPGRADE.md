@@ -1,3 +1,14 @@
+# 0.242.3
+
+## The client stops following redirects that loop (#1390)
+
+A client navigation that is redirected back to a URL it already passed through
+(A → B → A), or more than 5 times, no longer follows the redirects with
+`history.replaceState` until the browser throws (Safari: `SecurityError` past
+100 calls in 10 seconds). gemi logs the chain with `console.error` and loads the
+target in full once (at most once per URL per 30 s, like chunk-load recovery,
+regardless of `chunkLoadRecovery: false`). Nothing to change in your app.
+
 # 0.242.2
 
 ## Redirects and refusals answered to `.json` navigations are never cached (#1388)
