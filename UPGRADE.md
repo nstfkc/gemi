@@ -28,7 +28,8 @@ status 404 on a page load, and on an in-app navigation too.
   returns them.
 - A `:` inside a concrete path (`/u/a:b`) no longer throws `Missing parameter`
   on the first render: the client router looks a view's data up under the path
-  it is on, as the server filed it.
+  it is on, as the server filed it. `useSearchParams().push()` on
+  such a page no longer throws it either: it stays on the path as it is.
 
 # 0.242.3
 

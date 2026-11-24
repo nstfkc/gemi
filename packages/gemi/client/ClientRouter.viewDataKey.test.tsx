@@ -7,6 +7,7 @@ import { hydrateRoot, type Root } from "react-dom/client";
 import { ClientRouter } from "./ClientRouter";
 import { ServerDataContext, type ServerDataContextValue } from "./ServerDataProvider";
 import { Link } from "./Link";
+import { useSearchParams } from "./useSearchParams";
 import { useParams } from "./useParams";
 import { ViewRouter } from "../http/ViewRouter";
 import { createComponentTree } from "../services/router/createComponentTree";
@@ -28,8 +29,12 @@ vi.mock("./HttpReload", () => ({ HttpReload: () => null }));
  * which is not what the browser sent. A view on such a path got `{}`.
  */
 
+let searchPush: (mode: "soft" | "hard") => void;
+
 function Profile(props: { name?: string }) {
   const params = useParams() as { id?: string };
+  const searchParams = useSearchParams();
+  searchPush = (mode) => searchParams.set("tab", "2").push(mode);
   return (
     <>
       <p data-probe data-name={props.name ?? "(none)"} data-id={params.id ?? ""} />
@@ -200,5 +205,39 @@ describe("a view's loader data on a path whose params re-encode differently", ()
     expect(window.location.pathname).toBe(`/u/${encodeURIComponent(id)}`);
     expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(snapshot()).toEqual({ name: "loaded", id });
+  });
+
+  test.each(cases)("useSearchParams().push() on %s stays on that path", async (path, id) => {
+    globalThis.fetch = vi.fn() as unknown as typeof fetch;
+    await directLoad(path);
+    await act(async () => searchPush("soft"));
+
+    expect(window.location.pathname + window.location.search).toBe(`${path}?tab=2`);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(snapshot()).toEqual({ name: "loaded", id });
+  });
+
+  test("a hard push on /u/a:b fetches that path", async () => {
+    const requested: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      requested.push(new URL(String(input), "http://gemi.dev").pathname);
+      return new Response(
+        JSON.stringify({
+          data: { "/u/a:b": { Profile: { name: "fetched" } } },
+          breadcrumbs: {},
+          prefetchedData: {},
+          meta: {},
+          i18n: { dictionary: {}, currentLocale: "en-US", supportedLocales: ["en-US"], defaultLocale: "en-US" },
+          appId: "test",
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    await directLoad("/u/a:b");
+    await act(async () => searchPush("hard"));
+    await act(async () => {});
+
+    expect(requested).toEqual(["/u/a:b.json"]);
+    expect(snapshot()).toEqual({ name: "fetched", id: "a:b" });
   });
 });

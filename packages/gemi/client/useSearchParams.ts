@@ -1,7 +1,6 @@
 import { useContext } from "react";
-import { useNavigate } from "./useNavigate";
+import { CONCRETE_PATH, useNavigate } from "./useNavigate";
 import { RouteStateContext } from "./RouteStateContext";
-import { useParams } from "./useParams";
 
 type SearchParamsCallback = (
   search: Record<string, any>,
@@ -96,15 +95,14 @@ class SearchParams {
 export function useSearchParams() {
   const { push } = useNavigate();
   const { search, pathname } = useContext(RouteStateContext);
-  const params = useParams();
 
   const callback = (search: Record<string, never>, shallow: boolean) => {
     push(
       pathname as never,
       {
-        params,
         search,
         shallow,
+        [CONCRETE_PATH]: true,
       } as any,
     );
   };
