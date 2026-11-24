@@ -282,6 +282,27 @@ export function recoverFromBuildMismatch({
 }
 
 /**
+ * Loads `url` in full because the client's redirects went round in a loop
+ * (two routes sending a navigation to each other, a stale cached `.json`
+ * redirect). Following them client-side calls `history.replaceState` on every
+ * hop, and Safari throws `SecurityError` past 100 calls in 10 seconds. A
+ * document load asks the server afresh, and a real loop there is one the
+ * browser stops on its own. Same guard as a chunk failure, once per URL per
+ * cooldown, and not subject to `chunkLoadRecovery: false`: it is the loop
+ * breaker, not a recovery an app opts out of. Returns whether the load was
+ * started; when it was not, the caller leaves the page on screen.
+ */
+export function recoverFromRedirectLoop(url: string): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  if (loadPending(url)) {
+    return true;
+  }
+  return loadInFull(url, reloadBlock(url));
+}
+
+/**
  * The build that answered a `.json` navigation, when it is not `clientBuild`;
  * otherwise `null`. Unknown on either side (dev, a test double, a server from
  * before the header) is not a mismatch.

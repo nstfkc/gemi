@@ -26,10 +26,33 @@ status 404 on a page load, and on an in-app navigation too.
   into the URL raw and now goes in as `%20` or `%25`.
 - `<Page params>` in `gemi/testing` takes decoded values, as `useParams()`
   returns them.
-- The client router looks a view's data up under the path it is on, as the
-  server filed it, not under one rebuilt from the params. A page such as
-  `/u/john@x.com` or `/u/c++` keeps its loader data, and a `:` in the path
-  (`/u/a:b`) no longer throws `Missing parameter` on the first render.
+- A `:` inside a concrete path (`/u/a:b`) no longer throws `Missing parameter`
+  on the first render: the client router looks a view's data up under the path
+  it is on, as the server filed it.
+
+# 0.242.3
+
+## The client stops following redirects that loop (#1390)
+
+A client navigation that is redirected back to a URL it already passed through
+(A → B → A), or more than 5 times, no longer follows the redirects with
+`history.replaceState` until the browser throws (Safari: `SecurityError` past
+100 calls in 10 seconds). gemi logs the chain with `console.error` and loads the
+target in full once (at most once per URL per 30 s, like chunk-load recovery,
+regardless of `chunkLoadRecovery: false`). Nothing to change in your app.
+
+# 0.242.2
+
+## Redirects and refusals answered to `.json` navigations are never cached (#1388)
+
+A `Redirect.to(...)` (or any other request breaker) thrown during a client
+navigation's `.json` request now answers with
+`Cache-Control: private, no-cache, no-store, max-age=0, must-revalidate`, the
+same header the full page load's 307 carries. Before, the 200 redirect
+directive left with no `Cache-Control`, so a CDN caching by path could serve one
+user's redirect to everyone. A breaker that sets its own `Cache-Control` keeps
+it. Nothing to change in your app; if you disabled caching for `.json` view
+data at the edge as a workaround, you can keep or drop it.
 
 # 0.242.1
 

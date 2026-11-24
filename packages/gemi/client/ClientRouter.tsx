@@ -43,7 +43,12 @@ import {
   resetAuthenticationIncident,
   setAuthenticationNavigator,
 } from "./authenticationErrors";
-import { isChunkLoadError, navigationStarted, recoverFromBuildMismatch } from "./chunkLoadRecovery";
+import {
+  isChunkLoadError,
+  navigationStarted,
+  recoverFromBuildMismatch,
+  recoverFromRedirectLoop,
+} from "./chunkLoadRecovery";
 import { restoreScroll } from "./scrollRestoration";
 
 declare global {
@@ -209,6 +214,14 @@ export const Tree = memo(
   },
 );
 
+/**
+ * How many redirects one navigation follows client-side before gemi stops and
+ * loads the page in full. Each hop is a `history.replaceState`, and a loop of
+ * them (two routes redirecting to each other) used to spin until the browser
+ * threw: Safari allows 100 calls in 10 seconds.
+ */
+const MAX_CLIENT_REDIRECTS = 5;
+
 const Routes = (props: { componentTree: ComponentTree }) => {
   const { componentTree } = props;
   const [isPending, startTransition] = useTransition();
@@ -337,11 +350,24 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     };
   });
 
+  // The URLs the current navigation has been redirected through, starting with
+  // the one it set out for. `followingRedirectRef` is set just before the
+  // router follows a redirect, whose `replace` reaches the subscriber below
+  // synchronously, so that navigation carries the chain on; any other
+  // navigation starts a new one.
+  const redirectChainRef = useRef<string[]>([]);
+  const followingRedirectRef = useRef(false);
+
   useEffect(() => {
     return routerSubject?.subscribe(async (routerState) => {
       const { fetchRouteCSS, preloadRouteModules, takePrefetched, hydrate, buildId } =
         subscriberDepsRef.current;
       const { pathname, search, state, views } = routerState;
+      const here = currentUrl();
+      redirectChainRef.current = followingRedirectRef.current
+        ? [...redirectChainRef.current, here]
+        : [here];
+      followingRedirectRef.current = false;
       // A full load an earlier navigation started and the page is still here
       // for was cancelled ("Stay" on a dirty editor's prompt): this navigation
       // gets its own recovery rather than being discarded behind it.
@@ -441,11 +467,36 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           if (isExternalRedirect(directive?.path)) {
             window.location.replace(directive.path);
           } else if (directive?.path) {
+            const chain = redirectChainRef.current;
+            const target = new URL(directive.path, window.location.href);
+            // Back to a URL this navigation already passed through, or more
+            // hops than any sane redirect chain takes: a loop. Following it
+            // would replace the history entry forever, so the page is loaded
+            // in full instead, once; the server answers a document request
+            // afresh. Refused (it already did that inside the cooldown), the
+            // current page stays on screen.
+            if (
+              chain.includes(target.pathname + target.search) ||
+              chain.length > MAX_CLIENT_REDIRECTS
+            ) {
+              console.error(
+                `gemi: stopped following client redirects that loop: ${[...chain, target.pathname + target.search].join(" -> ")}`,
+              );
+              if (!recoverFromRedirectLoop(target.href)) {
+                setIsFetching(false);
+              }
+              return;
+            }
             // `directive.path` is a concrete url the server built, not a route
             // pattern, so there is nothing to substitute. It used to need an
             // empty `params` and an `as unknown` to get past the signature —
             // the framework's own copy of the bug apps hit.
-            replace(directive.path);
+            followingRedirectRef.current = true;
+            void replace(directive.path);
+            // Only the navigation `replace` started synchronously may carry the
+            // chain; one that did not happen (same URL, an absolute path) must
+            // not hand it to the next, unrelated navigation.
+            followingRedirectRef.current = false;
           }
 
           return;
@@ -535,6 +586,10 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     </RouteTransitionProvider>
   );
 };
+
+function currentUrl() {
+  return window.location.pathname + window.location.search;
+}
 
 export const ClientRouter = (props: {
   viewImportMap?: Record<string, ReturnType<typeof lazy>>;
