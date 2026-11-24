@@ -240,3 +240,29 @@ describe("Link hover prefetch", () => {
     expect(prefetch.mock.calls[0][0]).toBe("/about");
   });
 });
+
+describe("a link to the page on screen, in another spelling (#1322)", () => {
+  const me = (props: object) => (
+    <Link href={"/u/:id" as never} params={{ id: "john@x.com" } as never} {...props}>
+      Me
+    </Link>
+  );
+
+  test("a click stays put", () => {
+    click(render(me({}), "/u/john@x.com"));
+    expect(push).not.toHaveBeenCalled();
+    expect(lastClickPrevented).toBe(true);
+  });
+
+  test("a click that changes the search is shallow", () => {
+    click(render(me({ search: { tab: "2" } }), "/u/john@x.com"));
+    expect(push).toHaveBeenCalledWith("/u/:id", expect.objectContaining({ shallow: true }));
+  });
+
+  test("it is not prefetched", () => {
+    render(me({ prefetch: "render" }), "/u/john@x.com");
+    expect(prefetch).not.toHaveBeenCalled();
+    render(me({ prefetch: "render", key: "other" }), "/u/someone");
+    expect(prefetch).toHaveBeenCalledTimes(1);
+  });
+});

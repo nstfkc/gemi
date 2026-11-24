@@ -1,6 +1,7 @@
 import { useCallback, useContext } from "react";
 
 import { applyParams } from "../utils/applyParams";
+import { canonicalPath } from "../utils/pathParams";
 import { ClientRouterContext } from "./ClientRouterContext";
 import { I18nContext } from "./I18nContext";
 import { useLocation } from "./useLocation";
@@ -104,7 +105,10 @@ export function usePrefetch() {
 
       // The route already on screen has nothing to warm, and eagerly prefetched
       // links pointing back at it would just replay the current page's queries.
-      if (pathname === currentPathname && searchSegment === currentSearch) {
+      if (
+        canonicalPath(pathname) === canonicalPath(currentPathname) &&
+        searchSegment === currentSearch
+      ) {
         return;
       }
 

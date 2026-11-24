@@ -34,6 +34,7 @@ import { updateMeta } from "./Head";
 import { resolveHtmlAttributes, type RootLayoutProps } from "./htmlAttributes";
 import { RouteTransitionProvider } from "./RouteTransitionProvider";
 import { ThemeProvider } from "./ThemeProvider";
+import { canonicalPath } from "../utils/pathParams";
 import { initialRenderedRoute } from "../utils/partialRender";
 import { mergeCarriedSegments } from "./helpers/mergeCarriedSegments";
 import { routeDataUrl } from "./helpers/routeDataUrl";
@@ -396,6 +397,13 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         setRouteState((state) => ({
           ...state,
           ...routerState,
+          // The same page under another spelling (`/u/john%40x.com` from
+          // `/u/john@x.com`): its data has to be found under the new one.
+          ...(pathname !== state.pathname &&
+          canonicalPath(pathname) === canonicalPath(state.pathname) &&
+          state.data?.[state.pathname]
+            ? { data: { ...state.data, [pathname]: state.data[state.pathname] } }
+            : null),
         }));
         return;
       }

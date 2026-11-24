@@ -34,6 +34,7 @@ function Profile(props: { name?: string }) {
     <>
       <p data-probe data-name={props.name ?? "(none)"} data-id={params.id ?? ""} />
       <Link data-to="email" href={"/u/john@x.com" as never}>email</Link>
+      <Link data-to="tab" href={"/u/:id" as never} search={{ tab: "2" } as never}>tab</Link>
       <Link data-to="tag" href={"/u/c++" as never}>tag</Link>
     </>
   );
@@ -180,5 +181,24 @@ describe("a view's loader data on a path whose params re-encode differently", ()
     expect(requested).toHaveLength(1);
     expect(window.location.pathname).toBe(path);
     expect(snapshot()).toEqual({ name: `navigated to ${id}`, id });
+  });
+
+  test.each([
+    ["/u/john@x.com", "john@x.com"],
+    ["/u/c++", "c++"],
+  ])("a shallow click on %s keeps its data under the new spelling", async (path, id) => {
+    globalThis.fetch = vi.fn() as unknown as typeof fetch;
+    await directLoad(path);
+    await act(async () => {
+      container!
+        .querySelector('[data-to="tab"]')!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+    });
+    await act(async () => {});
+
+    expect(window.location.search).toBe("?tab=2");
+    expect(window.location.pathname).toBe(`/u/${encodeURIComponent(id)}`);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(snapshot()).toEqual({ name: "loaded", id });
   });
 });
