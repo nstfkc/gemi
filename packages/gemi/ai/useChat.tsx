@@ -1141,6 +1141,18 @@ const sameRuns = (a: ChatRun[], b: ChatRun[]) =>
 
 /** How often a run announced mid-stream checks whether the chat is free to attach it. */
 const WATCH_RECHECK_MS = 100;
+/**
+ * How long the requests in flight outlive the hook's effects (#1391).
+ *
+ * React runs effect cleanups without unmounting: an `<Activity>` that hides
+ * the chat, and in development a `<StrictMode>` that reconnects effects when a
+ * re-suspended `<Suspense>` boundary shows its content again. The state
+ * survives and the effects run again on show, so a reply that is streaming
+ * must survive too. A cleanup only starts this timer; the effect running again
+ * cancels it. A chat still gone when it fires is taken as unmounted, and its
+ * requests are closed.
+ */
+const DISCONNECT_GRACE_MS = 30_000;
 /** The first wait before `watch` follows the thread again after a dropped stream. */
 const WATCH_RETRY_MS = 1_000;
 const WATCH_RETRY_MAX_MS = 30_000;
@@ -1261,14 +1273,53 @@ export function useChat<P extends keyof AgentRoutes>(
   const requestRef = useRef({ base, headers, extraBody, ifBusy: hookIfBusy });
   requestRef.current = { base, headers, extraBody, ifBusy: hookIfBusy };
 
+  // `mountedRef` is false once the chat is taken as gone: its effects cleaned
+  // up and not run again within `DISCONNECT_GRACE_MS` (#1391). Hidden, it
+  // keeps streaming and committing; React keeps a hidden component's updates.
+  const disconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    mountedRef.current = true;
+    if (disconnectRef.current !== null) {
+      clearTimeout(disconnectRef.current);
+      disconnectRef.current = null;
+    }
+    if (!mountedRef.current) {
+      // Shown again after the grace ran out: what the refs moved on to while
+      // nothing was committed.
+      mountedRef.current = true;
+      setState(stateRef.current!);
+      setPhase(phaseRef.current);
+      syncRuns();
+    }
     return () => {
-      mountedRef.current = false;
-      for (const flight of flightsRef.current) flight.controller.abort();
-      flightsRef.current.clear();
+      disconnectRef.current = setTimeout(() => {
+        disconnectRef.current = null;
+        mountedRef.current = false;
+        if (flightsRef.current.size === 0) return;
+        for (const flight of flightsRef.current) flight.controller.abort();
+        flightsRef.current.clear();
+        phaseRef.current = "idle";
+        // Not a stop: the server's run carries on. A chat shown again says
+        // its reply was cut rather than streaming forever; `reattach()`
+        // picks the run up again on a thread.
+        const cut = markAllAborted(stateRef.current!);
+        stateRef.current = {
+          ...cut,
+          // As `stop()` does: an answer cut before the server took it is
+          // answerable again (#1106).
+          pending: withAnswering(
+            cut.pending,
+            new Set(cut.pending.map((call: PendingToolCall) => call.toolCallId)),
+            false,
+          ),
+          error: {
+            code: "aborted",
+            message: "The chat was hidden while a reply streamed, and the request was closed.",
+            retryable: true,
+          },
+        };
+      }, DISCONNECT_GRACE_MS);
     };
-  }, []);
+  }, [syncRuns]);
 
   const commit = useCallback((next: ChatState<any, any>) => {
     stateRef.current = next;

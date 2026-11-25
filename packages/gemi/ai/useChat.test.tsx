@@ -188,6 +188,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -2257,6 +2258,8 @@ describe("lifecycle", () => {
   });
 
   test("unmount aborts the request in flight and sets no state after it", async () => {
+    // The abort waits out the grace a hidden chat gets (#1391).
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const run = controlled();
     let signal: AbortSignal | undefined;
     fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
@@ -2276,6 +2279,9 @@ describe("lifecycle", () => {
     });
 
     unmount();
+    expect(signal!.aborted).toBe(false);
+    vi.advanceTimersByTime(30_000);
+    vi.useRealTimers();
     expect(signal!.aborted).toBe(true);
 
     // Frames that were already on the wire when the component went away.
