@@ -1,4 +1,9 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+
+import { FileSystemDriver } from "../services/file-storage/drivers/FileSystemDriver";
 
 import {
   createStreamResponse,
@@ -339,6 +344,43 @@ describe("createStreamResponse() output forms", () => {
       exists: async () => false,
     });
     expect((await serve(missing)).status).toBe(404);
+  });
+
+  test("does not ask exists() of a window the driver already sliced (#1397)", async () => {
+    // Bun 1.4 answers `exists()` with false for a sliced BunFile, even though
+    // the file is there. The driver opened the file before slicing it.
+    const window = Object.assign(new Blob(["2345"]), {
+      exists: async () => false,
+    });
+    const res = await serve(
+      { body: window, start: 2, end: 5, total: 10, partial: true, type: "video/mp4" },
+      "bytes=2-5",
+    );
+
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe("bytes 2-5/10");
+    expect(await res.text()).toBe("2345");
+  });
+
+  test("serves a Range on a filesystem-stored file as a 206 (#1397)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "gemi-range-"));
+    try {
+      await writeFile(join(root, "v.mp4"), TEN);
+      const driver = new FileSystemDriver(root);
+      const range = parseRangeHeader("bytes=4-7");
+
+      const res = await createStreamResponse(
+        await driver.read({ name: "v.mp4", range }),
+        { range },
+      );
+
+      expect(res.status).toBe(206);
+      expect(res.headers.get("Content-Range")).toBe("bytes 4-7/10");
+      expect(res.headers.get("Content-Length")).toBe("4");
+      expect(await res.text()).toBe("4567");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("sets Content-Disposition from a descriptor", async () => {
