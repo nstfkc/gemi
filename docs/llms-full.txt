@@ -3523,7 +3523,7 @@ A `"*"` key allows any origin: the response gets `Access-Control-Allow-Origin: *
 
 ### `same-site-bounce` → `SameSiteBounceMiddleware`
 
-For a page that needs the session and that another site redirects the browser to: an OAuth callback, a payment provider's return URL. The `access_token` cookie is `SameSite=Strict`, so the browser leaves it off a navigation another site started, and `auth` sends a signed-in user to the sign-in page. Listed before `auth`, this answers such a request with a small page (`<meta http-equiv="refresh">`, no script, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`) that loads the same URL again from this origin with `?gemi_same_site=1`. That navigation is same-site, so the cookie goes with it.
+For a page that needs the session and that another site redirects the browser to: an OAuth callback, a payment provider's return URL. gemi writes the `access_token` cookie `SameSite=Lax`, which such a navigation carries; a `SameSite=Strict` one (written before 0.244, or by an app that overrides `accessTokenCookieOptions`) is left off it, and `auth` sends a signed-in user to the sign-in page. Listed before `auth`, this answers such a request with a small page (`<meta http-equiv="refresh">`, no script, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`) that loads the same URL again from this origin with `?gemi_same_site=1`. That navigation is same-site, so the cookie goes with it.
 
 ```typescript
 // app/config/middleware.ts
@@ -16697,7 +16697,9 @@ isSessionToken(token); // true — the prefix is the whole test
 
 The cookie such a token is written as comes from `AuthManager.accessTokenCookieOptions(req,
 expiresAt)`, which every `access_token` write in gemi goes through (`Secure` from the scheme
-the client addressed, `HttpOnly`, and `cookieDomain`).
+the client addressed, `HttpOnly`, `SameSite=Lax`, and `cookieDomain`). `Lax` lets a signed-in
+user who follows a link to the app from another site arrive signed in, while a cross-site
+`POST`, frame or `fetch` still goes without the cookie.
 
 #### Converting sessions from before 0.64
 
@@ -17994,10 +17996,10 @@ The framework mounts two view routes, both behind the [`auth` middleware](#the-a
 - `/auth/connections/:provider/callback` checks the round trip, exchanges the code, stores the
   connection for the signed-in user, calls `onConnected`, and redirects back.
 
-The provider's redirect back is a navigation another site started, so the browser leaves the
-`SameSite=Strict` session cookie off it. The callback answers that hop with a small same-origin
-page that loads the same URL again (with `?gemi_same_site=1`); that navigation carries the cookie,
-and the callback goes on as the signed-in user. See
+The provider's redirect back is a navigation another site started, so the browser leaves a
+`SameSite=Strict` session cookie (one written before 0.244) off it. The callback answers that
+hop with a small same-origin page that loads the same URL again (with `?gemi_same_site=1`); that
+navigation carries the cookie, and the callback goes on as the signed-in user. See
 [`same-site-bounce`](middleware.md#same-site-bounce--samesitebouncemiddleware).
 
 A "Connect Figma" button is a link. `?redirect=` names the same-origin page to come back to
