@@ -13,11 +13,13 @@ const NO_STORE = "private, no-cache, no-store, max-age=0, must-revalidate";
  * another site: an OAuth connection's callback, a payment provider's return
  * URL.
  *
- * The `access_token` cookie is `SameSite=Strict`, so the browser leaves it off
- * a top-level navigation that another site started — the provider's redirect
- * back included. `auth` then sees nobody and sends a signed-in user to the
- * sign-in page. Listed ahead of `auth`, this answers such a request with a
- * tiny page that loads the same URL again from this origin
+ * gemi writes `access_token` `SameSite=Lax`, which a top-level `GET` from
+ * another site carries. A cookie written `SameSite=Strict` (by gemi before it
+ * switched to `Lax`, until the session is next written; or by an app that
+ * overrides `accessTokenCookieOptions`) is left off such a navigation — the
+ * provider's redirect back included. `auth` then sees nobody and sends a
+ * signed-in user to the sign-in page. Listed ahead of `auth`, this answers
+ * such a request with a tiny page that loads the same URL again from this origin
  * (`<meta http-equiv="refresh">`, no script). That second navigation is
  * same-site, the cookie goes with it, and `auth` runs as usual.
  *

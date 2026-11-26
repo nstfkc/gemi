@@ -130,7 +130,9 @@ isSessionToken(token); // true — the prefix is the whole test
 
 The cookie such a token is written as comes from `AuthManager.accessTokenCookieOptions(req,
 expiresAt)`, which every `access_token` write in gemi goes through (`Secure` from the scheme
-the client addressed, `HttpOnly`, and `cookieDomain`).
+the client addressed, `HttpOnly`, `SameSite=Lax`, and `cookieDomain`). `Lax` lets a signed-in
+user who follows a link to the app from another site arrive signed in, while a cross-site
+`POST`, frame or `fetch` still goes without the cookie.
 
 #### Converting sessions from before 0.64
 
@@ -1427,8 +1429,8 @@ The framework mounts two view routes, both behind the [`auth` middleware](#the-a
 - `/auth/connections/:provider/callback` checks the round trip, exchanges the code, stores the
   connection for the signed-in user, calls `onConnected`, and redirects back.
 
-The provider's redirect back is a navigation another site started, so the browser leaves the
-`SameSite=Strict` session cookie off it. The callback answers that hop with a small same-origin
+The provider's redirect back is a navigation another site started, so the browser leaves a
+`SameSite=Strict` session cookie (one written before 0.244) off it. The callback answers that hop with a small same-origin
 page that loads the same URL again (with `?gemi_same_site=1`); that navigation carries the cookie,
 and the callback goes on as the signed-in user. See
 [`same-site-bounce`](middleware.md#same-site-bounce--samesitebouncemiddleware).

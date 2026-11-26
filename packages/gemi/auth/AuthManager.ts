@@ -130,6 +130,13 @@ export class AuthManager {
       // not `localhost`, and could not sign in.
       secure: this.publicOrigin(req).startsWith("https://"),
       httpOnly: true,
+      // `Lax`, not the `Strict` default: a signed-in user who follows a link
+      // to the app from another site (a chat message, an email, a document)
+      // has to arrive signed in. A `Strict` cookie is left off that top-level
+      // navigation, so `auth` sent them to the sign-in page, and the redirect
+      // there, part of the same navigation, went without it too. `Lax` still
+      // withholds the cookie from cross-site `POST`s, frames and `fetch`es.
+      sameSite: "Lax",
       domain: this.cookieDomain(req),
     };
   }

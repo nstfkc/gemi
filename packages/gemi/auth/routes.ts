@@ -56,9 +56,10 @@ class ConnectionsViewRouter extends ViewRouter {
   middlewares = ["cache:private"];
   routes = {
     "/:provider": this.redirect([ConnectionsController, "connect"]).middleware(["auth"]),
-    // The provider's redirect back is a cross-site navigation, which the
-    // `SameSite=Strict` session cookie does not ride along on: the bounce
-    // reloads it from this origin before `auth` looks for the user.
+    // The provider's redirect back is a cross-site navigation, which a
+    // `SameSite=Strict` session cookie (one written before gemi switched it to
+    // `Lax`) does not ride along on: the bounce reloads it from this origin
+    // before `auth` looks for the user.
     "/:provider/callback": this.redirect([ConnectionsController, "callback"]).middleware([
       SameSiteBounceMiddleware as unknown as string,
       "auth",

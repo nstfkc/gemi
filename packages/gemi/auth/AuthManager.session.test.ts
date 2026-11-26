@@ -222,6 +222,11 @@ describe("expiry", () => {
     expect(result!.user.id).toBe(1);
     expect(row.expiresAt.getTime()).toBe(row.absoluteExpiresAt.getTime());
     expect(accessTokenCookie(cookies)).toBe(token);
+    // Rewritten as sign-in writes it: `Lax`, so a link from another site
+    // still arrives signed in.
+    const written = cookies.find((c) => c.startsWith("access_token="))!;
+    expect(written).toContain("SameSite=Lax");
+    expect(written).not.toContain("SameSite=Strict");
   });
 
   test("a fresh session is not rewritten on every request", async () => {
