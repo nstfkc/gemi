@@ -156,6 +156,76 @@ const look = AgentTool.create({
 ```
 - `mcpCallOf(ctx)` answers the call (caller, request, tool, input) inside a native tool called through the registry. It answers `undefined` when the agent holds the tool directly, or when the run was not started inside a request.
 
+## A public endpoint on every host
+
+`route.mcp.remote` serves the app's own tools at one URL, to callers who signed in. Some protocols need the other kind: an MCP binding that anyone may call without an account, on every host of a [domain group](./domains.md) (each tenant's subdomain and custom domain), whose tools depend on the host. An `McpEndpoint` is that. It is a route, so it answers wherever its router is mounted, and the request decides everything. Both kinds can live in one app.
+
+```ts
+// app/http/mcp/ShopMcp.ts
+import { s } from "gemi/ai";
+import { HttpRequest, McpEndpoint, McpEndpointError } from "gemi/http";
+
+export class ShopMcp extends McpEndpoint<Shop> {
+  // Required: who may call. "anonymous" is the only value, and it has to be written down.
+  caller = "anonymous" as const;
+  server = { name: "shop", version: "1.0.0", instructions: "This shop's catalog and checkout." };
+
+  // Once per request, before the body is read. null answers 404.
+  context(req: HttpRequest) {
+    return Shop.forHost(req.domain?.params.shop);
+  }
+
+  tools = {
+    search_catalog: this.tool({
+      title: "Search the catalog",
+      description: "Searches this shop's catalog.",
+      inputSchema: s.object({ query: s.string() }),
+      annotations: { readOnlyHint: true },
+      offered: (shop) => shop.hasCatalog,
+      rateLimit: "POST /catalog/search",
+      run: ({ query }, { context }) => context.search(query),
+    }),
+    cancel_checkout: this.tool({
+      description: "Cancels a checkout.",
+      // A JSON Schema is listed as written and not checked: `run` checks the arguments.
+      inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      offered: (shop) => shop.hasCheckout,
+      rateLimit: "POST /checkout/:id/cancel",
+      run: async (args, { context }) => {
+        const reply = await context.cancelCheckout(args.id);
+        if (reply.status === 409) throw new McpEndpointError(-32000, "Conflict", { status: 409, data: reply.body });
+        return reply.status < 400 ? reply.body : McpEndpoint.result(reply.body, { isError: true });
+      },
+    }),
+  };
+}
+
+// app/http/routes/shop/api.ts, the api router of the ":shop" group
+"/mcp": this.mcp(ShopMcp).middleware(["rate-limit:120"]),
+```
+
+- **Caller.** `caller = "anonymous"` is required, and mounting a class without it fails the boot, so an endpoint open to everyone is always a decision someone wrote. No user is resolved for a call and no credential is read. `route.mcp.remote` still refuses to boot without a resolver.
+- **Hosts.** The endpoint answers on every host its router serves, custom domains included, and `call.req.domain.params` is the host's. It has no OAuth metadata, registration or consent paths. GET and DELETE answer 405.
+- **Context and tools per request.** `context(req)` runs once per POST. It answers what the tools work on, `null` for a 404 or a `Response` to answer as it is. Each tool's `offered(context, req)` decides `tools/list` and `tools/call` alike. A call to a tool the host does not offer answers `-32602 Unknown tool`, the same as one that does not exist.
+- **Arguments.** An `s` schema is listed as JSON Schema and parses the arguments, and a failure is an error result the model can act on. A JSON Schema object is listed exactly as written and not checked, for a protocol that fixes its schemas in its own document. Either way the arguments must be an object.
+- **Results.** An object is `structuredContent`, with the same JSON as text. A string is text. `McpEndpoint.result(body, { isError: true })` is a business outcome (not found, invalid) as an error result, `structuredContent` included. Throw `McpEndpointError(code, message, { status, data, headers })` to answer a JSON-RPC error with that HTTP status instead. Anything else thrown is logged, and the client is only told that the tool failed.
+- **Transport.** Streamable HTTP, stateless: one JSON response per POST. No session id is issued, no SSE stream is opened and a progress token is ignored. It speaks `initialize`, `ping`, `tools/list` and `tools/call`, plus the 2026-07-28 stateless requests (`server/discover`, `_meta`, the `Mcp-Method` and `Mcp-Name` headers checked against the body). Notifications answer 202, batches 400, a body that is not `application/json` 415, an unknown `MCP-Protocol-Version` 400. `maxBodyBytes` defaults to 1 MiB.
+
+### Rate limits of a public endpoint
+
+Every limit of a public endpoint is keyed on the client's address, since there is no credential to key it on:
+
+- **The endpoint:** `rateLimit = { limit, window }` on the class, every POST counted once per address. The default is 600 per 60 seconds, and `false` turns it off. The route's own middleware (`rate-limit:120` above) runs too.
+- **A tool's twin:** `rateLimit: "POST /catalog/search"` names the REST route the tool is another way into. A call runs the `rate-limit` middleware of that route's list (and any alias built with `RateLimitMiddleware.configure`, whatever `key` it was given), with the route's `routePath` and the caller's address, before the arguments are read. It is the same middleware with the same key, so a tool call and a direct request share one counter, in both directions. Over budget answers JSON-RPC `-32000`, HTTP 429, with `Retry-After`. The route is looked up in the api of the request's host group by its full path without `/api`. A twin that is not there fails every call of the tool with a logged error, never an unlimited run. The rest of the twin's middleware (auth, policies) does not run: the tool is its own authorization.
+- **A tool's own budget:** `rateLimit: { limit, window }` on the tool, per address.
+
+### Security notes for a public endpoint
+
+- **A tool is its own authorization.** Nothing runs before `run` but the rate limits and `offered`. Answer only what the host offers to anyone.
+- **Do not read the session.** `call.req` is the raw request, cookies included, and gemi resolves no user for it. A tool that looked one up would let a page the user visits act as them. The endpoint takes only `application/json`, so a plain cross-site form cannot post to it, and it sends no CORS headers unless the route sets `.cors()`.
+- **No Origin check.** Streamable HTTP's Origin check protects credentials from DNS rebinding. This endpoint reads none, and it answers only on hosts the domain group resolved.
+- **Addresses.** Every budget is keyed on `clientAddress(req)`. Behind a proxy, set it up so that is the visitor's address (`trustProxy.clientIpHeader`, [domains](./domains.md#the-clients-address)), or every visitor shares one budget.
+
 ## Remote access
 
 Enable the endpoint in `app/config/route.ts`, with at least one caller resolver:

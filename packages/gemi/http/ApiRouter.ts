@@ -29,6 +29,7 @@ import { RangeNotSatisfiableError } from "./errors";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
 import { normalizeCorsPolicy, type CorsPolicy, type NormalizedCorsPolicy } from "./corsPolicy";
+import type { McpEndpoint, McpEndpointRoute } from "./McpEndpoint";
 import { withheldFromUpstream } from "./requestDomain";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -668,6 +669,23 @@ export class ApiRouter {
 
   public proxy(url: string, headers: Record<string, string> = {}) {
     return new ProxyHandler(url, headers);
+  }
+
+  /**
+   * Mounts an `McpEndpoint` (#1401): an MCP server for callers without a
+   * credential, answered on every host this router serves. POST runs it, GET
+   * and DELETE answer 405. `.middleware()` and `.cors()` apply to the route.
+   *
+   * ```ts
+   * "/ucp/mcp": this.mcp(ShopUcpMcp).middleware(["rate-limit-ip:120"]),
+   * ```
+   */
+  public mcp(Endpoint: new () => McpEndpoint<any>): McpEndpointRoute {
+    const mount = (Endpoint as unknown as { __routes?: () => McpEndpointRoute }).__routes;
+    if ((Endpoint as { __brand?: unknown }).__brand !== "McpEndpoint" || typeof mount !== "function") {
+      throw new TypeError(`this.mcp() takes an McpEndpoint class, and got ${describeController(Endpoint)}.`);
+    }
+    return mount.call(Endpoint);
   }
 }
 

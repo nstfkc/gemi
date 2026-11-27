@@ -63,6 +63,14 @@ export interface RateLimitMiddlewareConfig {
  * against the in-memory driver locally and Redis in production.
  */
 export class RateLimitMiddleware extends Middleware<RateLimitMiddlewareConfig> {
+  /**
+   * Marks a rate limit, and every alias `configure()` builds from it, for
+   * code that has to find a route's rate limits in its middleware list
+   * (`McpEndpoint`'s `rateLimit: "POST /path"`). A static rather than
+   * `instanceof`, which two copies of gemi in one process would defeat.
+   */
+  static readonly isRateLimit = true;
+
   async run(limit?: string | number, window?: string | number) {
     const limiter = resolveLimiter();
 

@@ -127,6 +127,29 @@ export class MiddlewareRegistry {
   }
 
   /**
+   * The middleware classes a list stands for, in the order `runMiddleware`
+   * would build them, with each alias's params: a later entry of an alias
+   * replaces its params, a `-alias` removes it, and an unknown alias is
+   * skipped. A function entry (a router's inline middleware) is left out:
+   * it has no class to tell what it is. For code that runs part of a route's
+   * chain on its own, as `McpEndpoint` runs a route's rate limits.
+   */
+  public resolve(
+    middleware: (string | RouterMiddleware | (new (req: HttpRequest) => Middleware))[],
+  ): { Middleware: new (req: HttpRequest) => Middleware; params: string[] }[] {
+    const aliases = this.aliases;
+    const out: { Middleware: new (req: HttpRequest) => Middleware; params: string[] }[] = [];
+    for (const [key, params] of transformMiddleware(middleware).entries()) {
+      if (typeof key === "string") {
+        if (aliases[key]) out.push({ Middleware: aliases[key], params });
+      } else if (isConstructor(key)) {
+        out.push({ Middleware: key as new (req: HttpRequest) => Middleware, params: [] });
+      }
+    }
+    return out;
+  }
+
+  /**
    * Runs a middleware list in order, merging what each returns.
    *
    * When one throws — a refusal such as a `body-limit` 413 or a `rate-limit`

@@ -19,8 +19,8 @@ import {
 import { bearerToken, type McpCallerResolver, type McpResolveContext } from "./callers";
 import { overBudget } from "./limits";
 import {
+  checkModernHeaders,
   classify,
-  decodeHeaderValue,
   ErrorCode,
   errorResponse,
   isObject,
@@ -29,7 +29,6 @@ import {
   META_CLIENT_CAPABILITIES,
   META_PROTOCOL_VERSION,
   META_SERVER_INFO,
-  MODERN_VERSIONS,
   SUPPORTED_VERSIONS,
   toolJson,
   type JsonRpcId,
@@ -535,7 +534,7 @@ export class McpHttpServer {
     const meta = isObject(params._meta) ? params._meta : {};
 
     if (typeof meta[META_PROTOCOL_VERSION] === "string") {
-      this.checkModernHeaders(req, message, meta[META_PROTOCOL_VERSION] as string);
+      checkModernHeaders(req, message, meta[META_PROTOCOL_VERSION] as string);
       if (incoming.kind === "notification") return new Response(null, { status: 202 });
       return await this.respond(message as Call["message"], async (stream, signal) =>
         this.modern({
@@ -702,38 +701,6 @@ export class McpHttpServer {
       throw new JsonRpcError(ErrorCode.InvalidRequest, "Session not found.", undefined, 404);
     }
     return { id, state };
-  }
-
-  private checkModernHeaders(req: Request, message: JsonRpcRequest, version: string) {
-    if (!(MODERN_VERSIONS as readonly string[]).includes(version)) {
-      throw new JsonRpcError(
-        ErrorCode.UnsupportedProtocolVersion,
-        "Unsupported protocol version",
-        { supported: SUPPORTED_VERSIONS, requested: version },
-        400,
-      );
-    }
-    const mismatch = (what: string) =>
-      new JsonRpcError(ErrorCode.HeaderMismatch, `Header mismatch: ${what}`, undefined, 400);
-    if (req.headers.get("mcp-protocol-version") !== version) {
-      throw mismatch("MCP-Protocol-Version does not match the protocol version in _meta.");
-    }
-    if (req.headers.get("mcp-method") !== message.method) {
-      throw mismatch("Mcp-Method does not match the method.");
-    }
-    const params = message.params ?? {};
-    const named =
-      message.method === "tools/call" || message.method === "prompts/get"
-        ? params.name
-        : message.method === "resources/read"
-          ? params.uri
-          : undefined;
-    if (named !== undefined) {
-      const header = req.headers.get("mcp-name");
-      if (header === null || decodeHeaderValue(header) !== named) {
-        throw mismatch("Mcp-Name does not match the request's name.");
-      }
-    }
   }
 
   // --- tools/call ------------------------------------------------------------
