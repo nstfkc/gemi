@@ -2006,6 +2006,77 @@ describe("regenerate", () => {
     expect(bodyOf(0).regenerate).toBeUndefined();
   });
 
+  /** #1405: an event's text is not the person's words, and other turns stay. */
+  test("steps over a server event's turn and keeps it", async () => {
+    const { box } = mount({
+      threadId: "th_9",
+      attach: false,
+      initialMessages: [
+        { id: "u1", role: "user", content: [{ type: "text", text: "say hi" }], createdAt: "", turn: "u1" },
+        {
+          id: "a1",
+          role: "assistant",
+          content: [{ type: "text", text: "no" }],
+          createdAt: "",
+          finishReason: "stop",
+          turn: "u1",
+        },
+        {
+          id: "e1",
+          role: "user",
+          content: [{ type: "text", text: "Job ended." }],
+          createdAt: "",
+          event: { name: "job-settled" },
+          turn: "e1",
+        },
+        {
+          id: "ae1",
+          role: "assistant",
+          content: [{ type: "text", text: "noted" }],
+          createdAt: "",
+          finishReason: "stop",
+          turn: "e1",
+        },
+      ],
+    });
+
+    await act(async () => {
+      await box.api.regenerate();
+    });
+
+    expect(bodyOf(0).turn).toEqual({ text: "say hi" });
+    expect(bodyOf(0).regenerate).toBe(true);
+    const shown = box.api.messages;
+    expect(shown.slice(0, 2).map((m) => m.id)).toEqual(["e1", "ae1"]);
+    expect(shown.slice(2).map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(shown[2]!.content).toEqual([{ type: "text", text: "say hi" }]);
+  });
+
+  test("a chat whose only user turn is an event has nothing to regenerate", async () => {
+    const { box } = mount({
+      threadId: "th_9",
+      attach: false,
+      initialMessages: [
+        {
+          id: "e1",
+          role: "user",
+          content: [{ type: "text", text: "Job ended." }],
+          createdAt: "",
+          event: { name: "job-settled" },
+          turn: "e1",
+        },
+        { id: "ae1", role: "assistant", content: [{ type: "text", text: "noted" }], createdAt: "", turn: "e1" },
+      ],
+    });
+
+    await act(async () => {
+      await box.api.regenerate();
+    });
+
+    expect(calls()).toHaveLength(0);
+    expect(box.api.messages.map((m) => m.id)).toEqual(["e1", "ae1"]);
+  });
+
   test("nothing to regenerate is a no-op", async () => {
     const { box } = mount({ attach: false });
 

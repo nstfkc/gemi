@@ -215,6 +215,7 @@ await ChatController.startTurn({
 - The model reads it as `<event name="job-settled">` around the text and the data's JSON, so it can tell it from the person's words.
 - A client gets `message.event` typed (`TurnEvent`), on the stream and from a thread read, and can render it as a status line rather than a chat bubble. `DatabaseAgentStore` doesn't use it as the thread's title.
 - `name` is letters, digits and `.`, `_`, `:`, `-`, at most 64 characters. `data` must be JSON. Only `startTurn` can write an event: a client posting to the route can't.
+- `regenerate()` (and `regenerate: true` on a thread) steps over an event's turn: it runs the last turn a person started again, and the event, its answer and every other turn's messages stay in the thread. A thread whose only turns are events answers `409` `nothing_to_regenerate` (#1405).
 
 ## Showing a server turn in an open chat
 

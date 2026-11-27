@@ -604,6 +604,49 @@ describe("AgentController.startTurn event", () => {
     expect(textOf(provider.calls[0]!.messages.at(-1) as AgentMessage)).toBe("hi");
   });
 
+  /** #1405: a regenerate re-ran the event's text as a person's message. */
+  test("a regenerate after an event re-runs the person's turn and keeps the event", async () => {
+    const { store, provider, PageChat } = setup([
+      [{ type: "text-delta", delta: "first" }, finish()],
+      [{ type: "text-delta", delta: "noted" }, finish()],
+      [{ type: "text-delta", delta: "again" }, finish()],
+    ]);
+    const { threadId } = await store.createThread({});
+    await (await PageChat.startTurn({ threadId, text: "export it", body: { pageId: "p" } })).result();
+    await (
+      await PageChat.startTurn({
+        threadId,
+        body: { pageId: "p" },
+        event: { name: "job-settled", text: "Job ended." },
+      })
+    ).result();
+
+    const response = await new PageChat().stream(
+      new HttpRequest(
+        new Request("http://localhost/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threadId, pageId: "p", text: "export it", regenerate: true }),
+        }),
+        {},
+        "api",
+        "/chat",
+      ),
+    );
+    await response.text();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const sent = provider.calls[2]!.messages.map((message) => textOf(message as AgentMessage));
+    expect(sent).toEqual(['<event name="job-settled">\nJob ended.\n</event>', "noted", "export it"]);
+    const stored = (await store.loadThread(threadId))!;
+    expect(stored.map((message) => [message.role, textOf(message), message.event?.name])).toEqual([
+      ["user", "Job ended.", "job-settled"],
+      ["assistant", "noted", undefined],
+      ["user", "export it", undefined],
+      ["assistant", "again", undefined],
+    ]);
+  });
+
   test("refuses an event with text or turn, a bad name, or data that is not JSON", async () => {
     const { PageChat } = setup();
     const base = { threadId: "t", body: { pageId: "p" } };
