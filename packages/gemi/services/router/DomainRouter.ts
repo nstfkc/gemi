@@ -3,6 +3,7 @@ import { ViewRouteDispatcher } from "./ViewRouteDispatcher";
 import {
   DomainResolver,
   FALLBACK_GROUP,
+  groupKey,
   ROOT_GROUP,
   secretMatches,
   type ResolvedDomain,
@@ -88,7 +89,7 @@ export class DomainRouter {
       view: routers.view ? new ViewRouteDispatcher({ ...config.view, ...routers.view }, config.auth) : root.view,
     });
     for (const group of domains.groups ?? []) {
-      this.groups.set(group.subdomain, build(group));
+      this.groups.set(groupKey(group), build(group));
     }
     if (domains.custom?.fallback) {
       this.groups.set(FALLBACK_GROUP, build(domains.custom.fallback));
@@ -204,7 +205,7 @@ export class DomainRouter {
 
   /**
    * Every distinct view dispatcher with the group key it is first served
-   * under (`""` for the root, a subdomain, `"*"` for the custom fallback), the
+   * under (`""` for the root, a subdomain or a group's name, `"*"` for the custom fallback), the
    * root's first. A group that reuses the root's view routes is not repeated.
    * For tooling that reports per route (`gemi stats`).
    */

@@ -2,8 +2,11 @@ import { timingSafeEqual } from "node:crypto";
 import { normalizeIpEntry } from "../../http/clientAddress";
 import type {
   CustomDomainConfig,
+  CustomDomainMatch,
   DomainGroupConfig,
   DomainsConfig,
+  NamedGroupConfig,
+  SubdomainGroupConfig,
   TrustProxyConfig,
 } from "./config";
 
@@ -16,7 +19,10 @@ export const FALLBACK_GROUP = "*";
 export interface ResolvedDomain {
   /** The request's hostname, lowercased and without the port. */
   host: string;
-  /** `""` for the apex, the group's `subdomain` otherwise, `"*"` for the fallback. */
+  /**
+   * `""` for the apex, `"*"` for the fallback, otherwise the group's key: its
+   * `subdomain`, or its `name` for a group only `custom.resolve` reaches.
+   */
   group: string;
   /** A param subdomain's value, or what `custom.resolve` returned. */
   params: Record<string, string>;
@@ -31,9 +37,41 @@ const MIN_SECRET_LENGTH = 16;
 /** An RFC 9110 field name. */
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const DEFAULT_HOST_HEADER = "x-forwarded-host";
+/** A `name`d group's key: never a subdomain, a `:param`, `""` or `"*"`. */
+const GROUP_NAME = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 function isParamSubdomain(subdomain: string) {
   return subdomain.startsWith(":");
+}
+
+/** Whether `group` has no subdomain, so only `custom.resolve` reaches it. */
+function isNamedGroup(group: DomainGroupConfig): group is NamedGroupConfig {
+  return group.subdomain === undefined;
+}
+
+/**
+ * The key a group is served under — its `subdomain`, or its `name` for a
+ * group only `custom.resolve` reaches. What `custom.group`, a resolver's
+ * `{ group }` and `req.domain.group` name.
+ */
+export function groupKey(group: DomainGroupConfig): string {
+  return isNamedGroup(group) ? group.name : group.subdomain;
+}
+
+/** What `custom.resolve` answered, settled: the group to serve and its params. */
+interface CustomMatch {
+  group: string;
+  params: Record<string, string>;
+}
+
+/**
+ * A `custom.resolve` answer in its long form, `{ group, params }`. Told apart
+ * from plain params by `params` being an object: plain params hold strings
+ * only, so one called `group` is never misread.
+ */
+function isCustomDomainMatch(value: object): value is CustomDomainMatch {
+  const { params } = value as { params?: unknown };
+  return typeof params === "object" && params !== null && !Array.isArray(params);
 }
 
 /**
@@ -247,9 +285,9 @@ export function devHostsOf(devHosts: DomainsConfig["devHosts"]): true | string[]
 
 /**
  * Fails the boot on a `domains` config that could never route the way it
- * reads: an empty root, a subdomain declared twice, a malformed label, two
- * param groups competing for the same label, or a custom-domain target that
- * names no group.
+ * reads: an empty root, a subdomain or name declared twice, a malformed label
+ * or name, two param groups competing for the same label, or a custom-domain
+ * target that names no group.
  */
 export function assertValidDomainsConfig(config: DomainsConfig) {
   const root = normalizeHost(config.root);
@@ -278,11 +316,40 @@ export function assertValidDomainsConfig(config: DomainsConfig) {
   assertValidTrustProxy(config.trustProxy);
   devHostsOf(config.devHosts);
   const seen = new Set<string>();
-  let paramGroup: DomainGroupConfig | null = null;
+  let paramGroup: SubdomainGroupConfig | null = null;
   for (const group of config.groups ?? []) {
+    // Read loosely: a config file is not always type-checked.
+    const declared = group as { subdomain?: unknown; name?: unknown };
+    if (declared.subdomain !== undefined && declared.name !== undefined) {
+      throw new Error(
+        `The group "${declared.subdomain}" declares both \`subdomain\` and \`name\` ("${declared.name}"). Give a subdomain group its subdomain only, or leave \`subdomain\` out for a group only \`custom.resolve\` reaches.`,
+      );
+    }
+    if (isNamedGroup(group)) {
+      const { name } = group;
+      if (typeof name !== "string" || !GROUP_NAME.test(name)) {
+        throw new Error(
+          `A \`route.domains\` group needs a \`subdomain\`, or a \`name\` for a group only \`custom.resolve\` reaches. A name is one identifier, e.g. "shop-home": a letter, then letters, digits, "-" or "_". Got ${JSON.stringify(name)}.`,
+        );
+      }
+      if (seen.has(name)) {
+        throw new Error(
+          `\`route.domains\` declares "${name}" twice, as a subdomain or as a group's name.`,
+        );
+      }
+      seen.add(name);
+      if ((group as { exists?: unknown }).exists) {
+        throw new Error(
+          `The group "${name}" has no subdomain, so \`exists\` has no param to check. Return \`null\` from \`custom.resolve\` for a host it should not serve.`,
+        );
+      }
+      continue;
+    }
     const { subdomain } = group;
     if (seen.has(subdomain)) {
-      throw new Error(`\`route.domains\` declares the subdomain "${subdomain}" twice.`);
+      throw new Error(
+        `\`route.domains\` declares "${subdomain}" twice, as a subdomain or as a group's name.`,
+      );
     }
     seen.add(subdomain);
     if (isParamSubdomain(subdomain)) {
@@ -310,7 +377,7 @@ export function assertValidDomainsConfig(config: DomainsConfig) {
   }
   if (config.custom && !seen.has(config.custom.group)) {
     throw new Error(
-      `\`route.domains.custom.group\` is "${config.custom.group}", but no group declares that subdomain.`,
+      `\`route.domains.custom.group\` is "${config.custom.group}", but no group declares that subdomain or name.`,
     );
   }
   // Without `exists` the param group matches every label, so the ask endpoint
@@ -334,16 +401,15 @@ export class DomainResolver {
   /** `route.domains.devHosts`, lowercased: `[]` when left out, `true` to answer any host. */
   readonly devHosts: true | readonly string[];
   private readonly hostTrusts: HostTrust[];
-  private readonly fixed = new Map<string, DomainGroupConfig>();
-  private readonly param: (DomainGroupConfig & { name: string }) | null = null;
+  private readonly fixed = new Map<string, SubdomainGroupConfig>();
+  private readonly param: (SubdomainGroupConfig & { paramName: string }) | null = null;
+  /** Every declared group's key, i.e. what `custom.resolve` may name. */
+  private readonly groupKeys = new Set<string>();
   private readonly custom: CustomDomainConfig | null;
   private readonly cacheTtlMs: number;
-  private readonly cache = new Map<
-    string,
-    { value: Record<string, string> | null; expiresAt: number }
-  >();
+  private readonly cache = new Map<string, { value: CustomMatch | null; expiresAt: number }>();
   /** In-progress `custom.resolve` calls, so concurrent misses share one. */
-  private readonly inFlight = new Map<string, Promise<Record<string, string> | null>>();
+  private readonly inFlight = new Map<string, Promise<CustomMatch | null>>();
   /** The `ask` secret, or `null` when the endpoint is not served. */
   readonly askSecret: string | null;
   /** The headers every `trustProxy` secret arrives in, lowercased; `[]` when there is none. */
@@ -355,8 +421,13 @@ export class DomainResolver {
     this.devHosts = devHostsOf(config.devHosts);
     this.hostTrusts = hostTrustsOf(config.trustProxy);
     for (const group of config.groups ?? []) {
+      this.groupKeys.add(groupKey(group));
+      if (isNamedGroup(group)) {
+        // Reachable only through `custom.resolve`: nothing to match by host.
+        continue;
+      }
       if (isParamSubdomain(group.subdomain)) {
-        this.param = { ...group, name: group.subdomain.slice(1) };
+        this.param = { ...group, paramName: group.subdomain.slice(1) };
       } else {
         this.fixed.set(group.subdomain.toLowerCase(), group);
       }
@@ -514,7 +585,7 @@ export class DomainResolver {
         return { host, group: fixed.subdomain, params: {}, custom: false };
       }
       if (this.param && LABEL.test(sub)) {
-        const params = { [this.param.name]: sub };
+        const params = { [this.param.paramName]: sub };
         if (this.param.exists && !(await this.param.exists(params, req))) {
           return null;
         }
@@ -525,8 +596,32 @@ export class DomainResolver {
     if (!this.custom) {
       return null;
     }
-    const params = await this.resolveCustom(host);
-    return params ? { host, group: this.custom.group, params, custom: true } : null;
+    const match = await this.resolveCustom(host);
+    return match ? { host, group: match.group, params: match.params, custom: true } : null;
+  }
+
+  /**
+   * `custom.resolve`'s answer as a group and its params: plain params are
+   * `custom.group`'s, `{ group, params }` names its own. A group no one
+   * declared throws, which leaves nothing cached.
+   */
+  private async callResolve(host: string): Promise<CustomMatch | null> {
+    const custom = this.custom!;
+    const value = (await custom.resolve(host)) ?? null;
+    if (value === null) {
+      return null;
+    }
+    if (!isCustomDomainMatch(value)) {
+      return { group: custom.group, params: value };
+    }
+    // `""` and `"*"` are the root's and the fallback's keys, never a declared
+    // group's, so they fail here too.
+    if (typeof value.group !== "string" || !this.groupKeys.has(value.group)) {
+      throw new Error(
+        `\`route.domains.custom.resolve\` returned the group ${JSON.stringify(value.group)} for "${host}", but no group declares that subdomain or name.`,
+      );
+    }
+    return { group: value.group, params: value.params };
   }
 
   private async resolveCustom(host: string) {
@@ -548,9 +643,9 @@ export class DomainResolver {
     if (inFlight) {
       return inFlight;
     }
-    const pending = (async () => (await this.custom!.resolve(host)) ?? null)();
+    const pending = this.callResolve(host);
     this.inFlight.set(host, pending);
-    let value: Record<string, string> | null;
+    let value: CustomMatch | null;
     try {
       value = await pending;
     } finally {

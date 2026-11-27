@@ -4,7 +4,7 @@ By default, gemi routes on the path only: every host reaching the server is serv
 
 - **Fixed subdomains** with their own routers. For example, `admin.example.com` can run a different api and different views from `example.com`.
 - **A param subdomain**, such as `acme.example.com`. It runs the same app on every tenant's host, and the handler reads the tenant from `req.domain.params`.
-- **Custom domains.** A resolver maps a host the app does not own, such as `app.acme.com`, onto a tenant. That host is then served exactly as `acme.example.com` would be. A catch-all group can serve the hosts the resolver does not know.
+- **Custom domains.** A resolver maps a host the app does not own, such as `app.acme.com`, onto a tenant. That host is then served exactly as `acme.example.com` would be, or by a group with routers of its own. A catch-all group can serve the hosts the resolver does not know.
 - **An endpoint for on-demand TLS.** A proxy such as Caddy asks it before issuing a certificate for a new custom domain.
 
 Route keys stay path-only, and routers do not change. Each host group simply has its own root routers.
@@ -54,6 +54,7 @@ export default defineRouteConfig({
 | `root` | `string` | The apex the subdomains hang off. Compared against the request's hostname, so the port does not matter. |
 | `trustProxy` | `boolean \| { hostHeader?, clientIpHeader?, secret? } \| Array<{ hostHeader?, clientIpHeader?, secret }>` (default `false`) | Read the host from a header the proxy in front sets. `true` reads `X-Forwarded-Host`. Only set it behind a proxy that overwrites that header, or a client picks its own host. `clientIpHeader` also reads the client's IP address from the proxy. A list trusts [several proxies](#several-proxies), each with its own secret. See [Behind a proxy](#behind-a-proxy). |
 | `groups[].subdomain` | `string` | A fixed subdomain (`"admin"`, `"eu.admin"`), or one `:param` label (`":tenant"`). |
+| `groups[].name` | `string` | Instead of `subdomain`: a group no host under `root` matches, reached only through `custom.resolve`. One identifier, e.g. `"shop-home"`. See [A custom host with routers of its own](#a-custom-host-with-routers-of-its-own). |
 | `groups[].api` / `groups[].view` | route config | The group's own `rootRouter`, plus hooks if needed. Hooks default to the root's. Leave either out and the group serves the root one for that side. |
 | `groups[].view.notFound` | `{ view, static }` | The group's own not-found page, a static document with its own layout, instead of the app's hydrated `404` view. See [A static not-found page of its own](./routing.md#a-static-not-found-page-of-its-own). |
 | `groups[].view.detectLocale` | `(req, { supportedLocales, defaultLocale }) => string \| null` | With `localeRouting: "off"`: the locale of each request of the group, matched or not, e.g. from `?locale=`, so its not-found page reads `useDictionary` in it too. No cookie. See [Picking the locale of a group out of locale routing](./i18n.md#picking-the-locale-of-a-group-out-of-locale-routing). |
@@ -62,16 +63,17 @@ export default defineRouteConfig({
 | `groups[].view.assetCors` | `boolean` (default `false`) | `true`: the build's files under `/assets` are sent with `Access-Control-Allow-Origin: *` on the group's hosts, so the group's views can hydrate in a sandboxed frame. See [Embedding in a sandboxed frame](./static-views-and-islands.md#embedding-in-a-sandboxed-frame). |
 | `groups[].view.translate` | `boolean` | `true` lets browsers and Google Search translate the group's pages: `<Head />` leaves out `<meta name="google" content="notranslate">`. See [Translation](./views-and-layouts.md#translation). |
 | `groups[].exists` | `(params, req) => boolean \| Promise<boolean>` | For the param group only. A `false` answers `404` before any route runs. |
-| `custom.group` | `string` | The `subdomain` of the group a resolved custom host is served as. |
-| `custom.resolve` | `(host) => params \| null` | Maps a host outside `root` to that group's params, or returns `null` for a host the app does not know. |
+| `custom.group` | `string` | The `subdomain` (or `name`) of the group a resolved custom host is served as, unless `resolve` names another. |
+| `custom.resolve` | `(host) => params \| { group, params } \| null` | Maps a host outside `root` to that group's params, or returns `null` for a host the app does not know. Return `{ group, params }` to serve the host as another declared group. |
 | `custom.cacheTtlMs` | `number` (default `60000`) | How long a `resolve` answer is reused. Both hits and misses are cached. `0` disables the cache. |
 | `custom.fallback` | `{ api?, view? }` | Serves every host `resolve` returned `null` for, instead of a `404`. |
 | `ask` | `{ secret: string }` | Turns on the on-demand TLS endpoint below. Left out, that path is not served at all. |
 | `devHosts` | `string[] \| true` (default `[]`) | Extra hosts `gemi dev` answers, besides `root` and its subdomains, e.g. the custom domains you point at `127.0.0.1` locally. A leading `.` admits the domain and its subdomains. `gemi start` ignores it. See [Development](#development). |
 
 A malformed config fails the boot. That covers a `root` that is not a bare hostname — a scheme, a port or a
-path in it would match no request at all — a subdomain declared twice, two param subdomains, a `custom.group`
-that names no group, a negative `cacheTtlMs`, an `ask.secret` under 16 characters, `ask` on an app whose
+path in it would match no request at all — a subdomain or group name declared twice, a group with both or
+neither of `subdomain` and `name`, a `name` that is not one identifier, `exists` on a named group, two param
+subdomains, a `custom.group` that names no group, a negative `cacheTtlMs`, an `ask.secret` under 16 characters, `ask` on an app whose
 param group has no `exists`, a `trustProxy` header that is not a header name, a `trustProxy.secret.value`
 under 16 characters or unset, and a `trustProxy.clientIpHeader` without a `secret`. In the list form it
 also covers an empty list, an entry without a `secret`, an entry with neither `hostHeader` nor
@@ -83,7 +85,7 @@ optional leading `.`) fails the boot too: no scheme, port, path or `*`.
 
 1. `root` itself is served by the root routers.
 2. A subdomain of `root` is tried against the fixed subdomains first, as an exact match that may span several labels. After that it is tried against the param subdomain, which matches exactly **one** label and must pass `exists`.
-3. Any other host goes to `custom.resolve`. A hit is served as `custom.group` with the params it returned. A miss goes to `custom.fallback` if there is one.
+3. Any other host goes to `custom.resolve`. A hit is served as `custom.group` with the params it returned, or as the group it named with `{ group, params }`. A miss goes to `custom.fallback` if there is one.
 4. Whatever is left gets a `404` with the body `Unknown host`. The same happens to a subdomain of `root` that nothing matches: `a.b.example.com`, or an `exists` that said no.
 
 > **Note:** with `route.domains` declared, **every** request needs a known host, including a load
@@ -91,6 +93,45 @@ optional leading `.`) fails the boot too: no scheme, port, path or `*`.
 > route](./configuration.md#health-checks), `/__gemi__/health`, is answered before host matching,
 > so point probes at it. For your own health route, use the root host or answer it from a global
 > middleware, which also runs before host matching.
+
+### A custom host with routers of its own
+
+`custom.group` serves every resolved custom host with the same routers. Sometimes one host outside `root` needs routes of its own. A typical case is a second zone for your tenants, such as `*.shop.example`, whose apex `shop.example` is your own landing page and a shared catalog. Its `/search` and `/mcp` are not a store called "search", and adding them to the tenants' group would change what every tenant host answers.
+
+Declare a group with a `name` instead of a `subdomain`, and have `custom.resolve` return `{ group, params }` for that host:
+
+```typescript
+domains: {
+  root: "example.com",
+  groups: [
+    { subdomain: ":shop", exists: async ({ shop }) => /* … */ true },
+    // No subdomain: `shop-home.example.com` does not reach it, only `custom.resolve` does.
+    {
+      name: "shop-home",
+      api: { rootRouter: ShopHomeApiRouter },
+      view: { rootRouter: ShopHomeViewRouter },
+    },
+  ],
+  custom: {
+    group: ":shop",
+    resolve: async (host) => {
+      if (host === "shop.example") return { group: "shop-home", params: {} };
+      if (host.endsWith(".shop.example")) return { shop: host.slice(0, -".shop.example".length) };
+      const org = await Organization.findFirst({ where: { customDomain: host } });
+      return org ? { shop: org.slug } : null;
+    },
+  },
+},
+```
+
+- A plain params object is still served as `custom.group`, so existing resolvers keep working. The long form is recognised by `params` being an object, so a param that happens to be called `group` is never mistaken for it.
+- `req.domain.group` and `useDomain().group` read the group's `name` (`"shop-home"`). `custom` is `true`, as for any host outside `root`.
+- Everything a group brings applies per group: its routes, hooks, not-found page and static-file settings.
+- The answer is cached for `cacheTtlMs` with its group, and `forget(host)` drops both.
+- Naming a group no one declared, or the root's (`""`) or the fallback's (`"*"`), throws on that request, and the error is not cached. The boot cannot check what a function will return, so test your resolver's hosts.
+- The [TLS ask endpoint](#on-demand-tls-for-custom-domains) approves a host whichever group it resolves to.
+
+A named group can also be `custom.group` itself, which gives an app a domain family that only `custom.resolve` reaches. Without one, a `:param` group with `exists: () => false` was the workaround.
 
 ## Reading the domain in a handler
 
