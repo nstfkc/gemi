@@ -1,4 +1,4 @@
-# 0.244.0
+# 0.245.0
 
 ## View route parameters are decoded once (#1322)
 
@@ -31,6 +31,31 @@ status 404 on a page load, and on an in-app navigation too.
   it is on, as the server filed it. `useSearchParams().push()`
   and `useLocale()`'s `setLocale` no longer throw it on such a page either: they
   stay on the path as it is.
+
+# 0.244.0
+
+## The `access_token` cookie is `SameSite=Lax`
+
+gemi wrote the session cookie without a `SameSite` attribute of its own, so it
+got the cookie default, `SameSite=Strict`. A browser leaves a `Strict` cookie
+off a top-level navigation that another site started, so a signed-in user who
+followed a link to the app from a chat message, an email or a document arrived
+signed out: an `auth` route redirected to the sign-in page, and that redirect,
+part of the same navigation, went without the cookie too. Typing the URL worked.
+
+`AuthManager.accessTokenCookieOptions`, which every `access_token` write and
+clear goes through (sign-in, sign-up, magic link, email code, PIN, OAuth, the
+session sliding forward, sign-out), now sets `sameSite: "Lax"`. A cross-site
+`POST`, frame or `fetch` still goes without the cookie. Other cookies keep the
+`Strict` default.
+
+Nothing to change in your app. An existing session's cookie stays `Strict`
+until gemi writes it again (the next sign-in, or the session sliding forward
+past half its window). `SameSiteBounceMiddleware` keeps covering those, and
+stays in front of `/auth/connections/:provider/callback`. If your app exposes a
+`GET` route that changes state for the signed-in user, a link on another site
+can now trigger it with the user's session: make it a `POST`. An app that
+overrides `accessTokenCookieOptions` keeps whatever it returns.
 
 # 0.242.3
 

@@ -238,7 +238,7 @@ A `"*"` key allows any origin: the response gets `Access-Control-Allow-Origin: *
 
 ### `same-site-bounce` → `SameSiteBounceMiddleware`
 
-For a page that needs the session and that another site redirects the browser to: an OAuth callback, a payment provider's return URL. The `access_token` cookie is `SameSite=Strict`, so the browser leaves it off a navigation another site started, and `auth` sends a signed-in user to the sign-in page. Listed before `auth`, this answers such a request with a small page (`<meta http-equiv="refresh">`, no script, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`) that loads the same URL again from this origin with `?gemi_same_site=1`. That navigation is same-site, so the cookie goes with it.
+For a page that needs the session and that another site redirects the browser to: an OAuth callback, a payment provider's return URL. gemi writes the `access_token` cookie `SameSite=Lax`, which such a navigation carries; a `SameSite=Strict` one (written before 0.244, or by an app that overrides `accessTokenCookieOptions`) is left off it, and `auth` sends a signed-in user to the sign-in page. Listed before `auth`, this answers such a request with a small page (`<meta http-equiv="refresh">`, no script, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`) that loads the same URL again from this origin with `?gemi_same_site=1`. That navigation is same-site, so the cookie goes with it.
 
 ```typescript
 // app/config/middleware.ts

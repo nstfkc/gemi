@@ -16,7 +16,8 @@ import { MemoryConnectionStore } from "./ConnectionStore";
 
 /**
  * The provider's redirect back to `/auth/connections/:provider/callback` is a
- * cross-site navigation, so the `SameSite=Strict` session cookie is not on it.
+ * cross-site navigation, so a `SameSite=Strict` session cookie (one written
+ * before gemi switched `access_token` to `Lax`) is not on it.
  * Through a whole `App`: that hop gets a same-origin bounce page instead of the
  * sign-in redirect, and the bounced hop — which carries the cookie — stores
  * the connection.

@@ -187,7 +187,12 @@ export async function createStreamResponse(
 
   // `Bun.file()` is lazy, so a missing path would otherwise only fail once the
   // stream is pulled, with a 200 already committed.
+  //
+  // Only a whole file is asked. A `partial` body is a window the driver sliced
+  // after it had already opened the file, and Bun 1.4 answers `exists()` with
+  // `false` for a sliced `BunFile` even though the file is there (#1397).
   if (
+    !partial &&
     body instanceof Blob &&
     "exists" in body &&
     typeof (body as any).exists === "function"
