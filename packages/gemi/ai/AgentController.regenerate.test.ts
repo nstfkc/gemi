@@ -269,3 +269,92 @@ describe("regenerate on a thread (#451)", () => {
     runs[1]!.finish();
   });
 });
+
+describe("regenerate skips server events and keeps other turns (#1405)", () => {
+  const event = (id: string, text: string): AgentMessage =>
+    message(id, "user", text, { event: { name: "job-settled" }, turn: id });
+
+  test("re-runs the last turn a person started, not a server event's", async () => {
+    const { calls, store, threadId, Chat } = await setup([
+      message("u0", "user", "first", { turn: "u0" }),
+      message("a0", "assistant", "first answer", { turn: "u0" }),
+      message("u1", "user", "second", { turn: "u1" }),
+      message("a1", "assistant", "old answer", { turn: "u1" }),
+      event("e1", "Job ended."),
+      message("ae1", "assistant", "", { turn: "e1", finishReason: "error" }),
+    ]);
+
+    const response = await new Chat().stream(jsonRequest({ threadId, text: "x", regenerate: true }));
+    expect(response.status).toBe(200);
+
+    // The event's text is not sent as the person's words.
+    expect(calls[0]!.turn).toEqual({ text: "second" });
+    // Only the regenerated turn left: the event and its reply stay.
+    expect(ids(calls[0]!.messages)).toEqual(["u0", "a0", "e1", "ae1"]);
+    const held = (await store.loadThread(threadId))!;
+    expect(ids(held)).toEqual(["u0", "a0", "e1", "ae1"]);
+    expect(held.find((m) => m.id === "e1")!.event).toEqual({ name: "job-settled" });
+  });
+
+  test("a thread whose only user turns are events answers 409 and is left alone", async () => {
+    const { calls, store, threadId, Chat } = await setup([
+      event("e1", "Job ended."),
+      message("ae1", "assistant", "noted", { turn: "e1" }),
+    ]);
+    const response = await new Chat().stream(jsonRequest({ threadId, text: "x", regenerate: true }));
+    expect(response.status).toBe(409);
+    expect((await response.json()).error.code).toBe("nothing_to_regenerate");
+    expect(calls).toHaveLength(0);
+    expect(ids(await store.loadThread(threadId))).toEqual(["e1", "ae1"]);
+  });
+
+  test("keeps another turn's messages stored after the regenerated one, answered calls included", async () => {
+    const asked: AgentMessage = {
+      id: "a1q",
+      role: "assistant",
+      content: [{ type: "tool-call", toolCallId: "call_q", name: "ask", input: {} } as any],
+      createdAt: new Date(0).toISOString(),
+      finishReason: "awaiting-input",
+      turn: "u1",
+    };
+    const answered: AgentMessage = {
+      ...asked,
+      id: "a1ans",
+      content: [
+        { type: "tool-call", toolCallId: "call_q2", name: "ask", input: {} } as any,
+        { type: "tool-result", toolCallId: "call_q2", name: "ask", output: "blue" } as any,
+      ],
+      finishReason: "stop",
+    };
+    const { calls, store, threadId, Chat } = await setup([
+      message("u1", "user", "first", { turn: "u1" }),
+      asked,
+      // A parallel turn, started while turn u1 waited on its question.
+      message("u2", "user", "second", { turn: "u2" }),
+      // Turn u1's question answered, stored after u2.
+      answered,
+      message("a2", "assistant", "old answer", { turn: "u2" }),
+    ]);
+
+    await new Chat().stream(jsonRequest({ threadId, text: "x", regenerate: true }));
+
+    expect(calls[0]!.turn).toEqual({ text: "second" });
+    expect(ids(calls[0]!.messages)).toEqual(["u1", "a1q", "a1ans"]);
+    expect(ids(await store.loadThread(threadId))).toEqual(["u1", "a1q", "a1ans"]);
+    // Other turns' open questions are not refused by the re-run.
+    expect(calls[0]!.keepOtherTurnsOpen).toBe(true);
+  });
+
+  test("regenerates a turn with an event after it from the earlier user message", async () => {
+    // Stored before gemi set `turn`: grouped by position, an event still
+    // starts a turn of its own.
+    const { calls, Chat, threadId } = await setup([
+      message("u1", "user", "hello"),
+      message("a1", "assistant", "hi"),
+      message("e1", "user", "Job ended.", { event: { name: "job-settled" } }),
+    ]);
+    await new Chat().stream(jsonRequest({ threadId, text: "x", regenerate: true }));
+    expect(calls[0]!.turn).toEqual({ text: "hello" });
+    expect(ids(calls[0]!.messages)).toEqual(["e1"]);
+  });
+});

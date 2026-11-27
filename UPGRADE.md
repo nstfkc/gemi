@@ -1,3 +1,40 @@
+# Unreleased
+
+## `regenerate` re-runs the last person's turn, and only removes that turn (#1405)
+
+`useChat().regenerate()`, and `regenerate: true` on a threaded request, took
+the last user message with text as the turn to run again. That could be an
+event message (`startTurn({ event })`): its text was sent again as a plain
+message, so the thread then showed "Job ended." as something the person wrote,
+without `message.event`. The cut also removed every message stored after that
+message, so on a thread with parallel turns (`ifBusy: "parallel"`) other turns'
+messages went too, answered client-tool calls included, and the model could ask
+the same question again.
+
+Now a regenerate picks the last turn a person started (skipping event turns and
+files a tool showed) and removes only that turn's messages, grouped by
+`AgentMessage.turn` as `splitTurns` groups them: its message, its answer and
+anything that joined it. Other turns stay where they are, before or after it,
+and the re-run turn is appended at the end. The regenerated run also leaves
+other turns' open questions open (`keepOtherTurnsOpen`), on the server and in
+`useChat`'s `pending`. A thread whose only user turns are events answers `409`
+`nothing_to_regenerate`, and `useChat` does nothing.
+
+Two smaller changes follow from it:
+
+- `useChat` regenerates the same turn the server does: the last turn a person
+  started, even when it has no answer yet (a run that failed before writing
+  one). Before, it looked for the last assistant message and took the user
+  message before it. A message the server never took (its send failed before
+  the `message-id` swap) is sent again without `regenerate: true`, since the
+  thread does not hold it.
+- A regenerate stopped before its run starts puts the removed turn back at the
+  end of the thread, which is where it was unless other turns were stored after
+  it.
+
+Nothing to change in your app. An app that avoided `regenerate()` on threads
+with server events (starting a new turn instead) can use it again.
+
 # 0.244.0
 
 ## The `access_token` cookie is `SameSite=Lax`

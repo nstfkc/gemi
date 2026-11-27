@@ -26,7 +26,7 @@ import type {
   ToolEntry,
   ToolShapesOf,
 } from "./Agent";
-import type { ContextWindowOptions } from "./contextWindow";
+import { type ContextWindowOptions, splitTurns } from "./contextWindow";
 import { modelOutputOf } from "./toolModelOutput";
 import { isSummaryStore, type ThreadSummary } from "./contextCompaction";
 import { injectedMessageIds, toolCallInputOf, userTurnMessage } from "./Agent";
@@ -194,8 +194,9 @@ export interface AgentStore {
    * What a threaded `regenerate` needs (#451): the server owns the history,
    * so the answer being replaced has to leave the store, or the model reads
    * `user: X, assistant: A, user: X` and writes a follow-up instead of a new
-   * answer. The controller calls it under the thread's lock with the last user
-   * turn and everything after it, then runs that turn again.
+   * answer. The controller calls it under the thread's lock with the messages
+   * of the last turn a person started (its message and its answer; other
+   * turns' messages stay, #1405), then runs that turn again.
    *
    * Optional so a store written before it still compiles; without it a turn
    * with `regenerate: true` on a thread is a 501 `regenerate_unsupported`.
@@ -2431,7 +2432,9 @@ export abstract class AgentController<
         // A regenerate that never started its run — stopped while it waited,
         // or a throw from the app's hooks — puts back what it took out, since
         // no new answer is coming to replace it. Still under the thread's lock,
-        // and appended at the end, which is where it was: it was the tail.
+        // and appended at the end: where it was when it was the tail, and
+        // otherwise after the turns stored since, which `splitTurns` still
+        // groups by `turn`.
         if (threadId && removed.length > 0 && (started as AgentRun | null) === null) {
           await this.store
             .appendMessages(threadId, removed)
@@ -2496,19 +2499,18 @@ export abstract class AgentController<
               message: `Thread ${threadId} has no user turn to answer again.`,
             });
           }
-          // The last user turn and everything after it leave the store, and the
-          // turn is run again from what the store held — not from the client's
+          // The last turn a person started leaves the store, with its answer,
+          // and the turn is run again from what the store held — not from the client's
           // copy, which may be stale or carry local ids. The user message comes
           // back under a new id when the run reports it. Under the thread's
           // lock and after the previous run's transcript is stored, so nothing
           // writes the removed answer back. Each removed message takes its
           // `usage` with it: the thread never holds both answers' costs.
-          removed = messages.slice(cut.index);
-          await this.store.removeMessages!(
-            threadId,
-            removed.map((message) => message.id),
-          );
-          messages = messages.slice(0, cut.index);
+          // Other turns' messages stay, also those stored after it (#1405).
+          removed = cut.removed;
+          const gone = new Set(removed.map((message) => message.id));
+          await this.store.removeMessages!(threadId, [...gone]);
+          messages = messages.filter((message) => !gone.has(message.id));
           // The stored turn, under the client's `localId` for it: the message
           // is minted again, and the client has to be told the new id (#466).
           turn = turn?.localId ? { ...cut.turn, localId: turn.localId } : cut.turn;
@@ -2603,8 +2605,10 @@ export abstract class AgentController<
         // and found the thread free (the other turns parked on questions).
         // A server turn (`startTurn`: a scheduled report, an event, a job's
         // result) always does, queued or not (#1371): the person said
-        // nothing, so nobody moved on from a question.
-        ...(mode.parallel || requested === "parallel" || serverTurns.has(req)
+        // nothing, so nobody moved on from a question. Nor does a regenerate
+        // (#1405): it runs an earlier message again, which moves on from
+        // nothing another turn asked.
+        ...(mode.parallel || requested === "parallel" || serverTurns.has(req) || regenerate
           ? { keepOtherTurnsOpen: true }
           : {}),
         // The run reports each message as it finishes it, the user's turn
@@ -5487,18 +5491,26 @@ function searchParam(req: HttpRequest<any, any>, key: string): string | undefine
 }
 
 /**
- * Where a threaded regenerate cuts the history: at the last message the user
- * wrote, with the turn that wrote it. A file a tool showed is a user-role
- * message too, but it is part of the answer being replaced, so it is stepped
- * over (`injectedMessageIds`, the test `historyForProvider` uses).
+ * What a threaded regenerate takes out of the history: the last turn a person
+ * started, its own message and every message that belongs to it
+ * (`splitTurns`: its answer, the files its tools showed, the calls it asked
+ * and their answers, any message that joined it), with the turn to run again.
+ *
+ * A turn a server event started (`startTurn({ event })`) is not a person's
+ * and is stepped over, so its text is never sent again as their words
+ * (#1405). Nor is a file a tool showed, which is part of an answer. Every
+ * other turn's messages stay where they are, before the cut or after it: with
+ * parallel runs, or an event answered after the person's turn, they are not
+ * the reply being replaced (#1405).
  */
 function regenerationCut(
   messages: AgentMessage[],
-): { index: number; turn: ClientTurn } | null {
+): { removed: AgentMessage[]; turn: ClientTurn } | null {
   const injected = injectedMessageIds(messages);
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]!;
-    if (message.role !== "user" || injected.has(message.id)) continue;
+  const turns = splitTurns(messages);
+  for (let index = turns.length - 1; index >= 0; index--) {
+    const message = turns[index]![0]!;
+    if (message.role !== "user" || message.event || injected.has(message.id)) continue;
     let text = "";
     const files: NonNullable<ClientTurn["files"]> = [];
     for (const part of message.content) {
@@ -5514,7 +5526,7 @@ function regenerationCut(
     }
     if (!text && files.length === 0) continue;
     return {
-      index,
+      removed: turns[index]!,
       turn: { ...(text ? { text } : {}), ...(files.length > 0 ? { files } : {}) },
     };
   }

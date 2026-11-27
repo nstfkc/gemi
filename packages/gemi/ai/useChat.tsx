@@ -12,6 +12,7 @@ import {
   type ChatState,
 } from "./client/reducer";
 import { decodeSSE } from "./client/sse";
+import { injectedMessageIds, splitTurns } from "./contextWindow";
 import type {
   AgentError,
   AgentMessage,
@@ -425,9 +426,11 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    */
   reattach(): Promise<boolean>;
   /**
-   * Drops the last assistant turn and re-runs from the user turn before it.
-   * On a thread the server replaces its stored answer too (`regenerate: true`
-   * on the request), so the model sees the question once, not a repeat.
+   * Drops the last turn a person started, with its answer, and runs it
+   * again. A turn a server event started (`startTurn({ event })`) is stepped
+   * over, and other turns' messages stay (#1405). On a thread the server
+   * replaces its stored turn too (`regenerate: true` on the request), so the
+   * model sees the question once, not a repeat.
    */
   regenerate(): Promise<void>;
   /**
@@ -2107,24 +2110,23 @@ export function useChat<P extends keyof AgentRoutes>(
 
   const regenerate = useCallback(async () => {
     const messages = stateRef.current!.messages as AgentMessage[];
-    let assistantIndex = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]!.role === "assistant") {
-        assistantIndex = i;
-        break;
-      }
+    // The last turn a person started, as the server picks it (#1405): not one a
+    // server event started, whose text is not their words, nor a file a tool
+    // showed. Only that turn's messages go: other turns' (a parallel run's, an
+    // event answered after it) stay.
+    const injected = injectedMessageIds(messages);
+    const turns = splitTurns(messages);
+    let own: AgentMessage[] | undefined;
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const first = turns[i]![0]!;
+      if (first.role !== "user" || first.event || injected.has(first.id)) continue;
+      if (!first.content.some((part) => part.type === "file" || (part.type === "text" && part.text))) continue;
+      own = turns[i];
+      break;
     }
-    if (assistantIndex === -1) return;
-    let userIndex = -1;
-    for (let i = assistantIndex - 1; i >= 0; i--) {
-      if (messages[i]!.role === "user") {
-        userIndex = i;
-        break;
-      }
-    }
-    if (userIndex === -1) return;
+    if (!own) return;
 
-    const question = messages[userIndex]!;
+    const question = own[0]!;
     // Under the key it was shown under, when this client sent it (#818): the
     // question is taken out and put back, and should not remount for it.
     const turn: ClientTurn = {
@@ -2133,15 +2135,27 @@ export function useChat<P extends keyof AgentRoutes>(
     };
     // The user turn goes too, because `send` re-appends it. Keeping it here and
     // sending it again would show the question twice.
+    const gone = new Set(own.map((message) => message.id));
+    const calls = new Set<string>();
+    for (const message of own) {
+      for (const part of message.content) if (part.type === "tool-call") calls.add(part.toolCallId);
+    }
     commit({
       ...stateRef.current!,
-      messages: messages.slice(0, userIndex),
-      pending: [],
+      messages: messages.filter((message) => !gone.has(message.id)),
+      // Other turns' questions stay open, on the server too (#1405).
+      pending: stateRef.current!.pending.filter(
+        (call: PendingToolCall) => !calls.has(call.path?.[0] ?? call.toolCallId),
+      ),
       error: null,
     });
+    // A message the server never took (its send failed before the server
+    // renamed it) is not in the thread, so it is sent again as it is: asked
+    // to regenerate, the server would replace the turn before it instead.
+    const unsent = question.localId !== undefined && question.id === question.localId;
     // Its `metadata` goes with it: the same question, the same kind of turn.
     await send(turn, {
-      regenerate: true,
+      regenerate: !unsent,
       ...(question.metadata ? { metadata: question.metadata } : {}),
     });
   }, [commit, send]);
