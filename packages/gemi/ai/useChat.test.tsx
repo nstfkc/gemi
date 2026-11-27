@@ -2052,6 +2052,39 @@ describe("regenerate", () => {
     expect(shown[2]!.content).toEqual([{ type: "text", text: "say hi" }]);
   });
 
+  test("a message the server never took is sent again, not regenerated", async () => {
+    const { box } = mount({
+      threadId: "th_9",
+      attach: false,
+      initialMessages: [
+        { id: "u0", role: "user", content: [{ type: "text", text: "first" }], createdAt: "", turn: "u0" },
+        {
+          id: "a0",
+          role: "assistant",
+          content: [{ type: "text", text: "answer" }],
+          createdAt: "",
+          finishReason: "stop",
+          turn: "u0",
+        },
+        {
+          id: "local_1",
+          localId: "local_1",
+          role: "user",
+          content: [{ type: "text", text: "lost in transit" }],
+          createdAt: "",
+        },
+      ],
+    });
+
+    await act(async () => {
+      await box.api.regenerate();
+    });
+
+    expect(bodyOf(0).turn).toMatchObject({ text: "lost in transit" });
+    expect(bodyOf(0).regenerate).toBeUndefined();
+    expect(box.api.messages.slice(0, 2).map((m) => m.id)).toEqual(["u0", "a0"]);
+  });
+
   test("a chat whose only user turn is an event has nothing to regenerate", async () => {
     const { box } = mount({
       threadId: "th_9",

@@ -25,7 +25,9 @@ Two smaller changes follow from it:
 - `useChat` regenerates the same turn the server does: the last turn a person
   started, even when it has no answer yet (a run that failed before writing
   one). Before, it looked for the last assistant message and took the user
-  message before it.
+  message before it. A message the server never took (its send failed before
+  the `message-id` swap) is sent again without `regenerate: true`, since the
+  thread does not hold it.
 - A regenerate stopped before its run starts puts the removed turn back at the
   end of the thread, which is where it was unless other turns were stored after
   it.

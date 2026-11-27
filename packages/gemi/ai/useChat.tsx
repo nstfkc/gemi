@@ -2149,9 +2149,13 @@ export function useChat<P extends keyof AgentRoutes>(
       ),
       error: null,
     });
+    // A message the server never took (its send failed before the server
+    // renamed it) is not in the thread, so it is sent again as it is: asked
+    // to regenerate, the server would replace the turn before it instead.
+    const unsent = question.localId !== undefined && question.id === question.localId;
     // Its `metadata` goes with it: the same question, the same kind of turn.
     await send(turn, {
-      regenerate: true,
+      regenerate: !unsent,
       ...(question.metadata ? { metadata: question.metadata } : {}),
     });
   }, [commit, send]);
