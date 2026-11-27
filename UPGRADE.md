@@ -1,4 +1,4 @@
-# Unreleased
+# 0.246.0
 
 ## `regenerate` re-runs the last person's turn, and only removes that turn (#1405)
 
