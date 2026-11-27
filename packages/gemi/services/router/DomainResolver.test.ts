@@ -133,6 +133,100 @@ describe("DomainResolver.resolve", () => {
   });
 });
 
+describe("custom.resolve choosing the group (#1402)", () => {
+  // The shop's case: `<org>.shop.test` and sellers' domains run the `:shop`
+  // group, while the zone's apex `shop.test` runs a group of its own.
+  function shopResolver(resolve: NonNullable<DomainsConfig["custom"]>["resolve"]) {
+    return resolver({
+      groups: [{ subdomain: ":shop" }, { name: "shop-home" }],
+      custom: { group: ":shop", resolve },
+    });
+  }
+  const resolveShop = (host: string) => {
+    if (host === "shop.test") return { group: "shop-home", params: {} };
+    if (host.endsWith(".shop.test")) return { shop: host.slice(0, -".shop.test".length) };
+    return null;
+  };
+
+  test("`{ group, params }` serves the host as that group", async () => {
+    expect(await shopResolver(resolveShop).resolve(req("http://shop.test/search"))).toEqual({
+      host: "shop.test",
+      group: "shop-home",
+      params: {},
+      custom: true,
+    });
+  });
+
+  test("plain params still go to `custom.group`", async () => {
+    expect(await shopResolver(resolveShop).resolve(req("http://acme.shop.test/"))).toEqual({
+      host: "acme.shop.test",
+      group: ":shop",
+      params: { shop: "acme" },
+      custom: true,
+    });
+  });
+
+  test("a plain param called `group` is a param, not a group", async () => {
+    const r = shopResolver(() => ({ group: "shop-home" }));
+    expect(await r.resolve(req("http://acme.com/"))).toMatchObject({
+      group: ":shop",
+      params: { group: "shop-home" },
+    });
+  });
+
+  test("a named group matches no host under the root", async () => {
+    const r = shopResolver(resolveShop);
+    expect(await r.resolve(req("http://shop-home.example.com/"))).toMatchObject({
+      group: ":shop",
+      custom: false,
+    });
+    const noParam = resolver({
+      groups: [{ name: "shop-home" }],
+      custom: { group: "shop-home", resolve: () => ({}) },
+    });
+    expect(await noParam.resolve(req("http://shop-home.example.com/"))).toBeNull();
+    expect(await noParam.resolve(req("http://shop.test/"))).toMatchObject({ group: "shop-home" });
+  });
+
+  test("the cache keeps the group with the params", async () => {
+    const resolve = vi.fn(resolveShop);
+    const r = shopResolver(resolve);
+    await r.resolve(req("http://shop.test/"));
+    expect(await r.resolve(req("http://shop.test/mcp"))).toMatchObject({ group: "shop-home" });
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  test("concurrent misses share one call and one group", async () => {
+    const resolve = vi.fn(async (host: string) => resolveShop(host));
+    const r = shopResolver(resolve);
+    const [a, b] = await Promise.all([
+      r.resolve(req("http://shop.test/")),
+      r.resolve(req("http://shop.test/x")),
+    ]);
+    expect(a?.group).toBe("shop-home");
+    expect(b?.group).toBe("shop-home");
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([["nope"], [""], ["*"]])(
+    "naming the undeclared group %j throws, and caches nothing",
+    async (group) => {
+      const resolve = vi.fn(() => ({ group, params: {} }));
+      const r = shopResolver(resolve);
+      await expect(r.resolve(req("http://shop.test/"))).rejects.toThrow(/no group declares/);
+      await expect(r.resolve(req("http://shop.test/"))).rejects.toThrow(/no group declares/);
+      expect(resolve).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  test("the ask endpoint approves a host whichever group it resolves to", async () => {
+    const r = shopResolver(resolveShop);
+    expect(await r.allows("shop.test", req("http://example.com/"))).toBe(true);
+    expect(await r.allows("acme.shop.test", req("http://example.com/"))).toBe(true);
+    expect(await r.allows("other.com", req("http://example.com/"))).toBe(false);
+  });
+});
+
 describe("DomainResolver.allows", () => {
   test("approves what resolves in its own right, never the fallback", async () => {
     const r = resolver({
@@ -233,6 +327,50 @@ describe("assertValidDomainsConfig", () => {
       "a custom target naming no group",
       { root: "example.com", custom: { group: ":tenant", resolve: () => null } },
       /no group declares/,
+    ],
+    [
+      "a custom target naming no group by name either",
+      {
+        root: "example.com",
+        groups: [{ name: "shop-home" }],
+        custom: { group: "shop", resolve: () => null },
+      },
+      /no group declares that subdomain or name/,
+    ],
+    [
+      "a group with neither subdomain nor name",
+      { root: "example.com", groups: [{} as never] },
+      /needs a `subdomain`, or a `name`/,
+    ],
+    [
+      "a group with both subdomain and name",
+      { root: "example.com", groups: [{ subdomain: "admin", name: "admin" } as never] },
+      /both `subdomain` and `name`/,
+    ],
+    [
+      "a name that reads like a subdomain",
+      { root: "example.com", groups: [{ name: "shop.home" }] },
+      /a letter, then letters, digits/,
+    ],
+    [
+      "a name that reads like a param",
+      { root: "example.com", groups: [{ name: ":shop" }] },
+      /a letter, then letters, digits/,
+    ],
+    [
+      "a name taken by a subdomain",
+      { root: "example.com", groups: [{ subdomain: "admin" }, { name: "admin" }] },
+      /declares "admin" twice/,
+    ],
+    [
+      "a subdomain taken by a name",
+      { root: "example.com", groups: [{ name: "admin" }, { subdomain: "admin" }] },
+      /declares "admin" twice/,
+    ],
+    [
+      "`exists` on a named group",
+      { root: "example.com", groups: [{ name: "home", exists: () => true } as never] },
+      /has no subdomain, so `exists`/,
     ],
     // A root `normalizeHost` parses but that matches nothing: both of these
     // booted cleanly and then answered "Unknown host" to every request.

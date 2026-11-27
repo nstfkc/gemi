@@ -291,7 +291,8 @@ export interface DomainGroupRouters {
   view?: Partial<ViewRouteConfig> & Pick<ViewRouteConfig, "rootRouter">;
 }
 
-export interface DomainGroupConfig extends DomainGroupRouters {
+/** A group matched by its subdomain of `domains.root`. */
+export interface SubdomainGroupConfig extends DomainGroupRouters {
   /**
    * The label(s) in front of `domains.root`. A fixed subdomain (`"admin"`,
    * `"eu.admin"`) matches exactly; a param subdomain (`":tenant"`) matches any
@@ -299,6 +300,7 @@ export interface DomainGroupConfig extends DomainGroupRouters {
    * Fixed subdomains are tried before param ones.
    */
   subdomain: string;
+  name?: never;
 
   /**
    * For a param subdomain: whether the value names something that exists. A
@@ -316,10 +318,45 @@ export interface DomainGroupConfig extends DomainGroupRouters {
   ) => boolean | Promise<boolean>;
 }
 
+/**
+ * A group with no subdomain (#1402, #1014): it matches no host under
+ * `domains.root`, and is reachable only through `custom.resolve`, either as
+ * `custom.group` or by returning `{ group: name, params }`.
+ */
+export interface NamedGroupConfig extends DomainGroupRouters {
+  /**
+   * What `custom.group` and `custom.resolve` call it, and what
+   * `req.domain.group` reads on its hosts. One identifier (`"shop-home"`):
+   * a letter, then letters, digits, `-` or `_`.
+   */
+  name: string;
+  subdomain?: never;
+  exists?: never;
+}
+
+/**
+ * One host group: a subdomain of `domains.root` (`subdomain`), or a group
+ * only `custom.resolve` sends hosts to (`name`).
+ */
+export type DomainGroupConfig = SubdomainGroupConfig | NamedGroupConfig;
+
+/**
+ * What `custom.resolve` returns to serve a host as a group other than
+ * `custom.group`. Recognised by `params` being an object, so a resolver that
+ * returns plain params (all strings) is never mistaken for one.
+ */
+export interface CustomDomainMatch {
+  /** The `subdomain` or `name` of a declared group. */
+  group: string;
+  /** That group's params, `req.domain.params` on the host. */
+  params: Record<string, string>;
+}
+
 export interface CustomDomainConfig {
   /**
-   * The `subdomain` of the group a resolved custom host is served as — so
-   * `app.acme.com` runs exactly what `acme.example.com` does.
+   * The group a resolved custom host is served as, unless `resolve` names
+   * another: a group's `subdomain` (so `app.acme.com` runs exactly what
+   * `acme.example.com` does) or its `name`.
    */
   group: string;
 
@@ -327,10 +364,18 @@ export interface CustomDomainConfig {
    * Maps a host outside `domains.root` to the params of `group`, or `null`
    * when the host is not one the app knows. Usually a database lookup;
    * answers are cached for `cacheTtlMs`.
+   *
+   * Return `{ group, params }` instead to serve the host as another declared
+   * group, e.g. a zone's apex with routers of its own next to its tenants
+   * (#1402). Naming a group that is not declared throws on that request.
    */
   resolve: (
     host: string,
-  ) => Record<string, string> | null | Promise<Record<string, string> | null>;
+  ) =>
+    | Record<string, string>
+    | CustomDomainMatch
+    | null
+    | Promise<Record<string, string> | CustomDomainMatch | null>;
 
   /** How long a `resolve` answer, hit or miss, is reused. Defaults to 60s; `0` disables. */
   cacheTtlMs?: number;

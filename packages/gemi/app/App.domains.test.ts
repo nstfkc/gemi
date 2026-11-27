@@ -68,6 +68,14 @@ class AdminApi extends ApiRouter {
   };
 }
 
+// The apex of a second zone, with routes of its own (#1402).
+class ZoneHomeApi extends ApiRouter {
+  routes = {
+    "/who": who("zone-home"),
+    "/search": this.get(() => ({ results: [] })),
+  };
+}
+
 class FallbackApi extends ApiRouter {
   routes = {
     "/who": who("fallback"),
@@ -109,10 +117,16 @@ class AppKernel extends Kernel {
         groups: [
           { subdomain: "admin", api: { rootRouter: AdminApi }, view: { rootRouter: AdminViews } },
           { subdomain: ":tenant", exists: ({ tenant }) => tenant !== "ghost" },
+          { name: "zone-home", api: { rootRouter: ZoneHomeApi } },
         ],
         custom: {
           group: ":tenant",
-          resolve: (host: string) => (host === "app.acme.com" ? { tenant: "acme" } : null),
+          resolve: (host: string) =>
+            host === "app.acme.com"
+              ? { tenant: "acme" }
+              : host === "zone.test"
+                ? { group: "zone-home", params: {} }
+                : null,
           fallback: { api: { rootRouter: FallbackApi } },
         },
         ask: { secret: ASK_SECRET },
@@ -211,6 +225,27 @@ describe("App.fetch routes by host", () => {
       group: ":tenant",
       params: { tenant: "acme" },
       custom: true,
+    });
+  });
+
+  test("a custom domain `resolve` sends to a named group runs that group's routers", async () => {
+    expect((await json("http://zone.test/api/who")).body).toEqual({
+      site: "zone-home",
+      group: "zone-home",
+      params: {},
+      custom: true,
+    });
+    expect((await json("http://zone.test/api/search")).body).toEqual({ results: [] });
+    // Its routes are its own: not the tenants', and not the root's.
+    expect((await json("http://app.acme.com/api/search")).status).toBe(404);
+    expect((await json("http://zone.test/api/only-root")).status).toBe(404);
+  });
+
+  test("a named group is not a subdomain of the root", async () => {
+    // `zone-home` is a valid label, so the param group takes it, not the named group.
+    expect((await json("http://zone-home.gemi.dev/api/who")).body).toMatchObject({
+      site: "root",
+      group: ":tenant",
     });
   });
 

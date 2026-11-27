@@ -7,7 +7,7 @@ import type { Kernel } from "../kernel/Kernel";
 export interface RouteTableEntry {
   /** The route pattern, e.g. `/p/:slug`. */
   path: string;
-  /** The host group: `""` for the root, a subdomain, `"*"` for the custom fallback. */
+  /** The host group: `""` for the root, a subdomain or a group's name, `"*"` for the custom fallback. */
   group: string;
   /** View paths (`app/views/<path>.tsx`), outermost layout first. */
   views: string[];
