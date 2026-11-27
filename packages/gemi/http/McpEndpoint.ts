@@ -211,11 +211,13 @@ export abstract class McpEndpoint<C = undefined> {
 
   /**
    * Once per POST, before the body is read: what this request's tools work
-   * on (the host's tenant, say). `null` answers 404, for a host that has
-   * nothing to serve; a `Response` is answered as it is. Without it the
+   * on (the host's tenant, say). `null` (or `undefined`) answers 404, for a
+   * host that has nothing to serve; a `Response` is answered as it is. Without it the
    * context is `undefined`.
    */
-  context?(req: HttpRequest<any, any>): C | null | Response | Promise<C | null | Response>;
+  context?(
+    req: HttpRequest<any, any>,
+  ): C | null | undefined | Response | Promise<C | null | undefined | Response>;
 
   /** Declares a tool, typed by the endpoint's context and the tool's schema. */
   protected tool<S extends AnySchema>(
@@ -321,7 +323,9 @@ export abstract class McpEndpoint<C = undefined> {
     // neither read nor parsed.
     const context = this.context ? await this.context(req) : (undefined as C);
     if (context instanceof Response) return context;
-    if (context === null) {
+    // `undefined` from a `context()` that forgot to say `null` is a 404 too,
+    // never a context of nothing handed to every tool.
+    if (context === null || (this.context && context === undefined)) {
       return json(errorResponse(null, new JsonRpcError(ErrorCode.InvalidRequest, "Not found.")), 404);
     }
 

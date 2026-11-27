@@ -43,7 +43,8 @@ class ShopMcp extends McpEndpoint<Shop> {
   server = { name: "shop-ucp", version: "2026-08-25", instructions: "A shop." };
 
   context(req: HttpRequest<any, any>) {
-    return shopOf(req);
+    // `undefined` for a host with no shop: answered 404 like `null`.
+    return shopOf(req) ?? undefined;
   }
 
   tools = {
