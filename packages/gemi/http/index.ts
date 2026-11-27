@@ -40,6 +40,14 @@ export {
   type McpToolOutput,
   McpToolDeclaration,
 } from "./McpRouter";
+export {
+  McpEndpoint,
+  McpEndpointError,
+  McpEndpointRoute,
+  type McpEndpointCall,
+  type McpEndpointCaller,
+  type McpEndpointTool,
+} from "./McpEndpoint";
 export type { McpGrant, ProgressUpdate } from "./modelOriginated";
 export {
   createFileResponse,

@@ -154,3 +154,40 @@ export function decodeHeaderValue(value: string): string | null {
     return null;
   }
 }
+
+/**
+ * A modern (2026-07-28) request's headers, checked against its body: the
+ * protocol version, `Mcp-Method` and `Mcp-Name` must repeat what the message
+ * says, so a proxy that routes on headers routes what the server runs.
+ */
+export function checkModernHeaders(req: Request, message: JsonRpcRequest, version: string) {
+  if (!(MODERN_VERSIONS as readonly string[]).includes(version)) {
+    throw new JsonRpcError(
+      ErrorCode.UnsupportedProtocolVersion,
+      "Unsupported protocol version",
+      { supported: SUPPORTED_VERSIONS, requested: version },
+      400,
+    );
+  }
+  const mismatch = (what: string) =>
+    new JsonRpcError(ErrorCode.HeaderMismatch, `Header mismatch: ${what}`, undefined, 400);
+  if (req.headers.get("mcp-protocol-version") !== version) {
+    throw mismatch("MCP-Protocol-Version does not match the protocol version in _meta.");
+  }
+  if (req.headers.get("mcp-method") !== message.method) {
+    throw mismatch("Mcp-Method does not match the method.");
+  }
+  const params = message.params ?? {};
+  const named =
+    message.method === "tools/call" || message.method === "prompts/get"
+      ? params.name
+      : message.method === "resources/read"
+        ? params.uri
+        : undefined;
+  if (named !== undefined) {
+    const header = req.headers.get("mcp-name");
+    if (header === null || decodeHeaderValue(header) !== named) {
+      throw mismatch("Mcp-Name does not match the request's name.");
+    }
+  }
+}
