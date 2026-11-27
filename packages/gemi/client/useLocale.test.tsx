@@ -157,3 +157,30 @@ describe("useLocale().setLocale", () => {
     expect(cookieAtNavigation[0]).toContain("i18n-locale=en-US");
   });
 });
+
+describe("useLocale().setLocale stays on the path the router is on (#1322)", () => {
+  test.each([
+    ["/u/a:b", { id: "a:b" }],
+    ["/u/john@x.com", { id: "john@x.com" }],
+    ["/u/a%2Fb", { id: "a/b" }],
+    ["/", {}],
+  ])("%s", async (pathname, params) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
+
+    const { setLocale, replaced } = renderSetLocale({
+      pathname,
+      params: params as Record<string, string>,
+      search: "?tab=2",
+    });
+    await act(async () => {
+      await setLocale("en-US");
+      await setLocale("de-DE");
+    });
+
+    const prefixed = pathname === "/" ? "/de-DE" : `/de-DE${pathname}`;
+    expect(replaced.map(([path]) => path)).toEqual([`${pathname}?tab=2`, `${prefixed}?tab=2`]);
+  });
+});

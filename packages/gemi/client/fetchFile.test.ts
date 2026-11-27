@@ -33,7 +33,7 @@ describe("fetchBlob", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/pages/p 1/post/image?format=png&scale=2");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/pages/p%201/post/image?format=png&scale=2");
     expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
     expect(blob.size).toBe(3);
     expect(blob.type).toBe("image/png");

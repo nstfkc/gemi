@@ -27,6 +27,8 @@ import { Link } from "gemi/client";
 ```
 
 - `params` — fills dynamic segments; inherits the current route's params if omitted.
+  Pass plain values: each one is percent-encoded into its segment, so `{ id: "a/b" }`
+  links to `/users/a%2Fb`. A wildcard (`:path*`) keeps its `/`s.
 - `search` — query-string values; keys are typed to the target view's input where
   available.
 - `hash` — appends a `#fragment`.
@@ -199,7 +201,8 @@ The browser's own restoration is switched off (`history.scrollRestoration =
 
 ### `useParams`
 
-Returns the dynamic route params for the active route as a plain object:
+Returns the dynamic route params for the active route as a plain object, decoded
+(`{ id: "a/b" }` on `/users/a%2Fb`; see [Routing](./routing.md)):
 
 ```tsx
 import { useParams } from "gemi/client";

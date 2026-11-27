@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { applyParams } from "../utils/applyParams";
+import { canonicalPath } from "../utils/pathParams";
 import { routeHref } from "../utils/routeHref";
 import { isAbsoluteUrl, type AbsoluteUrl } from "../utils/domainUrl";
 import { useLocation } from "./useLocation";
@@ -186,6 +187,12 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
     .filter((item) => !!item)
     .join("");
 
+  // `path` holds re-encoded params and `location` the URL as the browser sent
+  // it, so the two are compared by one spelling (#1322).
+  const isCurrentHref = canonicalPath(currentHref) === canonicalPath(targetHref);
+  const isPendingTarget =
+    isTransitioning && canonicalPath(resolvedPath) === canonicalPath(targetPath ?? "");
+
   // Held in a ref because the prefetch callback is rebuilt on every router
   // render — an effect that depended on it would re-fire on renders that have
   // nothing to do with this link.
@@ -196,7 +203,7 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
 
   // Clicking through to the path we are already on is a shallow navigation —
   // it moves the URL without fetching, so there is nothing to warm.
-  const isShallowTarget = resolvedPath === location.pathname;
+  const isShallowTarget = canonicalPath(resolvedPath) === canonicalPath(location.pathname);
 
   const strategies = !prefetch
     ? []
@@ -307,10 +314,10 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
   return (
     <a
       ref={setAnchorRef}
-      data-active={active || currentHref === targetHref}
+      data-active={active || isCurrentHref}
       // The resolved path, not the template: one template can back a whole list
       // of rows, and only the row that was clicked is heading anywhere.
-      data-pending={isTransitioning && resolvedPath === targetPath}
+      data-pending={isPendingTarget}
       href={targetHref}
       onClick={(e) => {
         // The caller's handler always runs, and runs first: it may want to
@@ -319,16 +326,16 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
         if (leaveClickToBrowser(e)) {
           return;
         }
-        if (currentHref === targetHref) {
+        if (isCurrentHref) {
           e.preventDefault();
           return;
         }
         // Already heading there: `history.push` moved the URL to this link's
         // target and its payload is still loading. Pushing again would only
         // add a duplicate history entry and restart the request (#1048).
-        if (isTransitioning && resolvedPath === targetPath) {
+        if (isPendingTarget) {
           const { pathname, search, hash: urlHash } = window.location;
-          if (`${pathname}${search}${urlHash}` === targetHref) {
+          if (canonicalPath(`${pathname}${search}${urlHash}`) === canonicalPath(targetHref)) {
             e.preventDefault();
             return;
           }
@@ -345,7 +352,7 @@ const RouteLink = memo(<T extends keyof Views>(props: LinkProps<T>) => {
           // navigation is pending the URL already names its target, and a
           // shallow push there would mount the target's views on the previous
           // page's data (#1048).
-          shallow: path === location.pathname,
+          shallow: canonicalPath(path) === canonicalPath(location.pathname),
         } as unknown as never);
       }}
       onMouseEnter={prefetchOn(onMouseEnter, pointerArrived)}

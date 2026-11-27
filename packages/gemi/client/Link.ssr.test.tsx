@@ -195,3 +195,51 @@ describe("Link href to the root route (#1257)", () => {
     expect(html).toContain('data-active="true"');
   });
 });
+
+describe("Link href from decoded route params (#1322)", () => {
+  test.each([
+    ["a/b", "/notes/a%2Fb/edit"],
+    ["100%", "/notes/100%25/edit"],
+    ["a b", "/notes/a%20b/edit"],
+  ])("on the page for %j, an implicit-param link points at %s", (id, href) => {
+    // `useParams()` holds the decoded ID; `Link` falls back to it.
+    const html = renderLink(<Link href={"/notes/:id/edit" as never}>Edit</Link>, "/", {
+      params: { id },
+    });
+    expect(html).toContain(`href="${href}"`);
+  });
+
+  test("a wildcard keeps its slashes", () => {
+    const html = renderLink(
+      <Link href={"/files/:src*" as never} params={{ src: "a/b c" } as never}>
+        File
+      </Link>,
+      "/",
+    );
+    expect(html).toContain('href="/files/a/b%20c"');
+  });
+});
+
+describe("Link to the page on screen, in another spelling (#1322)", () => {
+  test.each([
+    ["/u/john@x.com", "john@x.com"],
+    ["/u/john%40x.com", "john@x.com"],
+    ["/u/c++", "c++"],
+    ["/u/a:b", "a:b"],
+    ["/u/a%2fb", "a/b"],
+  ])("is active and pending on %s", (pathname, id) => {
+    const html = renderLink(<Link href={"/u/:id" as never}>Me</Link>, pathname, {
+      pathname,
+      params: { id },
+    });
+    expect(html).toContain('data-active="true"');
+    expect(html).toContain('data-pending="true"');
+  });
+
+  test("is not active on another page", () => {
+    const html = renderLink(<Link href={"/u/:id" as never} params={{ id: "a/b" } as never}>X</Link>, "/", {
+      pathname: "/u/a/b",
+    });
+    expect(html).toContain('data-active="false"');
+  });
+});

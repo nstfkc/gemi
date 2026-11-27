@@ -1,3 +1,37 @@
+# 0.245.0
+
+## View route parameters are decoded once (#1322)
+
+**Behaviour change (minor version).** View loaders (`req.params`) and view
+components (`useParams()`) now receive path parameters decoded once after route
+matching, as API handlers have since 0.224.0. For `/notes/:id`, the page
+`/notes/a%2Fb` gives `a/b` on a direct visit, after hydration, on an in-app
+navigation and on back/forward. They used to receive the raw capture `a%2Fb`.
+A malformed escape in a matched parameter now renders the `404` view, with
+status 404 on a page load, and on an in-app navigation too.
+
+- Remove manual `decodeURIComponent(params.x)` calls in view loaders and
+  components. For the literal ID `%2F` (URL `/notes/%252F`) a second decode
+  changes the ID to `/`. For `100%` (URL `/notes/100%25`) it throws a
+  `URIError`.
+- IDs that encoding leaves alone, such as `42` or `my-note`, are unchanged.
+- Route URLs built from params now encode each value into its segment:
+  `Link`, `useNavigate`, `usePrefetch`, `Redirect.to`, `Url`, `useQuery`,
+  `useMutation`, `Query.prefetch` and `Query.prefill` (their cache keys too, on
+  the server and the client alike). `<Link href="/notes/:id/edit">` on
+  `/notes/a%2Fb` points at `/notes/a%2Fb/edit`. A wildcard (`:path*`) keeps its
+  `/`s and encodes each segment. **Pass plain values.** A call that encoded a
+  value itself, such as `params: { id: encodeURIComponent(id) }`, now encodes
+  it twice: drop the manual encoding. A value with a space or `%` used to go
+  into the URL raw and now goes in as `%20` or `%25`.
+- `<Page params>` in `gemi/testing` takes decoded values, as `useParams()`
+  returns them.
+- A `:` inside a concrete path (`/u/a:b`) no longer throws `Missing parameter`
+  on the first render: the client router looks a view's data up under the path
+  it is on, as the server filed it. `useSearchParams().push()`
+  and `useLocale()`'s `setLocale` no longer throw it on such a page either: they
+  stay on the path as it is.
+
 # 0.244.0
 
 ## The `access_token` cookie is `SameSite=Lax`

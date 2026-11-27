@@ -21,6 +21,7 @@ import { PrefetchCache } from "./PrefetchCache";
 import { routeDataUrl } from "./helpers/routeDataUrl";
 import { splitLocalePrefix } from "../i18n/localePrefix";
 import { applyParams } from "../utils/applyParams";
+import { decodePathParams } from "../utils/pathParams";
 import { readSettledRoutePayload } from "./helpers/readRoutePayload";
 import { loadViewModule } from "./ComponentContext";
 import { otherBuild } from "./chunkLoadRecovery";
@@ -215,7 +216,11 @@ export const ClientRouterProvider = (
     () => (pathname: string) => {
       const route = findMatchingRouteFromParams(pathname);
       const urlPattern = createURLPattern(route);
-      return urlPattern.exec({ pathname })?.pathname.groups ?? {};
+      // Decoded once after matching, as the server's `matchViewRoute` does, so
+      // a refresh and an in-app navigation hand a view the same ID (#1322).
+      // A malformed escape gets no params: the server matches no route for
+      // it, and the `.json` envelope's `is404` brings up the `404` view.
+      return decodePathParams(urlPattern.exec({ pathname })?.pathname.groups ?? {}) ?? {};
     },
     [findMatchingRouteFromParams],
   );

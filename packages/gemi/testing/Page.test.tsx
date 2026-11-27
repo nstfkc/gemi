@@ -90,6 +90,27 @@ describe("<Page> route state", () => {
     expect(screen.getByText("/app/abc/chat")).toBeDefined();
   });
 
+  test("encodes decoded params into the pathname, keeping a wildcard's slashes (#1322)", () => {
+    function View() {
+      const { pathname } = useLocation();
+      return <div>{pathname}</div>;
+    }
+
+    render(
+      <>
+        <Page pathname="/notes/:id" params={{ id: "a/b" }}>
+          <View />
+        </Page>
+        <Page pathname="/files/:src*" params={{ src: "a/b/c" }}>
+          <View />
+        </Page>
+      </>,
+    );
+
+    expect(screen.getByText("/notes/a%2Fb")).toBeDefined();
+    expect(screen.getByText("/files/a/b/c")).toBeDefined();
+  });
+
   test("accepts search params as a string or an object", () => {
     function View() {
       const searchParams = useSearchParams();

@@ -1,6 +1,5 @@
 import { useLocation } from "./useLocation";
-import { useNavigate } from "./useNavigate";
-import { useParams } from "./useParams";
+import { CONCRETE_PATH, useNavigate } from "./useNavigate";
 import { useRouteData } from "./useRouteData";
 
 const LOCALE_COOKIE = "i18n-locale";
@@ -64,7 +63,6 @@ export function useLocale() {
   const { i18n } = useRouteData();
   const { pathname, search } = useLocation();
   const { replace } = useNavigate();
-  const params = useParams();
 
   const setLocale = async (locale: string) => {
     persistLocale(locale);
@@ -76,7 +74,7 @@ export function useLocale() {
       // TODO: fix: this conversion is wrong, because there can be multiple
       // search params with the same name
       search: Object.fromEntries(urlSearchParams.entries()),
-      params,
+      [CONCRETE_PATH]: true,
     } as any);
   };
 

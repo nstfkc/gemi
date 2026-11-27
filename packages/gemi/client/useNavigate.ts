@@ -28,6 +28,13 @@ type Options<T extends string> = UrlParser<T> extends Record<string, never>
     };
 
 /**
+ * Set by the router's own callers that navigate to the path on screen. The path
+ * is already concrete, so nothing in it is a param: the `:b` of `/u/a:b` is part
+ * of a value (#1322). Not part of the public options.
+ */
+export const CONCRETE_PATH = Symbol("gemi.concretePath");
+
+/**
  * The options for a path that is not a declared route: a URL built at runtime.
  *
  * `params` is present but optional. A concrete path — what `useIntendedUrl()`
@@ -129,8 +136,15 @@ export function useNavigate() {
         localeSegment = "";
       }
 
+      const isConcrete = (options as { [CONCRETE_PATH]?: boolean })[CONCRETE_PATH] === true;
+      // As `applyParams` does: the root is `""`, and a leading `//` is one slash,
+      // so it never names another host.
+      const resolvedPath = isConcrete
+        ? path === "/" ? "" : path.replace(/^\/{2,}/, "/")
+        : applyParams(path, params);
+
       const finalPath = routeHref(
-        `${localeSegment ? `/${localeSegment}` : ""}${applyParams(path, params)}`,
+        `${localeSegment ? `/${localeSegment}` : ""}${resolvedPath}`,
         urlSearchParams.toString(),
         hash ?? "",
       );
