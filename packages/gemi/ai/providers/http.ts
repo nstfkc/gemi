@@ -468,6 +468,9 @@ export function boundedBody(
   if (!body || (!idleMs && !maxMs)) return body;
   const deadline = maxMs ? performance.now() + maxMs : Infinity;
   const reader = body.getReader();
+  // Bun can report a rejection of `closed` as unhandled, and nothing here reads
+  // it (see `decodeChunks`, #1407).
+  reader.closed.catch(() => {});
   return new ReadableStream<Uint8Array>(
     {
       async pull(controller) {
