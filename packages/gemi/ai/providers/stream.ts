@@ -525,13 +525,21 @@ export function toUsage(raw: any): Usage {
 }
 
 /** A `ReadableStream` of bytes to the string chunks the parser wants. Split out
- *  so the parser never has to know it came from a socket. */
+ *  so the parser never has to know it came from a socket.
+ *
+ *  A consumer that stops before the end (an aborted run, a `break`, an error
+ *  thrown at the `yield`) cancels the body, so the provider's connection goes
+ *  with it rather than when the fetch is aborted, if it ever is (#1407). */
 export async function* decodeChunks(
   body: ReadableStream<Uint8Array> | null,
 ): AsyncGenerator<string> {
   if (!body) return;
   const reader = body.getReader();
+  // Bun rejects `closed` with "Reader released" when the lock goes, and reports
+  // it as unhandled when nothing listens (#1407). Nothing here needs it.
+  reader.closed.catch(() => {});
   const decoder = new TextDecoder();
+  let ended = false;
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -540,9 +548,17 @@ export async function* decodeChunks(
       // reads, and decoding each read on its own turns it into two U+FFFDs.
       if (value) yield decoder.decode(value, { stream: true });
     }
+    ended = true;
     const tail = decoder.decode();
     if (tail) yield tail;
   } finally {
-    reader.releaseLock();
+    // Not awaited: a source slow to cancel must not hold up the consumer's
+    // `return()`. The cancel takes effect at once; only its promise is late.
+    if (!ended) reader.cancel().catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // Released already; there is nothing left to let go of.
+    }
   }
 }

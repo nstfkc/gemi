@@ -6,6 +6,7 @@ import type { QueryConfig } from "./QueryManagerContext";
 import { ErrorBoundary } from "react-error-boundary";
 import { initialViewModulesReady } from "./ComponentContext";
 import { documentElement } from "./documentTree";
+import { describeCaughtError } from "./describeCaughtError";
 import {
   configureChunkLoadRecovery,
   recoverFromChunkLoadError,
@@ -141,15 +142,20 @@ function hydrate(RootLayout: ComponentType<any>, options: InitOptions) {
       </ErrorBoundary>,
     ),
     {
-      onCaughtError: (error) => {
+      onCaughtError: (error, errorInfo) => {
         console.error(error);
         // @ts-ignore
         if (import.meta.env.DEV) {
+          // The value alone can print as `{}` (#1407); this line always says
+          // what was thrown and where.
+          const description = describeCaughtError(error, errorInfo?.componentStack);
+          console.error(description);
           const ErrorOverlay = customElements.get("vite-error-overlay");
           if (ErrorOverlay) {
             const overlay = new ErrorOverlay({
-              message: (error as any).message,
-              stack: (error as any).stack || "",
+              message:
+                error instanceof Error ? error.message : description.split("\n", 1)[0],
+              stack: (error as any)?.stack || "",
             });
             document.body.appendChild(overlay);
           }
