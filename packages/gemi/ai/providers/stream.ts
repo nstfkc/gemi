@@ -535,8 +535,8 @@ export async function* decodeChunks(
 ): AsyncGenerator<string> {
   if (!body) return;
   const reader = body.getReader();
-  // Bun rejects `closed` with "Reader released" when the lock goes, and reports
-  // it as unhandled when nothing listens (#1407). Nothing here needs it.
+  // Bun rejects `closed` with "Reader released" when the lock goes, and has
+  // been seen reporting that as unhandled mid-run (#1407). Nothing here needs it.
   reader.closed.catch(() => {});
   const decoder = new TextDecoder();
   let ended = false;
